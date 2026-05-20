@@ -1,0 +1,81 @@
+services:
+    # ==========================================
+    # 1. Database: PostgreSQL
+    # ==========================================
+    postgres-db:
+        image: postgres:16
+        container_name: game-database
+        restart: always
+        environment:
+            POSTGRES_USER: mladmin
+            POSTGRES_PASSWORD: password
+            POSTGRES_DB: ml_game_db
+        ports:
+            - "5432:5432"
+        volumes:
+            - pgdata:/var/lib/postgresql/data
+
+    # ==========================================
+    # 2. Database GUI: pgAdmin
+    # ==========================================
+    pgadmin:
+        image: dpage/pgadmin4
+        container_name: game-pgadmin
+        restart: always
+        environment:
+            PGADMIN_DEFAULT_EMAIL: admin@game.com
+            PGADMIN_DEFAULT_PASSWORD: admin
+        ports:
+            - "5050:80"
+        depends_on:
+            - postgres-db
+
+    # ==========================================
+    # 3. API Gateway: Spring Boot
+    # ==========================================
+    backend:
+        build:
+            context: ./server
+        container_name: spring-api
+        ports:
+            - "8080:8080"
+        environment:
+            # This tells Spring Boot to look for the database container on the internal network
+            SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-db:5432/ml_game_db
+            SPRING_DATASOURCE_USERNAME: mladmin
+            SPRING_DATASOURCE_PASSWORD: password
+        depends_on:
+            - postgres-db
+
+    # ==========================================
+    # 4. ML Engine: Node.js + TF.js
+    # ==========================================
+    ml-server:
+        build:
+            context: ./ml-server
+        container_name: ml-engine
+        ports:
+            - "3000:3000"
+        volumes:
+            - ./ml-server:/app
+            - /app/node_modules
+
+        command: /bin/sh -c "npm install && npm start || while sleep 1000; do :; done"
+
+    frontend:
+        build:
+            context: ./frontend
+        container_name: react-client
+        ports:
+            - "5173:5173"
+        volumes:
+            - ./frontend:/app
+            - /app/node_modules
+        environment:
+            - CHOKIDAR_USEPOLLING=true
+        depends_on:
+            - backend
+            - ml-server
+
+volumes:
+    pgdata:

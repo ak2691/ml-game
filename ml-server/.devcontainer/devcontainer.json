@@ -1,0 +1,17 @@
+{
+    "name": "Node.js ML Engine",
+    "dockerComposeFile": [
+        "../../docker-compose.yml"
+    ],
+    "service": "ml-server",
+    "workspaceFolder": "/app",
+    "customizations": {
+        "vscode": {
+            "settings": {},
+            "extensions": [
+                "dbaeumer.vscode-eslint"
+            ]
+        }
+    },
+    "postCreateCommand": "npm install"
+}

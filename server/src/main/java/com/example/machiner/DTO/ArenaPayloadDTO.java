@@ -1,0 +1,14 @@
+package com.example.machiner.DTO;
+
+import lombok.AllArgsConstructor;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import java.util.List;
+
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class ArenaPayloadDTO {
+    private CoordinateDTO playerModel;
+    private List<ShapeObjectDTO> objects;
+}
