@@ -10,5 +10,6 @@ import java.util.List;
 @NoArgsConstructor
 public class ArenaPayloadDTO {
     private CoordinateDTO playerModel;
+    private Integer reward;
     private List<ShapeObjectDTO> objects;
 }

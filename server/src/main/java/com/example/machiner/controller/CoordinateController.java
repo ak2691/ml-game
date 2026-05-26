@@ -30,7 +30,7 @@ public class CoordinateController {
 
         // 2. Log the Environment Objects
         log.info("Environment Objects count: {}", payload.getObjects().size());
-
+        log.info("Reward score: {}", payload.getReward());
         payload.getObjects().forEach(obj -> {
             log.info("   Obj [{}] - Type: {}, X: {}, Y: {}, Size: {}, Rotation: {}°",
                     obj.getId().substring(Math.max(0, obj.getId().length() - 4)), // Just print last 4 chars of ID
