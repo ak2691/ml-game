@@ -14,7 +14,7 @@ import com.example.machiner.DTO.CoordinateDTO;
 
 @RestController
 @RequestMapping("/api")
-
+// Testing github actions new comment check
 public class CoordinateController {
 
     private static final Logger log = LoggerFactory.getLogger(CoordinateController.class);
