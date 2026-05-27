@@ -1,4 +1,4 @@
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 
 const CANVAS_SIZE = 800;
 const MAIN_RADIUS = 30;
@@ -54,7 +54,10 @@ export default function ShapeObject({ shape, isSelected, onSelect, onDragEnd }) 
 
     // Keep a live ref to shape position so move handler never uses a stale closure
     const shapeRef = useRef({ x: shape.x, y: shape.y });
-    shapeRef.current = { x: shape.x, y: shape.y };
+
+    useEffect(() => {
+        shapeRef.current = { x: shape.x, y: shape.y };
+    }, [shape.x, shape.y]);
 
     const handleMouseDown = (e) => {
         e.stopPropagation();
