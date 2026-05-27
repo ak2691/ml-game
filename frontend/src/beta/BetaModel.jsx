@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import Canvas from "./Canvas";
 import Toolbar from "./Toolbar";
-import PropertiesPanel from "./Propertiespanel";
+import PropertiesPanel from "./PropertiesPanel";
 import "./BetaModel.css";
 import { loadOrCreateModel, deleteSavedModel, createModel } from "../ml/Model";
 import {
