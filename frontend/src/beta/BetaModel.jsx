@@ -8,7 +8,7 @@ import {
     predictDirection, clearMemory, stageStep, clearStaging,
     applyBatchReward, applyOverrideVector, loadTrainerState, MAX_REWIND_STEPS
 } from "../ml/Trainer";
-
+//test
 const CANVAS_SIZE = 800;
 const AUTO_SPEED = 15;
 const AUTO_STEP_MS = 180;
@@ -474,9 +474,9 @@ export default function BetaModel() {
                         <Canvas
                             shapes={shapes}
                             selectedId={selectedId}
-                            onSelectShape={isEditingArena ? setSelectedId : () => {}}
-                            onUpdateShape={isEditingArena ? handleUpdateShape : () => {}}
-                            onDeselectAll={isEditingArena ? () => setSelectedId(null) : () => {}}
+                            onSelectShape={isEditingArena ? setSelectedId : () => { }}
+                            onUpdateShape={isEditingArena ? handleUpdateShape : () => { }}
+                            onDeselectAll={isEditingArena ? () => setSelectedId(null) : () => { }}
                         />
 
                         {!isEditingArena && !isCleanPlayback && hasStagedSteps && (
