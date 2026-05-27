@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
-import BetaModel from './beta/betamodel'
+import BetaModel from './beta/BetaModel'
 import './App.css'
 
 
