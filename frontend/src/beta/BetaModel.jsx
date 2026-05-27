@@ -8,7 +8,7 @@ import {
     predictDirection, clearMemory, stageStep, clearStaging,
     applyBatchReward, applyOverrideVector, loadTrainerState, MAX_REWIND_STEPS
 } from "../ml/Trainer";
-
+//comment to trigger change
 const CANVAS_SIZE = 800;
 const AUTO_SPEED = 15;
 const AUTO_STEP_MS = 180;
