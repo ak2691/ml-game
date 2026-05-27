@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import Canvas from "./Canvas";
 import Toolbar from "./Toolbar";
-import PropertiesPanel from "./PropertiesPanel";
+import PropertiesPanel from "./Propertiespanel";
 import "./BetaModel.css";
 import { loadOrCreateModel, deleteSavedModel, createModel } from "../ml/Model";
 import {
@@ -474,9 +474,9 @@ export default function BetaModel() {
                         <Canvas
                             shapes={shapes}
                             selectedId={selectedId}
-                            onSelectShape={isEditingArena ? setSelectedId : () => {}}
-                            onUpdateShape={isEditingArena ? handleUpdateShape : () => {}}
-                            onDeselectAll={isEditingArena ? () => setSelectedId(null) : () => {}}
+                            onSelectShape={isEditingArena ? setSelectedId : () => { }}
+                            onUpdateShape={isEditingArena ? handleUpdateShape : () => { }}
+                            onDeselectAll={isEditingArena ? () => setSelectedId(null) : () => { }}
                         />
 
                         {!isEditingArena && !isCleanPlayback && hasStagedSteps && (
