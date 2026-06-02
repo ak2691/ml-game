@@ -1,10 +1,10 @@
 package com.example.machiner.service;
 
 import com.example.machiner.domain.ModelSubmission;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.stereotype.Component;
+import tools.jackson.databind.json.JsonMapper;
 
 @Component
 public class ModelSubmissionValidator {
@@ -15,10 +15,10 @@ public class ModelSubmissionValidator {
     private static final int MAX_MODEL_HASH_LENGTH = 128;
     private static final String MOVEMENT_ACTION_SCHEMA_VERSION = "movement-v1";
 
-    private final ObjectMapper objectMapper;
+    private final JsonMapper jsonMapper;
 
-    public ModelSubmissionValidator(ObjectMapper objectMapper) {
-        this.objectMapper = objectMapper;
+    public ModelSubmissionValidator(JsonMapper jsonMapper) {
+        this.jsonMapper = jsonMapper;
     }
 
     public ModelSubmissionValidationResult validate(ModelSubmission submission) {
@@ -82,7 +82,7 @@ public class ModelSubmissionValidator {
         }
 
         try {
-            objectMapper.readTree(value);
+            jsonMapper.readTree(value);
         } catch (Exception ex) {
             errors.add(field + " must be valid JSON");
         }

@@ -3,11 +3,23 @@ import Canvas from "./Canvas";
 import Toolbar from "./Toolbar";
 import PropertiesPanel from "./PropertiesPanel";
 import "./BetaModel.css";
-import { loadOrCreateModel, deleteSavedModel, createModel } from "../ml/Model";
+import { loadOrCreateModel, deleteSavedModel, createModel, warmUpModel } from "../ml/Model";
 import {
     predictDirection, clearMemory, stageStep, clearStaging,
-    applyBatchReward, applyOverrideVector, loadTrainerState, MAX_REWIND_STEPS
+    applyBatchReward, applyOverrideVector, loadTrainerState, MAX_REWIND_STEPS,
+    getRewardEvents, getTrainingStepCount
 } from "../ml/Trainer";
+import {
+    buildModelSubmissionPayload,
+    createTrainingSession,
+    fetchTrainingSessionDuration,
+    submitModelPayload
+} from "../ml/ModelSubmission";
+import {
+    ACTION_SCHEMA_VERSION,
+    FEATURE_SCHEMA_VERSION,
+    MODEL_ARCHITECTURE_VERSION,
+} from "../ml/ModelSubmissionContract";
 //test
 const CANVAS_SIZE = 800;
 const AUTO_SPEED = 15;
@@ -24,6 +36,7 @@ const MAIN_SHAPE = {
 
 let _id = 1;
 const genId = () => `shape-${Date.now()}-${_id++}`;
+const SESSION_KEY = "arena-training-session-id";
 
 export default function BetaModel() {
     const [shapes, setShapes] = useState([MAIN_SHAPE]);
@@ -38,10 +51,12 @@ export default function BetaModel() {
     const [replayIndex, setReplayIndex] = useState(0);
     const [dragState, setDragState] = useState(null);
     const [isEditingArena, setIsEditingArena] = useState(true);
+    const [trainingSessionId, setTrainingSessionId] = useState(() => localStorage.getItem(SESSION_KEY));
 
     const modelRef = useRef(null);
     const autoIntervalRef = useRef(null);
     const lastPlayModeRef = useRef("coach");
+    const wasPlayingBeforeEditRef = useRef(false);
     const selectedShape = shapes.find((s) => s.id === selectedId) ?? null;
     const selectedReplayCount = Math.min(rewindStepCount, recentMovements.length);
     const replayMovements = recentMovements.slice(-selectedReplayCount);
@@ -55,7 +70,11 @@ export default function BetaModel() {
         loadOrCreateModel().then((m) => {
             modelRef.current = m;
             console.log("[arena-ml] Model ready.");
+            warmUpModel(m).then(() => {
+                console.log("[arena-ml] Model warmed up.");
+            });
         });
+        ensureTrainingSession();
 
         return () => {
             if (autoIntervalRef.current) {
@@ -63,6 +82,33 @@ export default function BetaModel() {
             }
         };
     }, []);
+
+    const ensureTrainingSession = async () => {
+        try {
+            const session = await createTrainingSession();
+            localStorage.setItem(SESSION_KEY, session.trainingSessionId);
+            setTrainingSessionId(session.trainingSessionId);
+            return session.trainingSessionId;
+        } catch (err) {
+            console.warn("[arena-ml] Unable to create server training session.", err);
+            setSubmitStatus({
+                ok: false,
+                message: "Server training session unavailable",
+            });
+            setTimeout(() => setSubmitStatus(null), 3000);
+            return null;
+        }
+    };
+
+    const fetchTrustedTrainingDuration = async (sessionId = trainingSessionId) => {
+        if (!sessionId) return null;
+
+        try {
+            return await fetchTrainingSessionDuration(sessionId);
+        } catch {
+            return null;
+        }
+    };
 
     useEffect(() => {
         if (selectedReplayCount === 0) return;
@@ -199,7 +245,14 @@ export default function BetaModel() {
         setDragState(null);
     };
 
+    const enterPausedPlayMode = () => {
+        setIsEditingArena(false);
+        setIsCleanPlayback(lastPlayModeRef.current === "clean");
+        setIsAutoPlaying(false);
+    };
+
     const enterEditMode = () => {
+        wasPlayingBeforeEditRef.current = isAutoPlaying;
         stopAutoPlay();
         clearCoachingWindow();
         setIsCleanPlayback(false);
@@ -240,7 +293,11 @@ export default function BetaModel() {
 
             if (e.key.toLowerCase() === "e") {
                 if (isEditingArena) {
-                    runAutoPlay(lastPlayModeRef.current !== "clean");
+                    if (wasPlayingBeforeEditRef.current) {
+                        runAutoPlay(lastPlayModeRef.current !== "clean");
+                    } else {
+                        enterPausedPlayMode();
+                    }
                 } else {
                     enterEditMode();
                 }
@@ -271,12 +328,52 @@ export default function BetaModel() {
         clearMemory();
         clearStaging();
         modelRef.current = createModel();
+        await ensureTrainingSession();
         setHasStagedSteps(false);
         setStagedCount(0);
         setRecentMovements([]);
         setReplayIndex(0);
         setSubmitStatus({ ok: true, message: "Brain wiped. Starting fresh." });
         setTimeout(() => setSubmitStatus(null), 3000);
+    };
+
+    const handleSubmitModel = async () => {
+        if (!modelRef.current) return;
+        setSubmitStatus({ ok: null, message: "Submitting model..." });
+
+        try {
+            const activeTrainingSessionId = trainingSessionId ?? await ensureTrainingSession();
+            if (!activeTrainingSessionId) {
+                throw new Error("A server training session is required before submission.");
+            }
+            const trustedDurationMs = await fetchTrustedTrainingDuration(activeTrainingSessionId);
+            const rewardEvents = getRewardEvents();
+            const payload = await buildModelSubmissionPayload({
+                model: modelRef.current,
+                trainingSessionId: activeTrainingSessionId,
+                trainingSteps: Math.max(
+                    getTrainingStepCount(),
+                    rewardEvents.totals?.rewardedStepCount ?? 0
+                ),
+                rewardEvents,
+            });
+
+            payload.trainingDurationMs = trustedDurationMs;
+
+            const result = await submitModelPayload(payload);
+            console.info("[arena-ml] Submitted model contract:", payload);
+            setSubmitStatus({
+                ok: result.accepted !== false,
+                message: result.message ?? "Model contract submitted",
+            });
+        } catch (err) {
+            setSubmitStatus({
+                ok: false,
+                message: err.message,
+            });
+        }
+
+        setTimeout(() => setSubmitStatus(null), 4000);
     };
 
     const handlePointerDown = (e) => {
@@ -441,9 +538,19 @@ export default function BetaModel() {
                 </div>
 
                 <div className="flex items-center gap-4">
+                    <div className="hidden xl:flex flex-col items-end font-mono text-[10px] tracking-widest text-ink-muted leading-tight">
+                        <span>{MODEL_ARCHITECTURE_VERSION}</span>
+                        <span>{FEATURE_SCHEMA_VERSION} / {ACTION_SCHEMA_VERSION}</span>
+                    </div>
                     <span className="font-mono text-[11px] tracking-widest text-ink-muted">
                         {shapes.length - 1} OBJECTS
                     </span>
+                    <button
+                        onClick={handleSubmitModel}
+                        className="text-[10px] bg-cyan-900/40 hover:bg-cyan-800 text-cyan-200 border border-cyan-800/50 px-2 py-1 rounded"
+                    >
+                        SUBMIT MODEL
+                    </button>
                     <button
                         onClick={handleResetModel}
                         className="text-[10px] bg-red-900/30 hover:bg-red-800 text-red-400 border border-red-800/50 px-2 py-1 rounded"

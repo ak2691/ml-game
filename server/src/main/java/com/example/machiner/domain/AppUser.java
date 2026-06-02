@@ -20,6 +20,12 @@ public class AppUser {
     @Column(nullable = false, length = 50)
     private String username;
 
+    @Column(nullable = false, length = 255)
+    private String email;
+
+    @Column(name = "normalized_email", nullable = false, length = 255)
+    private String normalizedEmail;
+
     @Column(name = "password_hash")
     private String passwordHash;
 
@@ -43,6 +49,22 @@ public class AppUser {
 
     public void setUsername(String username) {
         this.username = username;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getNormalizedEmail() {
+        return normalizedEmail;
+    }
+
+    public void setNormalizedEmail(String normalizedEmail) {
+        this.normalizedEmail = normalizedEmail;
     }
 
     public String getPasswordHash() {

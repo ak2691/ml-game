@@ -4,12 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.domain.ModelSubmission;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.json.JsonMapper;
 
 class ModelSubmissionValidatorTest {
 
-    private final ModelSubmissionValidator validator = new ModelSubmissionValidator(new ObjectMapper());
+    private final ModelSubmissionValidator validator = new ModelSubmissionValidator(new JsonMapper());
 
     @Test
     void acceptsMovementModelSubmissionMetadata() {

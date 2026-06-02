@@ -1,0 +1,49 @@
+package com.example.machiner.controller;
+
+import com.example.machiner.DTO.ModelSubmissionPayloadDTO;
+import com.example.machiner.DTO.ModelSubmissionValidationResponseDTO;
+import com.example.machiner.service.ModelSubmissionService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/model-submissions")
+public class ModelSubmissionController {
+
+    private static final Logger log = LoggerFactory.getLogger(ModelSubmissionController.class);
+    private final ModelSubmissionService modelSubmissionService;
+
+    public ModelSubmissionController(ModelSubmissionService modelSubmissionService) {
+        this.modelSubmissionService = modelSubmissionService;
+    }
+
+    @PostMapping
+    public ResponseEntity<ModelSubmissionValidationResponseDTO> submitModel(
+            @RequestBody ModelSubmissionPayloadDTO payload,
+            Authentication authentication) {
+        ModelSubmissionValidationResponseDTO validation = modelSubmissionService.submit(payload, authentication);
+
+        log.info(
+                "Model submission persisted. id={}, accepted={}, session={}, architecture={}, features={}, actions={}, steps={}, submittedHash={}, computedHash={}",
+                validation.getModelSubmissionId(),
+                validation.isAccepted(),
+                payload == null ? null : payload.getTrainingSessionId(),
+                payload == null ? null : payload.getArchitectureVersion(),
+                payload == null ? null : payload.getFeatureSchemaVersion(),
+                payload == null ? null : payload.getActionSchemaVersion(),
+                payload == null ? null : payload.getTrainingSteps(),
+                payload == null ? null : payload.getModelHash(),
+                validation.getComputedModelHash());
+
+        return ResponseEntity
+                .status(validation.isAccepted() ? HttpStatus.ACCEPTED : HttpStatus.BAD_REQUEST)
+                .body(validation);
+    }
+}
