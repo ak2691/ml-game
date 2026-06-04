@@ -1,6 +1,7 @@
 const CSRF_COOKIE_NAME = "XSRF-TOKEN";
 const CSRF_HEADER_NAME = "X-XSRF-TOKEN";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
+let cachedToken = null;
 
 function readCookie(name) {
     const cookie = document.cookie
@@ -15,6 +16,30 @@ export function csrfHeaders(method = "GET") {
         return {};
     }
 
-    const token = readCookie(CSRF_COOKIE_NAME);
+    const token = cachedToken ?? readCookie(CSRF_COOKIE_NAME);
     return token ? { [CSRF_HEADER_NAME]: token } : {};
+}
+
+export async function ensureCsrfHeaders(method = "GET", apiBaseUrl = "http://localhost:8080") {
+    if (SAFE_METHODS.has(method.toUpperCase())) {
+        return {};
+    }
+
+    const response = await fetch(`${apiBaseUrl}/api/auth/csrf`, {
+        cache: "no-store",
+        credentials: "include",
+    });
+    const body = await response.json().catch(() => ({}));
+
+    if (response.ok && body.token) {
+        cachedToken = body.token;
+        return { [body.headerName ?? CSRF_HEADER_NAME]: body.token };
+    }
+
+    const fallbackToken = cachedToken ?? readCookie(CSRF_COOKIE_NAME);
+    if (fallbackToken) {
+        return { [CSRF_HEADER_NAME]: fallbackToken };
+    }
+
+    throw new Error(`Unable to fetch CSRF token (${response.status})`);
 }

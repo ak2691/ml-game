@@ -13,6 +13,14 @@ import { INPUT_SIZE } from "./Featurebuilder";
 const MODEL_KEY = "indexeddb://arena-model";
 const LEGACY_MODEL_KEY = "localstorage://arena-model";
 
+export function getMatchModelKey(matchId, userId) {
+    if (!matchId || !userId) {
+        throw new Error("matchId and userId are required for match model storage.");
+    }
+
+    return `indexeddb://arena-match-model-${matchId}-${userId}`;
+}
+
 export function createModel() {
     const model = tf.sequential({
         layers: [
@@ -20,13 +28,13 @@ export function createModel() {
                 inputShape: [INPUT_SIZE],
                 units: 64,
                 activation: "relu",
-                kernelInitializer: "glorotUniform",
+                kernelInitializer: "heNormal",
                 name: "hidden1",
             }),
             tf.layers.dense({
                 units: 32,
                 activation: "relu",
-                kernelInitializer: "glorotUniform",
+                kernelInitializer: "heNormal",
                 name: "hidden2",
             }),
             tf.layers.dense({
@@ -56,9 +64,9 @@ export async function warmUpModel(model) {
     });
 }
 
-export async function saveModel(model) {
+export async function saveModel(model, storageKey = MODEL_KEY) {
     try {
-        await model.save(MODEL_KEY);
+        await model.save(storageKey);
         console.log("[arena-ml] Model saved.");
     } catch (err) {
         console.warn("[arena-ml] Save failed:", err);
@@ -76,6 +84,22 @@ export async function loadOrCreateModel() {
     }
 }
 
+export async function loadOrCreateMatchModel(matchId, userId) {
+    const storageKey = getMatchModelKey(matchId, userId);
+
+    try {
+        const model = await tf.loadLayersModel(storageKey);
+        compileModel(model);
+        console.log("[arena-ml] Loaded existing match model from IndexedDB.");
+        return model;
+    } catch {
+        console.log("[arena-ml] No saved match model found; creating fresh match model.");
+        const model = createModel();
+        await saveModel(model, storageKey);
+        return model;
+    }
+}
+
 export async function deleteSavedModel() {
     try {
         await tf.io.removeModel(MODEL_KEY);
@@ -83,6 +107,15 @@ export async function deleteSavedModel() {
         console.log("[arena-ml] Model deleted from browser storage.");
     } catch {
         console.log("[arena-ml] No saved model found to delete.");
+    }
+}
+
+export async function deleteMatchModel(matchId, userId) {
+    try {
+        await tf.io.removeModel(getMatchModelKey(matchId, userId));
+        console.log("[arena-ml] Match model deleted from browser storage.");
+    } catch {
+        console.log("[arena-ml] No saved match model found to delete.");
     }
 }
 

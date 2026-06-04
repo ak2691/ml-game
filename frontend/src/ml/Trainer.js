@@ -1,5 +1,5 @@
 import * as tf from "@tensorflow/tfjs";
-import { buildInputVector } from "./Featurebuilder";
+import { buildInputVector, INPUT_SIZE } from "./Featurebuilder";
 import { saveModel } from "./Model";
 
 const MAX_MEMORY = 2000;
@@ -10,6 +10,9 @@ let replayBuffer = [];
 let stagingBuffer = [];
 let rewardEvents = [];
 let persistenceTimer = null;
+let persistenceEnabled = true;
+let trainerStatePersistenceEnabled = true;
+let modelStorageKey = null;
 
 const EPSILON_START = 0.9;
 const EPSILON_MIN = 0.05;
@@ -22,9 +25,34 @@ const REWARD_EVENTS_KEY = "arena-trainer-reward-events";
 const MAX_REWARD_EVENTS = 500;
 
 export function saveTrainerState() {
+    if (!persistenceEnabled || !trainerStatePersistenceEnabled) return;
+
     localStorage.setItem(MEMORY_KEY, JSON.stringify(replayBuffer));
     localStorage.setItem(STEP_KEY, trainStepCount.toString());
     localStorage.setItem(REWARD_EVENTS_KEY, JSON.stringify(rewardEvents));
+}
+
+export function setTrainerPersistenceEnabled(enabled, options = {}) {
+    persistenceEnabled = enabled;
+    trainerStatePersistenceEnabled = options.trainerState ?? true;
+    modelStorageKey = options.modelStorageKey ?? null;
+
+    if (!persistenceEnabled && persistenceTimer) {
+        clearTimeout(persistenceTimer);
+        persistenceTimer = null;
+    }
+}
+
+export function resetTrainerRuntimeState() {
+    if (persistenceTimer) {
+        clearTimeout(persistenceTimer);
+        persistenceTimer = null;
+    }
+
+    replayBuffer = [];
+    stagingBuffer = [];
+    rewardEvents = [];
+    trainStepCount = 0;
 }
 
 export function loadTrainerState() {
@@ -83,6 +111,26 @@ export function getEpsilon() {
     return Math.max(EPSILON_MIN, EPSILON_START * Math.pow(EPSILON_DECAY, trainStepCount));
 }
 
+export async function warmUpTraining(model) {
+    await tf.ready();
+
+    const inputTensor = tf.zeros([BATCH_SIZE, INPUT_SIZE]);
+    const targetTensor = model.predict(inputTensor);
+
+    try {
+        await model.fit(inputTensor, targetTensor, {
+            epochs: 1,
+            batchSize: BATCH_SIZE,
+            shuffle: false,
+            verbose: 0,
+        });
+        console.log("[arena-ml] Training path warmed up.");
+    } finally {
+        inputTensor.dispose();
+        targetTensor.dispose();
+    }
+}
+
 function rememberSample(stateSnapshot, target) {
     const inputVector = buildInputVector(stateSnapshot);
 
@@ -112,13 +160,15 @@ function sampleReplayBatch(batchSize) {
 }
 
 function scheduleTrainerPersistence(model) {
+    if (!persistenceEnabled) return;
+
     if (persistenceTimer) {
         clearTimeout(persistenceTimer);
     }
 
     persistenceTimer = setTimeout(() => {
         persistenceTimer = null;
-        saveModel(model);
+        saveModel(model, modelStorageKey ?? undefined);
         saveTrainerState();
     }, 100);
 }
@@ -248,14 +298,7 @@ export function predictDirection(model, payload) {
 }
 
 export function clearMemory() {
-    if (persistenceTimer) {
-        clearTimeout(persistenceTimer);
-        persistenceTimer = null;
-    }
-    replayBuffer = [];
-    stagingBuffer = [];
-    rewardEvents = [];
-    trainStepCount = 0;
+    resetTrainerRuntimeState();
     localStorage.removeItem(MEMORY_KEY);
     localStorage.removeItem(STEP_KEY);
     localStorage.removeItem(REWARD_EVENTS_KEY);

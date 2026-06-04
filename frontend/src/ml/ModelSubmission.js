@@ -7,7 +7,9 @@ import {
     MODEL_SUBMISSION_ENDPOINT,
     TRAINING_SESSION_ENDPOINT,
 } from "./ModelSubmissionContract";
-import { csrfHeaders } from "../security/csrf";
+import { ensureCsrfHeaders } from "../security/csrf";
+
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 
 function arrayBufferToBase64(buffer) {
     const bytes = new Uint8Array(buffer);
@@ -76,7 +78,7 @@ export async function submitModelPayload(payload) {
         credentials: "include",
         headers: {
             "Content-Type": "application/json",
-            ...csrfHeaders("POST"),
+            ...(await ensureCsrfHeaders("POST", API_BASE_URL)),
         },
         body: JSON.stringify(payload),
     });
@@ -99,17 +101,26 @@ export async function createTrainingSession() {
         credentials: "include",
         headers: {
             "Content-Type": "application/json",
-            ...csrfHeaders("POST"),
+            ...(await ensureCsrfHeaders("POST", API_BASE_URL)),
         },
     });
 
-    const body = await response.json().catch(() => ({}));
+    const responseText = await response.text();
+    const body = responseText ? safeJson(responseText) : {};
 
     if (!response.ok) {
-        throw new Error(body.message ?? `Training session failed with ${response.status}`);
+        throw new Error(body.message ?? responseText ?? `Training session failed with ${response.status}`);
     }
 
     return body;
+}
+
+function safeJson(text) {
+    try {
+        return JSON.parse(text);
+    } catch {
+        return {};
+    }
 }
 
 export async function fetchTrainingSessionDuration(trainingSessionId) {

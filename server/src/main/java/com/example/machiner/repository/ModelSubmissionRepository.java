@@ -13,5 +13,7 @@ public interface ModelSubmissionRepository extends JpaRepository<ModelSubmission
 
     List<ModelSubmission> findByStatusOrderBySubmittedAtAsc(ModelSubmissionStatus status);
 
+    Optional<ModelSubmission> findByIdAndUserId(UUID id, UUID userId);
+
     Optional<ModelSubmission> findByModelHash(String modelHash);
 }

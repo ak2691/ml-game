@@ -56,6 +56,10 @@ public class ModelSubmission {
     @Column(name = "client_build_version", length = 100)
     private String clientBuildVersion;
 
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "model_artifacts", nullable = false)
+    private String modelArtifacts = "{}";
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
     private ModelSubmissionStatus status = ModelSubmissionStatus.PENDING_VALIDATION;
@@ -152,6 +156,14 @@ public class ModelSubmission {
 
     public void setClientBuildVersion(String clientBuildVersion) {
         this.clientBuildVersion = clientBuildVersion;
+    }
+
+    public String getModelArtifacts() {
+        return modelArtifacts;
+    }
+
+    public void setModelArtifacts(String modelArtifacts) {
+        this.modelArtifacts = modelArtifacts;
     }
 
     public ModelSubmissionStatus getStatus() {

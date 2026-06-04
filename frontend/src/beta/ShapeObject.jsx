@@ -42,6 +42,18 @@ function ShapeVisual({ shape, isSelected }) {
         );
     }
 
+    if (type === "opponentModel") {
+        return (
+            <div
+                style={{ width: size, height: size }}
+                className={`rounded-full border-2 bg-fuchsia-500/10 flex items-center justify-center transition-all duration-100 ${sel ? "border-white shadow-[0_0_0_3px_rgba(255,255,255,0.2)]" : "border-fuchsia-400"
+                    }`}
+            >
+                <span className="font-mono text-xs font-bold tracking-widest text-fuchsia-200">OP</span>
+            </div>
+        );
+    }
+
     return null;
 }
 

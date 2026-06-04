@@ -42,6 +42,9 @@ public class Match {
     @Column(name = "completed_at")
     private Instant completedAt;
 
+    @Column(name = "completion_reason", length = 50)
+    private String completionReason;
+
     @Column(name = "created_at", nullable = false, updatable = false, insertable = false)
     private Instant createdAt;
 
@@ -102,6 +105,14 @@ public class Match {
 
     public void setCompletedAt(Instant completedAt) {
         this.completedAt = completedAt;
+    }
+
+    public String getCompletionReason() {
+        return completionReason;
+    }
+
+    public void setCompletionReason(String completionReason) {
+        this.completionReason = completionReason;
     }
 
     public Instant getCreatedAt() {

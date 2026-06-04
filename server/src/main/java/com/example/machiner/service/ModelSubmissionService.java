@@ -97,10 +97,12 @@ public class ModelSubmissionService {
             submission.setRewardEvents(toJson(payload.getRewardEvents(), "{}"));
             submission.setClientBuildVersion(cleanNullableText(
                     payload.getClientBuildVersion(), MAX_CLIENT_BUILD_VERSION_LENGTH));
+            submission.setModelArtifacts(toJson(payload.getModel(), "{}"));
         } else {
             submission.setArchitectureVersion("missing-payload");
             submission.setFeatureSchemaVersion("missing-payload");
             submission.setActionSchemaVersion("movement-v1");
+            submission.setModelArtifacts("{}");
         }
 
         submission.setModelHash(cleanNullableText(validation.getComputedModelHash(), MAX_MODEL_HASH_LENGTH));

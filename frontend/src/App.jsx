@@ -4,6 +4,7 @@ import ProtectedRoute from './auth/ProtectedRoute'
 import BetaModel from './beta/BetaModel'
 import HomePage from './pages/HomePage'
 import LoginPage from './pages/LoginPage'
+import MatchmakingPage from './pages/MatchmakingPage'
 import RegisterPage from './pages/RegisterPage'
 import './App.css'
 
@@ -32,6 +33,14 @@ function App() {
             element={(
               <ProtectedRoute>
                 <BetaModel />
+              </ProtectedRoute>
+            )}
+          />
+          <Route
+            path="/matchmaking"
+            element={(
+              <ProtectedRoute>
+                <MatchmakingPage />
               </ProtectedRoute>
             )}
           />

@@ -2,6 +2,7 @@ const MAX_OBJECTS = 10;
 
 export default function Toolbar({ onAddShape, onClearSelected, selectedId, submitStatus, objectCount }) {
     const shapes = [
+        { type: "opponentModel", label: "Opponent", icon: "VS" },
         { type: "circle", label: "Circle", icon: "O" },
         { type: "square", label: "Square", icon: "[]" },
         { type: "triangle", label: "Triangle", icon: "^" },

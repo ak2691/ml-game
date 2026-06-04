@@ -17,7 +17,7 @@ export default function PropertiesPanel({ shape, onUpdate }) {
             {/* Header */}
             <div className="flex items-center justify-between mb-4 pb-3 border-b border-border-lo">
                 <span className="font-mono text-[11px] tracking-widest text-cyan">
-                    {isMain ? "⬟ MAIN MODEL" : `OBJ-${shape.id.slice(-4).toUpperCase()}`}
+                    {isMain ? "MAIN MODEL" : shape.type === "opponentModel" ? "OPPONENT MODEL" : `OBJ-${shape.id.slice(-4).toUpperCase()}`}
                 </span>
                 {isMain && (
                     <span className="font-mono text-[9px] tracking-widest text-ink-muted bg-arena-surface border border-border-lo px-1.5 py-0.5 rounded-sm">

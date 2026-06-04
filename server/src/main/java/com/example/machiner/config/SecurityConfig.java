@@ -30,7 +30,13 @@ public class SecurityConfig {
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
-                .csrf(csrf -> csrf.csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()))
+                .csrf(csrf -> csrf
+                        .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
+                        .ignoringRequestMatchers(
+                                "/api/auth/register",
+                                "/api/auth/login",
+                                "/api/auth/logout",
+                                "/ws/**"))
                 .addFilterAfter(new CsrfCookieFilter(), CsrfFilter.class)
                 .formLogin(form -> form.disable())
                 .httpBasic(basic -> basic.disable())
@@ -43,7 +49,9 @@ public class SecurityConfig {
                                 "/api/auth/register",
                                 "/api/auth/login",
                                 "/api/auth/logout",
-                                "/api/auth/me").permitAll()
+                                "/api/auth/csrf",
+                                "/api/auth/me",
+                                "/ws/**").permitAll()
                         .anyRequest().authenticated());
 
         return http.build();

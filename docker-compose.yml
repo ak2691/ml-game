@@ -44,8 +44,10 @@ services:
             SPRING_DATASOURCE_URL: jdbc:postgresql://postgres-db:5432/ml_game_db
             SPRING_DATASOURCE_USERNAME: mladmin
             SPRING_DATASOURCE_PASSWORD: password
+            MACHINER_ML_SERVER_URL: http://ml-server:3000
         depends_on:
             - postgres-db
+            - ml-server
 
     # ==========================================
     # 4. ML Engine: Node.js + TF.js

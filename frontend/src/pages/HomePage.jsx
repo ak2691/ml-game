@@ -33,10 +33,16 @@ export default function HomePage() {
                 <p className="mt-3 max-w-[560px] text-sm text-ink-muted">
                     Train a small browser fighter, submit it to the server, and build toward rated model battles.
                 </p>
-                <div className="mt-7">
+                <div className="mt-7 flex flex-wrap gap-3">
+                    <button
+                        onClick={() => navigate("/matchmaking")}
+                        className="rounded bg-cyan-800 px-5 py-2 text-sm font-bold text-cyan-50 hover:bg-cyan-700"
+                    >
+                        START MATCHMAKING
+                    </button>
                     <button
                         onClick={() => navigate("/beta")}
-                        className="rounded bg-cyan-800 px-5 py-2 text-sm font-bold text-cyan-50 hover:bg-cyan-700"
+                        className="rounded border border-border-lo bg-zinc-900 px-5 py-2 text-sm font-bold text-ink-muted hover:text-ink-white"
                     >
                         OPEN TRAINING ROOM
                     </button>

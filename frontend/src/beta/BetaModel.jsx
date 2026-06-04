@@ -3,11 +3,20 @@ import Canvas from "./Canvas";
 import Toolbar from "./Toolbar";
 import PropertiesPanel from "./PropertiesPanel";
 import "./BetaModel.css";
-import { loadOrCreateModel, deleteSavedModel, createModel, warmUpModel } from "../ml/Model";
+import {
+    loadOrCreateModel,
+    loadOrCreateMatchModel,
+    deleteSavedModel,
+    deleteMatchModel,
+    createModel,
+    getMatchModelKey,
+    warmUpModel
+} from "../ml/Model";
 import {
     predictDirection, clearMemory, stageStep, clearStaging,
     applyBatchReward, applyOverrideVector, loadTrainerState, MAX_REWIND_STEPS,
-    getRewardEvents, getTrainingStepCount
+    getRewardEvents, getTrainingStepCount, resetTrainerRuntimeState, setTrainerPersistenceEnabled,
+    warmUpTraining
 } from "../ml/Trainer";
 import {
     buildModelSubmissionPayload,
@@ -38,8 +47,46 @@ let _id = 1;
 const genId = () => `shape-${Date.now()}-${_id++}`;
 const SESSION_KEY = "arena-training-session-id";
 
-export default function BetaModel() {
-    const [shapes, setShapes] = useState([MAIN_SHAPE]);
+function secondsRemaining(targetTime) {
+    if (!targetTime) return null;
+    const targetMs = typeof targetTime === "number"
+        ? targetTime
+        : new Date(targetTime).getTime();
+    if (!Number.isFinite(targetMs)) return null;
+    return Math.max(0, Math.ceil((targetMs - Date.now()) / 1000));
+}
+
+function formatClock(totalSeconds) {
+    if (totalSeconds == null) return "--:--";
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function buildOpponentShape(opponent) {
+    return {
+        id: "opponent-model",
+        type: "opponentModel",
+        x: CANVAS_SIZE / 2 + 180,
+        y: CANVAS_SIZE / 2,
+        size: 64,
+        rotation: 0,
+        opponentUsername: opponent?.username,
+    };
+}
+
+export default function BetaModel({
+    matchContext = null,
+    finishStatus = null,
+    onFinishMatch = null,
+    onSurrenderMatch = null
+}) {
+    const matchId = matchContext?.matchId;
+    const matchUserId = matchContext?.player?.userId;
+    const isMatchTraining = Boolean(matchId && matchUserId);
+    const [shapes, setShapes] = useState(() => matchContext?.opponent
+        ? [MAIN_SHAPE, buildOpponentShape(matchContext.opponent)]
+        : [MAIN_SHAPE]);
     const [selectedId, setSelectedId] = useState(null);
     const [submitStatus, setSubmitStatus] = useState(null);
     const [isAutoPlaying, setIsAutoPlaying] = useState(false);
@@ -51,12 +98,19 @@ export default function BetaModel() {
     const [replayIndex, setReplayIndex] = useState(0);
     const [dragState, setDragState] = useState(null);
     const [isEditingArena, setIsEditingArena] = useState(true);
-    const [trainingSessionId, setTrainingSessionId] = useState(() => localStorage.getItem(SESSION_KEY));
+    const [trainingSessionId, setTrainingSessionId] = useState(() => isMatchTraining
+        ? null
+        : localStorage.getItem(SESSION_KEY));
+    const [submittedModelId, setSubmittedModelId] = useState(null);
+    const [isFinishingMatch, setIsFinishingMatch] = useState(false);
+    const [trainingRemaining, setTrainingRemaining] = useState(() =>
+        secondsRemaining(matchContext?.trainingEndsAtMs ?? matchContext?.trainingEndsAt));
 
     const modelRef = useRef(null);
     const autoIntervalRef = useRef(null);
     const lastPlayModeRef = useRef("coach");
     const wasPlayingBeforeEditRef = useRef(false);
+    const finishHandlerRef = useRef(null);
     const selectedShape = shapes.find((s) => s.id === selectedId) ?? null;
     const selectedReplayCount = Math.min(rewindStepCount, recentMovements.length);
     const replayMovements = recentMovements.slice(-selectedReplayCount);
@@ -65,28 +119,12 @@ export default function BetaModel() {
         ? replayMovements[replayIndex % replayMovements.length]
         : null;
 
-    useEffect(() => {
-        loadTrainerState();
-        loadOrCreateModel().then((m) => {
-            modelRef.current = m;
-            console.log("[arena-ml] Model ready.");
-            warmUpModel(m).then(() => {
-                console.log("[arena-ml] Model warmed up.");
-            });
-        });
-        ensureTrainingSession();
-
-        return () => {
-            if (autoIntervalRef.current) {
-                clearInterval(autoIntervalRef.current);
-            }
-        };
-    }, []);
-
-    const ensureTrainingSession = async () => {
+    const ensureTrainingSession = useCallback(async ({ required = false } = {}) => {
         try {
             const session = await createTrainingSession();
-            localStorage.setItem(SESSION_KEY, session.trainingSessionId);
+            if (!isMatchTraining) {
+                localStorage.setItem(SESSION_KEY, session.trainingSessionId);
+            }
             setTrainingSessionId(session.trainingSessionId);
             return session.trainingSessionId;
         } catch (err) {
@@ -96,9 +134,61 @@ export default function BetaModel() {
                 message: "Server training session unavailable",
             });
             setTimeout(() => setSubmitStatus(null), 3000);
+            if (required) {
+                throw err;
+            }
             return null;
         }
-    };
+    }, [isMatchTraining]);
+
+    useEffect(() => {
+        async function initializeModel() {
+            if (isMatchTraining) {
+                resetTrainerRuntimeState();
+                const matchModelKey = getMatchModelKey(matchId, matchUserId);
+                setTrainerPersistenceEnabled(true, {
+                    modelStorageKey: matchModelKey,
+                    trainerState: false,
+                });
+                return loadOrCreateMatchModel(matchId, matchUserId);
+            }
+
+            setTrainerPersistenceEnabled(true);
+            loadTrainerState();
+            return loadOrCreateModel();
+        }
+
+        initializeModel().then((m) => {
+            warmUpModel(m)
+                .then(() => warmUpTraining(m))
+                .then(() => {
+                    modelRef.current = m;
+                    console.log(`[arena-ml] ${isMatchTraining ? "Fresh match" : "Practice"} model ready.`);
+                })
+                .catch((err) => {
+                    console.warn("[arena-ml] Model warmup failed; continuing without full warmup.", err);
+                    modelRef.current = m;
+                });
+        });
+        ensureTrainingSession();
+
+        return () => {
+            if (autoIntervalRef.current) {
+                clearInterval(autoIntervalRef.current);
+            }
+            if (isMatchTraining) {
+                setTrainerPersistenceEnabled(true);
+            }
+        };
+    }, [ensureTrainingSession, isMatchTraining, matchId, matchUserId]);
+
+    useEffect(() => {
+        if (!matchContext?.opponent) return;
+        setShapes((prev) => {
+            if (prev.some((shape) => shape.type === "opponentModel")) return prev;
+            return [...prev, buildOpponentShape(matchContext.opponent)];
+        });
+    }, [matchContext?.opponent]);
 
     const fetchTrustedTrainingDuration = async (sessionId = trainingSessionId) => {
         if (!sessionId) return null;
@@ -130,7 +220,7 @@ export default function BetaModel() {
                 type,
                 x: Math.round(150 + Math.random() * 500),
                 y: Math.round(150 + Math.random() * 500),
-                size: 60,
+                size: type === "opponentModel" ? 64 : 60,
                 rotation: 0,
             };
             setSelectedId(s.id);
@@ -324,8 +414,13 @@ export default function BetaModel() {
     const handleResetModel = async () => {
         if (!window.confirm("Are you sure you want to wipe the model's brain? This cannot be undone.")) return;
         stopAutoPlay();
-        await deleteSavedModel();
-        clearMemory();
+        if (isMatchTraining) {
+            resetTrainerRuntimeState();
+            await deleteMatchModel(matchId, matchUserId);
+        } else {
+            await deleteSavedModel();
+            clearMemory();
+        }
         clearStaging();
         modelRef.current = createModel();
         await ensureTrainingSession();
@@ -337,12 +432,12 @@ export default function BetaModel() {
         setTimeout(() => setSubmitStatus(null), 3000);
     };
 
-    const handleSubmitModel = async () => {
-        if (!modelRef.current) return;
+    const handleSubmitModel = async ({ preserveStatus = false } = {}) => {
+        if (!modelRef.current) return null;
         setSubmitStatus({ ok: null, message: "Submitting model..." });
 
         try {
-            const activeTrainingSessionId = trainingSessionId ?? await ensureTrainingSession();
+            const activeTrainingSessionId = trainingSessionId ?? await ensureTrainingSession({ required: true });
             if (!activeTrainingSessionId) {
                 throw new Error("A server training session is required before submission.");
             }
@@ -362,19 +457,68 @@ export default function BetaModel() {
 
             const result = await submitModelPayload(payload);
             console.info("[arena-ml] Submitted model contract:", payload);
+            if (result.modelSubmissionId) {
+                setSubmittedModelId(result.modelSubmissionId);
+            }
             setSubmitStatus({
                 ok: result.accepted !== false,
                 message: result.message ?? "Model contract submitted",
             });
+            if (!preserveStatus) {
+                setTimeout(() => setSubmitStatus(null), 4000);
+            }
+            return result;
         } catch (err) {
             setSubmitStatus({
                 ok: false,
                 message: err.message,
             });
+            if (!preserveStatus) {
+                setTimeout(() => setSubmitStatus(null), 4000);
+            }
+            return null;
         }
-
-        setTimeout(() => setSubmitStatus(null), 4000);
     };
+
+    const handleFinishMatch = async () => {
+        if (!onFinishMatch || finishStatus === "FINISHED" || finishStatus === "SURRENDERED" || isFinishingMatch) return;
+        setIsFinishingMatch(true);
+
+        const result = submittedModelId
+            ? { modelSubmissionId: submittedModelId, accepted: true }
+            : await handleSubmitModel({ preserveStatus: true });
+
+        if (result?.modelSubmissionId && result.accepted !== false) {
+            onFinishMatch(result.modelSubmissionId);
+            setSubmitStatus({ ok: true, message: "Model submitted. Waiting for opponent." });
+        } else {
+            setIsFinishingMatch(false);
+        }
+    };
+    finishHandlerRef.current = handleFinishMatch;
+
+    const handleSurrenderMatch = () => {
+        if (!onSurrenderMatch || finishStatus === "FINISHED" || finishStatus === "SURRENDERED") return;
+        if (!window.confirm("Resign this match? Your opponent will win by resignation.")) return;
+        stopAutoPlay();
+        onSurrenderMatch();
+    };
+
+    useEffect(() => {
+        const trainingDeadline = matchContext?.trainingEndsAtMs ?? matchContext?.trainingEndsAt;
+        if (!trainingDeadline || !onFinishMatch || finishStatus === "FINISHED") return;
+
+        const interval = setInterval(() => {
+            const remaining = secondsRemaining(trainingDeadline);
+            setTrainingRemaining(remaining);
+            if (remaining === 0) {
+                clearInterval(interval);
+                finishHandlerRef.current?.();
+            }
+        }, 250);
+
+        return () => clearInterval(interval);
+    }, [matchContext?.trainingEndsAt, matchContext?.trainingEndsAtMs, finishStatus, onFinishMatch]);
 
     const handlePointerDown = (e) => {
         if (isEditingArena || !hasStagedSteps || selectedReplayCount === 0 || !correctionAnchor) return;
@@ -538,6 +682,19 @@ export default function BetaModel() {
                 </div>
 
                 <div className="flex items-center gap-4">
+                    {matchContext?.player?.role && (
+                        <div className="hidden lg:flex flex-col items-end font-mono text-[10px] tracking-widest leading-tight">
+                            <span className={matchContext.player.role === "CHASER" ? "text-cyan" : "text-fuchsia-200"}>
+                                {matchContext.player.role}
+                            </span>
+                            <span className="text-ink-muted">{formatClock(trainingRemaining)}</span>
+                        </div>
+                    )}
+                    {matchContext?.opponent?.finished && finishStatus !== "FINISHED" && (
+                        <span className="hidden lg:inline font-mono text-[10px] tracking-widest text-green-400">
+                            OPPONENT FINISHED
+                        </span>
+                    )}
                     <div className="hidden xl:flex flex-col items-end font-mono text-[10px] tracking-widest text-ink-muted leading-tight">
                         <span>{MODEL_ARCHITECTURE_VERSION}</span>
                         <span>{FEATURE_SCHEMA_VERSION} / {ACTION_SCHEMA_VERSION}</span>
@@ -546,11 +703,45 @@ export default function BetaModel() {
                         {shapes.length - 1} OBJECTS
                     </span>
                     <button
-                        onClick={handleSubmitModel}
+                        onClick={() => handleSubmitModel()}
                         className="text-[10px] bg-cyan-900/40 hover:bg-cyan-800 text-cyan-200 border border-cyan-800/50 px-2 py-1 rounded"
                     >
                         SUBMIT MODEL
                     </button>
+                    {onFinishMatch && (
+                        <button
+                            onClick={handleFinishMatch}
+                            disabled={finishStatus === "FINISHED" || finishStatus === "SURRENDERED" || isFinishingMatch}
+                            className={`text-[10px] px-2 py-1 rounded border ${finishStatus === "FINISHED"
+                                ? "bg-green-950/40 text-green-400 border-green-800/50 cursor-default"
+                                : finishStatus === "SURRENDERED"
+                                    ? "bg-red-950/40 text-red-400 border-red-800/50 cursor-default"
+                                : isFinishingMatch
+                                    ? "bg-zinc-800 text-ink-muted border-border-lo cursor-wait"
+                                : "bg-green-700 hover:bg-green-600 text-white border-green-500/40"
+                                }`}
+                        >
+                            {finishStatus === "FINISHED"
+                                ? "FINISHED"
+                                : finishStatus === "SURRENDERED"
+                                    ? "RESIGNED"
+                                    : isFinishingMatch
+                                        ? "SUBMITTING"
+                                        : "FINISH"}
+                        </button>
+                    )}
+                    {onSurrenderMatch && (
+                        <button
+                            onClick={handleSurrenderMatch}
+                            disabled={finishStatus === "FINISHED" || finishStatus === "SURRENDERED"}
+                            className={`text-[10px] px-2 py-1 rounded border ${finishStatus === "SURRENDERED"
+                                ? "bg-red-950/40 text-red-400 border-red-800/50 cursor-default"
+                                : "bg-red-900/30 hover:bg-red-800 text-red-300 border-red-800/50"
+                                }`}
+                        >
+                            {finishStatus === "SURRENDERED" ? "RESIGNED" : "RESIGN"}
+                        </button>
+                    )}
                     <button
                         onClick={handleResetModel}
                         className="text-[10px] bg-red-900/30 hover:bg-red-800 text-red-400 border border-red-800/50 px-2 py-1 rounded"

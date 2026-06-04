@@ -28,6 +28,7 @@ const TYPE_MAP = {
     circle: 0,
     square: 1,
     triangle: 2,
+    opponentModel: 3,
     // add more types here as you add them to the toolbar
 };
 const TYPE_COUNT = Object.keys(TYPE_MAP).length;
