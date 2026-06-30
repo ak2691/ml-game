@@ -25,6 +25,9 @@ public class TrainingSession {
     @JoinColumn(name = "user_id")
     private AppUser user;
 
+    @Column(name = "match_id")
+    private UUID matchId;
+
     @Column(name = "started_at", nullable = false)
     private Instant startedAt;
 
@@ -52,6 +55,14 @@ public class TrainingSession {
 
     public void setUser(AppUser user) {
         this.user = user;
+    }
+
+    public UUID getMatchId() {
+        return matchId;
+    }
+
+    public void setMatchId(UUID matchId) {
+        this.matchId = matchId;
     }
 
     public Instant getStartedAt() {

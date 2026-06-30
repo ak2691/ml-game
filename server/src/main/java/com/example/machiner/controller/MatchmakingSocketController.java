@@ -2,6 +2,7 @@ package com.example.machiner.controller;
 
 import com.example.machiner.DTO.MatchFinishDTO;
 import com.example.machiner.DTO.MatchmakingEventDTO;
+import com.example.machiner.DTO.ModelFingerprintProbeResponseDTO;
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.repository.UserRepository;
 import com.example.machiner.service.AuthException;
@@ -54,6 +55,12 @@ public class MatchmakingSocketController {
     public void surrender(Principal principal) {
         AppUser user = requireUser(principal);
         publish(matchmakingService.surrender(user.getId()));
+    }
+
+    @MessageMapping("/matchmaking.probe")
+    public void probe(@Payload ModelFingerprintProbeResponseDTO payload, Principal principal) {
+        AppUser user = requireUser(principal);
+        matchmakingService.recordProbeResponse(user.getId(), payload);
     }
 
     private AppUser requireUser(Principal principal) {

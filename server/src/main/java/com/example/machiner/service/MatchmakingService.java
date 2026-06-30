@@ -3,6 +3,7 @@ package com.example.machiner.service;
 import com.example.machiner.DTO.MatchPlaybackDTO;
 import com.example.machiner.DTO.MatchmakingEventDTO;
 import com.example.machiner.DTO.MatchmakingPlayerDTO;
+import com.example.machiner.DTO.ModelFingerprintProbeResponseDTO;
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.domain.Match;
 import com.example.machiner.domain.MatchParticipant;
@@ -31,10 +32,9 @@ import org.springframework.transaction.annotation.Transactional;
 public class MatchmakingService {
 
     private static final int COUNTDOWN_SECONDS = 5;
-    private static final int TRAINING_SECONDS = 300;
+    private static final int TRAINING_SECONDS = 600;
     private static final int RESULT_REVEAL_BUFFER_MS = 250;
-    private static final String CHASER = "CHASER";
-    private static final String RUNNER = "RUNNER";
+    private static final int WINS_REQUIRED = 2;
     private static final String COMPLETION_REASON_SIMULATION = "SIMULATION";
     private static final String COMPLETION_REASON_RESIGNATION = "RESIGNATION";
 
@@ -42,6 +42,7 @@ public class MatchmakingService {
     private final MatchRepository matchRepository;
     private final MatchParticipantRepository matchParticipantRepository;
     private final ModelSubmissionRepository modelSubmissionRepository;
+    private final ModelFingerprintProbeService modelFingerprintProbeService;
     private final ProfileRepository profileRepository;
     private final UserRepository userRepository;
     private final Clock clock;
@@ -53,6 +54,7 @@ public class MatchmakingService {
             MatchRepository matchRepository,
             MatchParticipantRepository matchParticipantRepository,
             ModelSubmissionRepository modelSubmissionRepository,
+            ModelFingerprintProbeService modelFingerprintProbeService,
             ProfileRepository profileRepository,
             UserRepository userRepository,
             Clock clock) {
@@ -60,6 +62,7 @@ public class MatchmakingService {
         this.matchRepository = matchRepository;
         this.matchParticipantRepository = matchParticipantRepository;
         this.modelSubmissionRepository = modelSubmissionRepository;
+        this.modelFingerprintProbeService = modelFingerprintProbeService;
         this.profileRepository = profileRepository;
         this.userRepository = userRepository;
         this.clock = clock;
@@ -86,7 +89,6 @@ public class MatchmakingService {
         }
 
         QueuedPlayer opponent = queue.remove(0);
-        boolean firstPlayerChases = ThreadLocalRandom.current().nextBoolean();
         Instant countdownEndsAt = Instant.now(clock).plusSeconds(COUNTDOWN_SECONDS);
         Instant trainingEndsAt = countdownEndsAt.plusSeconds(TRAINING_SECONDS);
         Match match = createMatch(opponent, player);
@@ -100,31 +102,47 @@ public class MatchmakingService {
                                 opponent.userId(),
                                 opponent.username(),
                                 opponent.principalName(),
-                                firstPlayerChases ? CHASER : RUNNER,
                                 1,
                                 false,
-                                null),
+                                null,
+                                0),
                         new MatchPlayer(
                                 player.userId(),
                                 player.username(),
                                 player.principalName(),
-                                firstPlayerChases ? RUNNER : CHASER,
                                 2,
                                 false,
-                                null)),
+                                null,
+                                0)),
                 countdownEndsAt,
-                trainingEndsAt);
+                trainingEndsAt,
+                1,
+                WINS_REQUIRED);
         createParticipants(match, session);
         activeSessionsByUserId.put(opponent.userId(), session);
         activeSessionsByUserId.put(player.userId(), session);
 
-        return session.players().stream()
+        List<OutboundMatchmakingEvent> events = new ArrayList<>(session.players().stream()
                 .map(matchPlayer -> eventForPlayer(session, matchPlayer, "MATCH_FOUND"))
-                .toList();
+                .toList());
+        events.addAll(scheduledProbeEvents(session));
+        return events;
     }
 
     public synchronized void leaveQueue(UUID userId) {
         queue.removeIf(player -> player.userId().equals(userId));
+    }
+
+    public synchronized void recordProbeResponse(UUID userId, ModelFingerprintProbeResponseDTO response) {
+        modelFingerprintProbeService.recordProbeResponse(userId, response);
+    }
+
+    public synchronized void requireActiveMatchForUser(UUID userId, UUID matchId) {
+        MatchSession session = activeSessionsByUserId.get(userId);
+        if (session == null || matchId == null || !session.matchId().equals(matchId)) {
+            throw new AuthException("user is not active in this match");
+        }
+        playerForUser(session, userId);
     }
 
     @Transactional
@@ -144,17 +162,17 @@ public class MatchmakingService {
         completeMatchByResignation(session.matchId(), resigningPlayer, winner);
         for (MatchPlayer player : session.players()) {
             activeSessionsByUserId.remove(player.userId());
+            modelFingerprintProbeService.clearUser(player.userId());
         }
 
         MatchPlaybackDTO result = new MatchPlaybackDTO(
                 session.matchId(),
-                MatchSimulationService.TAG_RULESET_VERSION,
+                MatchSimulationService.DUEL_RULESET_VERSION,
                 "COMPLETED",
                 null,
                 List.of(),
                 "RESIGNATION_WIN",
                 winner.userId(),
-                winner.role(),
                 winner.username() + " wins by resignation.");
         Instant now = Instant.now(clock);
 
@@ -179,7 +197,7 @@ public class MatchmakingService {
             return List.of();
         }
 
-        ModelSubmission submission = requireValidatedSubmission(userId, modelSubmissionId);
+        ModelSubmission submission = requireValidatedSubmission(userId, modelSubmissionId, session.matchId());
         MatchSession updatedSession = session.withFinishedPlayer(userId, submission.getId());
         for (MatchPlayer player : updatedSession.players()) {
             activeSessionsByUserId.put(player.userId(), updatedSession);
@@ -201,11 +219,17 @@ public class MatchmakingService {
         }
 
         Map<UUID, ModelSubmission> submissionsByUserId = loadFinishedSubmissions(updatedSession);
-        MatchPlaybackDTO playback = matchSimulationService.buildTagPlayback(updatedSession, submissionsByUserId);
-        completeMatch(updatedSession.matchId(), playback);
+        MatchPlaybackDTO playback = matchSimulationService.buildDuelPlayback(updatedSession, submissionsByUserId);
+        MatchSession scoredSession = updatedSession.withRoundResult(playback.winnerUserId());
+        boolean seriesComplete = playback.winnerUserId() != null
+                && playerForUser(scoredSession, playback.winnerUserId()).roundWins() >= scoredSession.winsRequired();
+        if (seriesComplete) {
+            completeMatch(scoredSession.matchId(), playback);
 
-        for (MatchPlayer player : updatedSession.players()) {
-            activeSessionsByUserId.remove(player.userId());
+            for (MatchPlayer player : scoredSession.players()) {
+                activeSessionsByUserId.remove(player.userId());
+                modelFingerprintProbeService.clearUser(player.userId());
+            }
         }
         MatchPlaybackDTO replayOnlyPlayback = withoutResult(playback);
         MatchPlaybackDTO resultOnlyPlayback = resultOnly(playback);
@@ -213,9 +237,9 @@ public class MatchmakingService {
         Instant playbackStartsAt = Instant.now(clock);
         Instant resultRevealsAt = playbackStartsAt.plusMillis(resultDelayMillis);
         List<OutboundMatchmakingEvent> events = new ArrayList<>();
-        for (MatchPlayer player : updatedSession.players()) {
+        for (MatchPlayer player : scoredSession.players()) {
             events.add(eventForPlayer(
-                    updatedSession,
+                    scoredSession,
                     player,
                     "MATCH_PLAYBACK_READY",
                     "READY_FOR_PLAYBACK",
@@ -225,7 +249,7 @@ public class MatchmakingService {
                     playbackStartsAt,
                     resultRevealsAt));
             events.add(eventForPlayer(
-                    updatedSession,
+                    scoredSession,
                     player,
                     "MATCH_RESULT_READY",
                     "RESULT_READY",
@@ -234,6 +258,27 @@ public class MatchmakingService {
                     resultDelayMillis,
                     playbackStartsAt,
                     resultRevealsAt));
+        }
+        if (!seriesComplete) {
+            Instant nextCountdownEndsAt = resultRevealsAt.plusSeconds(COUNTDOWN_SECONDS);
+            Instant nextTrainingEndsAt = nextCountdownEndsAt.plusSeconds(TRAINING_SECONDS);
+            MatchSession nextRoundSession = scoredSession.nextRound(
+                    ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE),
+                    nextCountdownEndsAt,
+                    nextTrainingEndsAt);
+            for (MatchPlayer player : nextRoundSession.players()) {
+                activeSessionsByUserId.put(player.userId(), nextRoundSession);
+                events.add(eventForPlayer(
+                        nextRoundSession,
+                        player,
+                        "MATCH_ROUND_READY",
+                        "COUNTDOWN",
+                        null,
+                        "Round " + nextRoundSession.roundNumber() + " ready.",
+                        resultDelayMillis,
+                        playbackStartsAt,
+                        resultRevealsAt));
+            }
         }
         return events;
     }
@@ -245,7 +290,6 @@ public class MatchmakingService {
                 playback.status(),
                 playback.initialState(),
                 playback.frames(),
-                null,
                 null,
                 null,
                 null);
@@ -260,7 +304,6 @@ public class MatchmakingService {
                 List.of(),
                 playback.result(),
                 playback.winnerUserId(),
-                playback.winnerRole(),
                 playback.message());
     }
 
@@ -277,8 +320,9 @@ public class MatchmakingService {
                 new MatchmakingEventDTO(
                         "QUEUE_WAITING",
                         null,
+                        null,
                         "WAITING",
-                        new MatchmakingPlayerDTO(userId, username, null, 1, false),
+                        new MatchmakingPlayerDTO(userId, username, 1, false, 0),
                         null,
                         List.of(),
                         Instant.now(clock),
@@ -286,15 +330,36 @@ public class MatchmakingService {
                         null,
                         null,
                         null,
-                        MatchSimulationService.TAG_RULESET_VERSION,
+                        MatchSimulationService.DUEL_RULESET_VERSION,
+                        null,
+                        null,
+                        null,
                         null,
                         null));
+    }
+
+    private List<OutboundMatchmakingEvent> scheduledProbeEvents(MatchSession session) {
+        return modelFingerprintProbeService.scheduleProbes(
+                        session.matchId(),
+                        session.players().stream()
+                                .map(player -> new ModelFingerprintProbeService.ProbeTarget(
+                                        player.userId(),
+                                        player.principalName()))
+                                .toList(),
+                        session.countdownEndsAt(),
+                        session.trainingEndsAt())
+                .stream()
+                .map(probe -> new OutboundMatchmakingEvent(
+                        probe.principalName(),
+                        modelFingerprintProbeService.toProbeEvent(probe.probe()),
+                        probe.delayMillis()))
+                .toList();
     }
 
     private Match createMatch(QueuedPlayer firstPlayer, QueuedPlayer secondPlayer) {
         Match match = new Match();
         match.setStatus(MatchStatus.RUNNING);
-        match.setRulesetVersion(MatchSimulationService.TAG_RULESET_VERSION);
+        match.setRulesetVersion(MatchSimulationService.DUEL_RULESET_VERSION);
         match.setSimulationSeed(ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE));
         match.setStartedAt(Instant.now(clock));
         return matchRepository.save(match);
@@ -307,14 +372,13 @@ public class MatchmakingService {
                     participant.setMatch(match);
                     participant.setUser(userRepository.getReferenceById(player.userId()));
                     participant.setSlot((short) player.slot());
-                    participant.setParticipantRole(player.role());
                     return participant;
                 })
                 .toList();
         matchParticipantRepository.saveAll(participants);
     }
 
-    private ModelSubmission requireValidatedSubmission(UUID userId, UUID modelSubmissionId) {
+    private ModelSubmission requireValidatedSubmission(UUID userId, UUID modelSubmissionId, UUID matchId) {
         if (modelSubmissionId == null) {
             throw new AuthException("modelSubmissionId is required before finishing the match");
         }
@@ -324,6 +388,9 @@ public class MatchmakingService {
         if (submission.getStatus() != ModelSubmissionStatus.VALIDATED) {
             throw new AuthException("model submission must be validated before finishing the match");
         }
+        if (submission.getMatchId() == null || !submission.getMatchId().equals(matchId)) {
+            throw new AuthException("model submission is not assigned to this match");
+        }
 
         return submission;
     }
@@ -332,6 +399,7 @@ public class MatchmakingService {
         MatchParticipant participant = matchParticipantRepository.findByMatchIdAndUserId(matchId, userId)
                 .orElseThrow(() -> new AuthException("match participant was not found"));
         participant.setModelSubmission(submission);
+        participant.setSelectedClass(submission.getSelectedClass());
         matchParticipantRepository.save(participant);
     }
 
@@ -459,6 +527,7 @@ public class MatchmakingService {
                 new MatchmakingEventDTO(
                         type,
                         session.matchId(),
+                        session.simulationSeed(),
                         status,
                         player.toDto(),
                         opponent == null ? null : opponent.toDto(),
@@ -468,8 +537,11 @@ public class MatchmakingService {
                         session.trainingEndsAt(),
                         playbackStartsAt,
                         resultRevealsAt,
-                        MatchSimulationService.TAG_RULESET_VERSION,
+                        MatchSimulationService.DUEL_RULESET_VERSION,
                         playback,
+                        null,
+                        session.roundNumber(),
+                        session.winsRequired(),
                         message),
                 delayMillis);
     }
@@ -488,12 +560,12 @@ public class MatchmakingService {
             UUID userId,
             String username,
             String principalName,
-            String role,
             int slot,
             boolean finished,
-            UUID modelSubmissionId) {
+            UUID modelSubmissionId,
+            int roundWins) {
         MatchmakingPlayerDTO toDto() {
-            return new MatchmakingPlayerDTO(userId, username, role, slot, finished);
+            return new MatchmakingPlayerDTO(userId, username, slot, finished, roundWins);
         }
     }
 
@@ -502,7 +574,9 @@ public class MatchmakingService {
             long simulationSeed,
             List<MatchPlayer> players,
             Instant countdownEndsAt,
-            Instant trainingEndsAt) {
+            Instant trainingEndsAt,
+            int roundNumber,
+            int winsRequired) {
         MatchSession withFinishedPlayer(UUID userId, UUID modelSubmissionId) {
             return new MatchSession(
                     matchId,
@@ -513,14 +587,58 @@ public class MatchmakingService {
                                             player.userId(),
                                             player.username(),
                                             player.principalName(),
-                                            player.role(),
                                             player.slot(),
                                             true,
-                                            modelSubmissionId)
+                                            modelSubmissionId,
+                                            player.roundWins())
                                     : player)
                             .toList(),
                     countdownEndsAt,
-                    trainingEndsAt);
+                    trainingEndsAt,
+                    roundNumber,
+                    winsRequired);
+        }
+
+        MatchSession withRoundResult(UUID winnerUserId) {
+            return new MatchSession(
+                    matchId,
+                    simulationSeed,
+                    players.stream()
+                            .map(player -> player.userId().equals(winnerUserId)
+                                    ? new MatchPlayer(
+                                            player.userId(),
+                                            player.username(),
+                                            player.principalName(),
+                                            player.slot(),
+                                            player.finished(),
+                                            player.modelSubmissionId(),
+                                            player.roundWins() + 1)
+                                    : player)
+                            .toList(),
+                    countdownEndsAt,
+                    trainingEndsAt,
+                    roundNumber,
+                    winsRequired);
+        }
+
+        MatchSession nextRound(long nextSeed, Instant nextCountdownEndsAt, Instant nextTrainingEndsAt) {
+            return new MatchSession(
+                    matchId,
+                    nextSeed,
+                    players.stream()
+                            .map(player -> new MatchPlayer(
+                                    player.userId(),
+                                    player.username(),
+                                    player.principalName(),
+                                    player.slot(),
+                                    false,
+                                    null,
+                                    player.roundWins()))
+                            .toList(),
+                    nextCountdownEndsAt,
+                    nextTrainingEndsAt,
+                    roundNumber + 1,
+                    winsRequired);
         }
     }
 

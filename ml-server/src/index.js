@@ -1,5 +1,5 @@
 const express = require("express");
-const { simulateTagMatch } = require("./tagSimulation");
+const { simulateDuelMatch } = require("./duelSimulation");
 
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
@@ -10,9 +10,9 @@ app.get("/health", (_request, response) => {
     response.json({ status: "ok" });
 });
 
-app.post("/api/tag-v1/simulate", async (request, response) => {
+app.post("/api/duel-v1/simulate", async (request, response) => {
     try {
-        response.json(await simulateTagMatch(request.body));
+        response.json(await simulateDuelMatch(request.body));
     } catch (error) {
         response.status(400).json({
             status: "FAILED",

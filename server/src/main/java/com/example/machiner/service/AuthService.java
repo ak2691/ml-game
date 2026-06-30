@@ -21,8 +21,11 @@ import org.springframework.transaction.annotation.Transactional;
 public class AuthService {
 
     private static final Pattern EMAIL_PATTERN = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
+    private static final Pattern USERNAME_PATTERN = Pattern.compile("^[A-Za-z0-9_-]+$");
     private static final int MIN_USERNAME_LENGTH = 3;
     private static final int MAX_USERNAME_LENGTH = 30;
+    private static final int MIN_PASSWORD_LENGTH = 8;
+    private static final int MAX_PASSWORD_LENGTH = 128;
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
@@ -41,9 +44,7 @@ public class AuthService {
 
         validateEmail(email);
         validateUsername(username);
-        if (password == null) {
-            throw new AuthException("password is required");
-        }
+        validatePassword(password);
         if (userRepository.existsByNormalizedEmail(normalizedEmail)) {
             throw new AuthException("email is already registered");
         }
@@ -67,9 +68,7 @@ public class AuthService {
         String email = clean(request == null ? null : request.getEmail());
         String password = request == null ? null : request.getPassword();
         validateEmail(email);
-        if (password == null) {
-            throw new AuthException("password is required");
-        }
+        requirePasswordForLogin(password);
 
         AppUser user = userRepository.findByNormalizedEmail(normalizeEmail(email))
                 .orElseThrow(() -> new AuthException("invalid email or password"));
@@ -111,7 +110,9 @@ public class AuthService {
                 null,
                 principal.getAuthorities()));
         SecurityContextHolder.setContext(context);
-        request.getSession(true).setAttribute(
+        var session = request.getSession(true);
+        request.changeSessionId();
+        session.setAttribute(
                 HttpSessionSecurityContextRepository.SPRING_SECURITY_CONTEXT_KEY,
                 context);
     }
@@ -128,6 +129,24 @@ public class AuthService {
         }
         if (username.length() < MIN_USERNAME_LENGTH || username.length() > MAX_USERNAME_LENGTH) {
             throw new AuthException("username must be between 3 and 30 characters");
+        }
+        if (!USERNAME_PATTERN.matcher(username).matches()) {
+            throw new AuthException("username may only contain letters, numbers, underscores, and hyphens");
+        }
+    }
+
+    private void validatePassword(String password) {
+        if (password == null || password.isBlank()) {
+            throw new AuthException("password is required");
+        }
+        if (password.length() < MIN_PASSWORD_LENGTH || password.length() > MAX_PASSWORD_LENGTH) {
+            throw new AuthException("password must be between 8 and 128 characters");
+        }
+    }
+
+    private void requirePasswordForLogin(String password) {
+        if (password == null) {
+            throw new AuthException("password is required");
         }
     }
 

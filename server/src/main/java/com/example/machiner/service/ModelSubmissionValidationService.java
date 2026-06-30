@@ -8,6 +8,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.UUID;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -17,13 +18,34 @@ public class ModelSubmissionValidationService {
 
     private static final String VALIDATOR_VERSION = "model-submission-stub-v1";
     private static final String ARCHITECTURE_VERSION = "dense-movement-v1";
+    private static final String MELEE_ARCHITECTURE_VERSION = "melee-heads-v1";
+    private static final String MELEE_ARCHITECTURE_VERSION_V2 = "melee-heads-v2";
+    private static final String MELEE_ARCHITECTURE_VERSION_V3 = "melee-heads-v3";
+    private static final String MELEE_ARCHITECTURE_VERSION_V4 = "melee-heads-v4";
+    private static final String MELEE_ARCHITECTURE_VERSION_V5 = "melee-heads-v5";
+    private static final String MELEE_ARCHITECTURE_VERSION_V6 = "melee-heads-v6";
+    private static final String MELEE_ARCHITECTURE_VERSION_V7 = "melee-heads-v7";
     private static final String FEATURE_SCHEMA_VERSION = "arena-features-v1";
+    private static final String MELEE_FEATURE_SCHEMA_VERSION = "arena-combat-features-v1";
+    private static final String MELEE_FEATURE_SCHEMA_VERSION_V2 = "arena-combat-features-v2";
+    private static final String MELEE_FEATURE_SCHEMA_VERSION_V3 = "duel-combat-features-v3";
+    private static final String MELEE_FEATURE_SCHEMA_VERSION_V4 = "duel-logic-features-v4";
+    private static final String MELEE_FEATURE_SCHEMA_VERSION_V5 = "duel-obstacle-features-v5";
+    private static final String MELEE_FEATURE_SCHEMA_VERSION_V6 = "duel-intent-features-v6";
     private static final String ACTION_SCHEMA_VERSION = "movement-v1";
+    private static final String MELEE_ACTION_SCHEMA_VERSION = "melee-actions-v1";
+    private static final String MELEE_ACTION_SCHEMA_VERSION_V2 = "melee-discrete-actions-v2";
+    private static final String MELEE_ACTION_SCHEMA_VERSION_V3 = "melee-dash-actions-v3";
     private static final String MODEL_FORMAT = "tfjs-layers-v1";
     private static final int MAX_VERSION_LENGTH = 50;
     private static final int MAX_TRAINING_SESSION_ID_LENGTH = 100;
     private static final int MAX_CLIENT_BUILD_VERSION_LENGTH = 100;
     private static final int MAX_MODEL_HASH_LENGTH = 128;
+    private static final int MAX_SELECTED_CLASS_LENGTH = 40;
+    private static final int MAX_BASE_MODEL_ARTIFACT_ID_LENGTH = 100;
+    private static final int MAX_ROUND_TRAINING_SAMPLES = 3_072;
+    private static final int MAX_ROUND_TRAINING_EPOCHS = 30;
+    private static final int MAX_ROUND_TRAINING_STEPS = MAX_ROUND_TRAINING_SAMPLES * MAX_ROUND_TRAINING_EPOCHS;
 
     private final JsonMapper jsonMapper;
 
@@ -40,9 +62,18 @@ public class ModelSubmissionValidationService {
             return response(false, errors, warnings, null, null, false);
         }
 
-        requireExact(errors, payload.getArchitectureVersion(), "architectureVersion", ARCHITECTURE_VERSION);
-        requireExact(errors, payload.getFeatureSchemaVersion(), "featureSchemaVersion", FEATURE_SCHEMA_VERSION);
-        requireExact(errors, payload.getActionSchemaVersion(), "actionSchemaVersion", ACTION_SCHEMA_VERSION);
+        requireOneOf(errors, payload.getArchitectureVersion(), "architectureVersion",
+                ARCHITECTURE_VERSION, MELEE_ARCHITECTURE_VERSION, MELEE_ARCHITECTURE_VERSION_V2,
+                MELEE_ARCHITECTURE_VERSION_V3, MELEE_ARCHITECTURE_VERSION_V4,
+                MELEE_ARCHITECTURE_VERSION_V5, MELEE_ARCHITECTURE_VERSION_V6,
+                MELEE_ARCHITECTURE_VERSION_V7);
+        requireOneOf(errors, payload.getFeatureSchemaVersion(), "featureSchemaVersion",
+                FEATURE_SCHEMA_VERSION, MELEE_FEATURE_SCHEMA_VERSION, MELEE_FEATURE_SCHEMA_VERSION_V2,
+                MELEE_FEATURE_SCHEMA_VERSION_V3, MELEE_FEATURE_SCHEMA_VERSION_V4,
+                MELEE_FEATURE_SCHEMA_VERSION_V5, MELEE_FEATURE_SCHEMA_VERSION_V6);
+        requireOneOf(errors, payload.getActionSchemaVersion(), "actionSchemaVersion",
+                ACTION_SCHEMA_VERSION, MELEE_ACTION_SCHEMA_VERSION, MELEE_ACTION_SCHEMA_VERSION_V2,
+                MELEE_ACTION_SCHEMA_VERSION_V3);
         requireExact(errors, payload.getModelFormat(), "modelFormat", MODEL_FORMAT);
 
         rejectTooLong(errors, payload.getArchitectureVersion(), "architectureVersion", MAX_VERSION_LENGTH);
@@ -50,14 +81,23 @@ public class ModelSubmissionValidationService {
         rejectTooLong(errors, payload.getActionSchemaVersion(), "actionSchemaVersion", MAX_VERSION_LENGTH);
         rejectTooLong(errors, payload.getModelFormat(), "modelFormat", MAX_VERSION_LENGTH);
         rejectTooLong(errors, payload.getTrainingSessionId(), "trainingSessionId", MAX_TRAINING_SESSION_ID_LENGTH);
+        rejectTooLong(errors, payload.getSelectedClass(), "selectedClass", MAX_SELECTED_CLASS_LENGTH);
+        rejectTooLong(errors, payload.getBaseModelArtifactId(),
+                "baseModelArtifactId", MAX_BASE_MODEL_ARTIFACT_ID_LENGTH);
         rejectTooLong(errors, payload.getModelHash(), "modelHash", MAX_MODEL_HASH_LENGTH);
         rejectTooLong(errors, payload.getClientBuildVersion(), "clientBuildVersion", MAX_CLIENT_BUILD_VERSION_LENGTH);
 
         requireText(errors, payload.getTrainingSessionId(), "trainingSessionId");
+        requireUuid(errors, payload.getTrainingSessionId(), "trainingSessionId");
         rejectNegative(errors, payload.getTrainingDurationMs(), "trainingDurationMs");
         rejectNegative(errors, payload.getTrainingSteps(), "trainingSteps");
         requireNonNegative(errors, payload.getTrainingSteps(), "trainingSteps");
-        requireObject(errors, payload.getRewardEvents(), "rewardEvents");
+        if (payload.getTrainingSteps() != null && payload.getTrainingSteps() > MAX_ROUND_TRAINING_STEPS) {
+            errors.add("trainingSteps exceeds the round training limit");
+        }
+        if (requireObject(errors, payload.getTrainingMetrics(), "trainingMetrics")) {
+            validateRoundTrainingLimits(errors, payload.getTrainingMetrics());
+        }
         validateSerializedModel(errors, payload.getModel());
 
         String computedHash = null;
@@ -74,7 +114,7 @@ public class ModelSubmissionValidationService {
         }
 
         if (payload.getTrainingDurationMs() == null) {
-            warnings.add("trainingDurationMs is not trusted yet because server-owned sessions are not implemented");
+            warnings.add("trainingDurationMs will be computed from the server-owned training session");
         }
 
         return response(errors.isEmpty(), errors, warnings, payload.getModelHash(), computedHash,
@@ -121,6 +161,20 @@ public class ModelSubmissionValidationService {
         }
     }
 
+    private void validateRoundTrainingLimits(List<String> errors, JsonNode metrics) {
+        JsonNode trainingSamples = metrics.get("trainingSamples");
+        if (trainingSamples != null && trainingSamples.isNumber()
+                && trainingSamples.asInt() > MAX_ROUND_TRAINING_SAMPLES) {
+            errors.add("trainingMetrics.trainingSamples exceeds the round sample limit");
+        }
+
+        JsonNode epochsCompleted = metrics.get("epochsCompleted");
+        if (epochsCompleted != null && epochsCompleted.isNumber()
+                && epochsCompleted.asInt() > MAX_ROUND_TRAINING_EPOCHS) {
+            errors.add("trainingMetrics.epochsCompleted exceeds the round epoch limit");
+        }
+    }
+
     private String computeModelHash(JsonNode model, List<String> errors) {
         try {
             String topology = jsonMapper.writeValueAsString(model.get("modelTopology"));
@@ -154,9 +208,36 @@ public class ModelSubmissionValidationService {
         }
     }
 
+    private void requireOneOf(List<String> errors, String value, String field, String... expectedValues) {
+        if (!hasText(value)) {
+            errors.add(field + " is required");
+            return;
+        }
+
+        for (String expected : expectedValues) {
+            if (expected.equals(value)) {
+                return;
+            }
+        }
+
+        errors.add(field + " is not supported");
+    }
+
     private void requireText(List<String> errors, String value, String field) {
         if (!hasText(value)) {
             errors.add(field + " is required");
+        }
+    }
+
+    private void requireUuid(List<String> errors, String value, String field) {
+        if (!hasText(value)) {
+            return;
+        }
+
+        try {
+            UUID.fromString(value.trim());
+        } catch (IllegalArgumentException ex) {
+            errors.add(field + " must be a server-issued UUID");
         }
     }
 

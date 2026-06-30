@@ -37,8 +37,8 @@ public class MatchParticipant {
     @Column(nullable = false)
     private short slot;
 
-    @Column(name = "participant_role", length = 40)
-    private String participantRole;
+    @Column(name = "selected_class", length = 40)
+    private String selectedClass;
 
     @Enumerated(EnumType.STRING)
     @Column(length = 20)
@@ -93,12 +93,12 @@ public class MatchParticipant {
         this.slot = slot;
     }
 
-    public String getParticipantRole() {
-        return participantRole;
+    public String getSelectedClass() {
+        return selectedClass;
     }
 
-    public void setParticipantRole(String participantRole) {
-        this.participantRole = participantRole;
+    public void setSelectedClass(String selectedClass) {
+        this.selectedClass = selectedClass;
     }
 
     public MatchResult getResult() {

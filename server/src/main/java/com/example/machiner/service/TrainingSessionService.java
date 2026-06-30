@@ -15,18 +15,27 @@ public class TrainingSessionService {
 
     private final TrainingSessionRepository trainingSessionRepository;
     private final CurrentUserService currentUserService;
+    private final MatchmakingService matchmakingService;
 
     public TrainingSessionService(
             TrainingSessionRepository trainingSessionRepository,
-            CurrentUserService currentUserService) {
+            CurrentUserService currentUserService,
+            MatchmakingService matchmakingService) {
         this.trainingSessionRepository = trainingSessionRepository;
         this.currentUserService = currentUserService;
+        this.matchmakingService = matchmakingService;
     }
 
     @Transactional
-    public TrainingSessionResponseDTO createSession(Authentication authentication) {
+    public TrainingSessionResponseDTO createSession(Authentication authentication, UUID matchId) {
+        var user = currentUserService.requireCurrentUser(authentication);
+        if (matchId != null) {
+            matchmakingService.requireActiveMatchForUser(user.getId(), matchId);
+        }
+
         TrainingSession session = new TrainingSession();
-        session.setUser(currentUserService.requireCurrentUser(authentication));
+        session.setUser(user);
+        session.setMatchId(matchId);
         session.setStartedAt(Instant.now());
 
         TrainingSession savedSession = trainingSessionRepository.save(session);
@@ -34,8 +43,9 @@ public class TrainingSessionService {
     }
 
     @Transactional(readOnly = true)
-    public TrainingSessionResponseDTO getDuration(UUID trainingSessionId) {
-        TrainingSession session = trainingSessionRepository.findById(trainingSessionId)
+    public TrainingSessionResponseDTO getDuration(UUID trainingSessionId, Authentication authentication) {
+        TrainingSession session = trainingSessionRepository
+                .findByIdAndUserId(trainingSessionId, currentUserService.requireCurrentUser(authentication).getId())
                 .orElseThrow(() -> new TrainingSessionNotFoundException(trainingSessionId));
         long durationMs = Math.max(0, Duration.between(session.getStartedAt(), Instant.now()).toMillis());
         return toResponse(session, durationMs, "Server-owned training duration");
@@ -47,6 +57,7 @@ public class TrainingSessionService {
             String message) {
         TrainingSessionResponseDTO response = new TrainingSessionResponseDTO();
         response.setTrainingSessionId(session.getId());
+        response.setMatchId(session.getMatchId());
         response.setStartedAt(session.getStartedAt());
         response.setTrainingDurationMs(trainingDurationMs);
         response.setTrusted(true);

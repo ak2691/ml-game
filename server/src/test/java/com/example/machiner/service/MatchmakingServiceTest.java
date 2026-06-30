@@ -37,6 +37,7 @@ class MatchmakingServiceTest {
     private final MatchRepository matchRepository = mock(MatchRepository.class);
     private final MatchParticipantRepository matchParticipantRepository = mock(MatchParticipantRepository.class);
     private final ModelSubmissionRepository modelSubmissionRepository = mock(ModelSubmissionRepository.class);
+    private final ModelFingerprintProbeService modelFingerprintProbeService = mock(ModelFingerprintProbeService.class);
     private final ProfileRepository profileRepository = mock(ProfileRepository.class);
     private final UserRepository userRepository = mock(UserRepository.class);
     private final Clock clock = Clock.fixed(Instant.parse("2026-06-03T12:00:00Z"), ZoneOffset.UTC);
@@ -52,9 +53,11 @@ class MatchmakingServiceTest {
                 matchRepository,
                 matchParticipantRepository,
                 modelSubmissionRepository,
+                modelFingerprintProbeService,
                 profileRepository,
                 userRepository,
                 clock);
+        when(modelFingerprintProbeService.scheduleProbes(any(), any(), any(), any())).thenReturn(List.of());
 
         when(matchRepository.save(any(Match.class))).thenAnswer(invocation -> {
             savedMatch = invocation.getArgument(0);
@@ -83,22 +86,21 @@ class MatchmakingServiceTest {
                     .findFirst();
         });
         when(profileRepository.findByUserId(any(UUID.class))).thenReturn(Optional.empty());
-        when(simulationService.buildTagPlayback(any(MatchSession.class), any())).thenAnswer(invocation -> {
+        when(simulationService.buildDuelPlayback(any(MatchSession.class), any())).thenAnswer(invocation -> {
             MatchSession session = invocation.getArgument(0);
-            MatchmakingService.MatchPlayer runner = session.players().stream()
-                    .filter(player -> "RUNNER".equals(player.role()))
+            MatchmakingService.MatchPlayer winner = session.players().stream()
+                    .filter(player -> player.slot() == 2)
                     .findFirst()
                     .orElseThrow();
             return new MatchPlaybackDTO(
                     session.matchId(),
-                    MatchSimulationService.TAG_RULESET_VERSION,
+                    MatchSimulationService.DUEL_RULESET_VERSION,
                     "COMPLETED",
-                    new MatchPlaybackDTO.ArenaStateDTO(800, 800, 60, List.of()),
+                    new MatchPlaybackDTO.ArenaStateDTO(800, 800, List.of(), List.of()),
                     List.of(),
-                    "RUNNER_WIN",
-                    runner.userId(),
-                    "RUNNER",
-                    runner.username() + " wins as runner by timeout.");
+                    "FIGHTER_WIN",
+                    winner.userId(),
+                    winner.username() + " wins the fight.");
         });
     }
 
@@ -135,15 +137,14 @@ class MatchmakingServiceTest {
             assertThat(event.status()).isEqualTo("COUNTDOWN");
             assertThat(event.matchId()).isNotNull();
             assertThat(event.players()).hasSize(2);
-            assertThat(event.players()).extracting("role").containsExactlyInAnyOrder("CHASER", "RUNNER");
+            assertThat(event.players()).extracting("slot").containsExactlyInAnyOrder(1, 2);
             assertThat(event.opponent()).isNotNull();
             assertThat(event.countdownEndsAt()).isNotNull();
             assertThat(event.trainingEndsAt()).isNotNull();
-            assertThat(event.rulesetVersion()).isEqualTo("tag-v1");
+            assertThat(event.trainingEndsAt()).isEqualTo(event.countdownEndsAt().plusSeconds(600));
+            assertThat(event.rulesetVersion()).isEqualTo("duel-v1");
         });
         assertThat(participants).hasSize(2);
-        assertThat(participants).extracting(MatchParticipant::getParticipantRole)
-                .containsExactlyInAnyOrder("CHASER", "RUNNER");
     }
 
     @Test
@@ -159,7 +160,7 @@ class MatchmakingServiceTest {
     }
 
     @Test
-    void bothPlayersFinishingProducesPlaybackReadyEvents() {
+    void firstRoundWinProducesPlaybackAndNextRoundEvents() {
         UUID firstUserId = UUID.randomUUID();
         UUID secondUserId = UUID.randomUUID();
         UUID firstSubmissionId = UUID.randomUUID();
@@ -180,7 +181,7 @@ class MatchmakingServiceTest {
 
         List<MatchmakingService.OutboundMatchmakingEvent> secondFinishEvents =
                 service.markFinished(secondUserId, secondSubmissionId);
-        assertThat(secondFinishEvents).hasSize(4);
+        assertThat(secondFinishEvents).hasSize(6);
         assertThat(secondFinishEvents)
                 .filteredOn(outbound -> outbound.event().type().equals("MATCH_PLAYBACK_READY"))
                 .hasSize(2)
@@ -197,9 +198,58 @@ class MatchmakingServiceTest {
                     assertThat(outbound.event().status()).isEqualTo("RESULT_READY");
                     assertThat(outbound.event().playback()).isNotNull();
                     assertThat(outbound.event().playback().frames()).isEmpty();
-                    assertThat(outbound.event().playback().result()).isEqualTo("RUNNER_WIN");
+                    assertThat(outbound.event().playback().result()).isEqualTo("FIGHTER_WIN");
                     assertThat(outbound.delayMillis()).isPositive();
                 });
+        assertThat(secondFinishEvents)
+                .filteredOn(outbound -> outbound.event().type().equals("MATCH_ROUND_READY"))
+                .hasSize(2)
+                .allSatisfy(outbound -> {
+                    assertThat(outbound.event().status()).isEqualTo("COUNTDOWN");
+                    assertThat(outbound.event().roundNumber()).isEqualTo(2);
+                    assertThat(outbound.event().winsRequired()).isEqualTo(2);
+                    assertThat(outbound.event().player().finished()).isFalse();
+                    assertThat(outbound.event().players()).extracting("roundWins").containsExactlyInAnyOrder(0, 1);
+                    assertThat(outbound.delayMillis()).isPositive();
+                });
+        assertThat(savedMatch.getStatus()).isEqualTo(MatchStatus.RUNNING);
+    }
+
+    @Test
+    void secondRoundWinCompletesBestOfThreeMatch() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+
+        UUID firstRoundFirstSubmission = UUID.randomUUID();
+        UUID firstRoundSecondSubmission = UUID.randomUUID();
+        stubSubmission(firstUserId, firstRoundFirstSubmission);
+        stubSubmission(secondUserId, firstRoundSecondSubmission);
+        service.markFinished(firstUserId, firstRoundFirstSubmission);
+        service.markFinished(secondUserId, firstRoundSecondSubmission);
+
+        UUID secondRoundFirstSubmission = UUID.randomUUID();
+        UUID secondRoundSecondSubmission = UUID.randomUUID();
+        stubSubmission(firstUserId, secondRoundFirstSubmission);
+        stubSubmission(secondUserId, secondRoundSecondSubmission);
+        service.markFinished(firstUserId, secondRoundFirstSubmission);
+        List<MatchmakingService.OutboundMatchmakingEvent> finalEvents =
+                service.markFinished(secondUserId, secondRoundSecondSubmission);
+
+        assertThat(finalEvents)
+                .filteredOn(outbound -> outbound.event().type().equals("MATCH_ROUND_READY"))
+                .isEmpty();
+        assertThat(finalEvents)
+                .filteredOn(outbound -> outbound.event().type().equals("MATCH_RESULT_READY"))
+                .hasSize(2)
+                .allSatisfy(outbound -> {
+                    assertThat(outbound.event().roundNumber()).isEqualTo(2);
+                    assertThat(outbound.event().players()).extracting("roundWins").containsExactlyInAnyOrder(0, 2);
+                    assertThat(outbound.event().playback().winnerUserId()).isEqualTo(secondUserId);
+                });
+        assertThat(savedMatch.getStatus()).isEqualTo(MatchStatus.COMPLETED);
+        assertThat(savedMatch.getWinnerUser().getId()).isEqualTo(secondUserId);
     }
 
     @Test
@@ -239,9 +289,10 @@ class MatchmakingServiceTest {
         submission.setId(submissionId);
         submission.setUser(user(userId));
         submission.setArchitectureVersion("dense-movement-v1");
+        submission.setMatchId(savedMatch.getId());
         submission.setFeatureSchemaVersion("arena-features-v1");
         submission.setActionSchemaVersion("movement-v1");
-        submission.setRewardEvents("{}");
+        submission.setTrainingMetrics("{}");
         submission.setModelArtifacts("{}");
         submission.setStatus(ModelSubmissionStatus.VALIDATED);
         when(modelSubmissionRepository.findByIdAndUserId(eq(submissionId), eq(userId)))

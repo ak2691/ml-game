@@ -1,16 +1,37 @@
-# React + Vite
+# Machiner frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## Train the minimal melee base
 
-Currently, two official plugins are available:
+Start the frontend, open the practice arena at `/beta`, add an opponent model,
+and click **Train Base**. Base authoring uses generated states:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- rotation learns to face a nearby opponent;
+- swing learns to fire only while aligned, in range, and off cooldown;
+- movement starts neutral;
+- block starts disabled.
 
-## React Compiler
+The base control is disabled during rated match training. **Approve + Export**
+produces a versioned class artifact for `frontend/public/models/`. Class base
+models, feature schemas, action schemas, and trainers must remain separate.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Supervised melee strategy training
 
-## Expanding the ESLint configuration
+Players choose a movement style, preferred distance, and whether the fighter
+should attack or block at close range. The browser converts that structured
+recipe into a direction-balanced synthetic dataset using relative opponent
+positions. No arbitrary code or reward expressions are executed.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+Each run is capped at 2,048 generated examples, 30 epochs, and 15 seconds. A
+deterministic 80/20 train/validation split reports training and validation loss
+plus action accuracy. Generated examples and TensorFlow tensors are discarded
+immediately after the run; only aggregate metrics and the trained model remain.
+
+Clean Play and rated evaluation are deterministic and never enable
+training-only exploration.
+
+```bash
+npm run dev
+npm test
+npm run lint
+npm run build
+```

@@ -1,9 +1,11 @@
 package com.example.machiner.DTO;
 
+import java.util.UUID;
 import tools.jackson.databind.JsonNode;
 
 public class ModelSubmissionPayloadDTO {
 
+    private UUID matchId;
     private String architectureVersion;
     private String featureSchemaVersion;
     private String actionSchemaVersion;
@@ -11,10 +13,20 @@ public class ModelSubmissionPayloadDTO {
     private String trainingSessionId;
     private Integer trainingDurationMs;
     private Integer trainingSteps;
-    private JsonNode rewardEvents;
+    private String selectedClass;
+    private String baseModelArtifactId;
+    private JsonNode trainingMetrics;
     private String modelHash;
     private String clientBuildVersion;
     private JsonNode model;
+
+    public UUID getMatchId() {
+        return matchId;
+    }
+
+    public void setMatchId(UUID matchId) {
+        this.matchId = matchId;
+    }
 
     public String getArchitectureVersion() {
         return architectureVersion;
@@ -72,12 +84,28 @@ public class ModelSubmissionPayloadDTO {
         this.trainingSteps = trainingSteps;
     }
 
-    public JsonNode getRewardEvents() {
-        return rewardEvents;
+    public String getSelectedClass() {
+        return selectedClass;
     }
 
-    public void setRewardEvents(JsonNode rewardEvents) {
-        this.rewardEvents = rewardEvents;
+    public void setSelectedClass(String selectedClass) {
+        this.selectedClass = selectedClass;
+    }
+
+    public String getBaseModelArtifactId() {
+        return baseModelArtifactId;
+    }
+
+    public void setBaseModelArtifactId(String baseModelArtifactId) {
+        this.baseModelArtifactId = baseModelArtifactId;
+    }
+
+    public JsonNode getTrainingMetrics() {
+        return trainingMetrics;
+    }
+
+    public void setTrainingMetrics(JsonNode trainingMetrics) {
+        this.trainingMetrics = trainingMetrics;
     }
 
     public String getModelHash() {

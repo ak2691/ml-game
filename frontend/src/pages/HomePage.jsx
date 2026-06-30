@@ -46,6 +46,12 @@ export default function HomePage() {
                     >
                         OPEN TRAINING ROOM
                     </button>
+                    <button
+                        onClick={() => navigate("/base-models")}
+                        className="rounded border border-border-lo bg-zinc-900 px-5 py-2 text-sm font-bold text-ink-muted hover:text-ink-white"
+                    >
+                        VIEW BASE MODELS
+                    </button>
                 </div>
             </section>
         </main>

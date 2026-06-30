@@ -7,6 +7,7 @@ import java.util.UUID;
 public record MatchmakingEventDTO(
         String type,
         UUID matchId,
+        Long simulationSeed,
         String status,
         MatchmakingPlayerDTO player,
         MatchmakingPlayerDTO opponent,
@@ -18,5 +19,8 @@ public record MatchmakingEventDTO(
         Instant resultRevealsAt,
         String rulesetVersion,
         MatchPlaybackDTO playback,
+        ModelFingerprintProbeDTO probe,
+        Integer roundNumber,
+        Integer winsRequired,
         String message) {
 }

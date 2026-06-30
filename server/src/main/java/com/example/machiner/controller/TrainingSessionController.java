@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -25,14 +26,17 @@ public class TrainingSessionController {
     }
 
     @PostMapping
-    public ResponseEntity<TrainingSessionResponseDTO> createSession(Authentication authentication) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(trainingSessionService.createSession(authentication));
+    public ResponseEntity<TrainingSessionResponseDTO> createSession(
+            @RequestParam(required = false) UUID matchId,
+            Authentication authentication) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(trainingSessionService.createSession(authentication, matchId));
     }
 
     @GetMapping("/{trainingSessionId}/duration")
     public ResponseEntity<TrainingSessionResponseDTO> getTrustedDuration(
-            @PathVariable UUID trainingSessionId) {
-        return ResponseEntity.ok(trainingSessionService.getDuration(trainingSessionId));
+            @PathVariable UUID trainingSessionId,
+            Authentication authentication) {
+        return ResponseEntity.ok(trainingSessionService.getDuration(trainingSessionId, authentication));
     }
 
     @ExceptionHandler(TrainingSessionNotFoundException.class)

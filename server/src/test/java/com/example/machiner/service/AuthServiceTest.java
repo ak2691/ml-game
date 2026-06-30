@@ -35,7 +35,7 @@ class AuthServiceTest {
             return user;
         });
 
-        var response = service.register(authRequest("Pilot@Example.com", "pilot", "pw"), request);
+        var response = service.register(authRequest("Pilot@Example.com", "pilot", "password123"), request);
 
         assertThat(response.isAuthenticated()).isTrue();
         assertThat(response.getEmail()).isEqualTo("Pilot@Example.com");
@@ -43,23 +43,41 @@ class AuthServiceTest {
 
         verify(userRepository).save(org.mockito.ArgumentMatchers.argThat(user ->
                 user.getNormalizedEmail().equals("pilot@example.com")
-                        && passwordEncoder.matches("pw", user.getPasswordHash())));
+                        && passwordEncoder.matches("password123", user.getPasswordHash())));
     }
 
     @Test
     void rejectsInvalidRegistrationEmail() {
-        assertThatThrownBy(() -> service.register(authRequest("not-email", "pilot", "pw"), requestWithSession()))
+        assertThatThrownBy(() -> service.register(authRequest("not-email", "pilot", "password123"), requestWithSession()))
                 .isInstanceOf(AuthException.class)
                 .hasMessage("email must be a valid email address");
     }
 
     @Test
+    void rejectsUnsafeRegistrationUsername() {
+        assertThatThrownBy(() -> service.register(
+                authRequest("pilot@example.com", "<script>", "password123"),
+                requestWithSession()))
+                .isInstanceOf(AuthException.class)
+                .hasMessage("username may only contain letters, numbers, underscores, and hyphens");
+    }
+
+    @Test
+    void rejectsShortRegistrationPassword() {
+        assertThatThrownBy(() -> service.register(
+                authRequest("pilot@example.com", "pilot", "short"),
+                requestWithSession()))
+                .isInstanceOf(AuthException.class)
+                .hasMessage("password must be between 8 and 128 characters");
+    }
+
+    @Test
     void logsInWithExistingPasswordCredential() throws Exception {
         HttpServletRequest request = requestWithSession();
-        AppUser user = user("pilot@example.com", "pilot", passwordEncoder.encode("pw"));
+        AppUser user = user("pilot@example.com", "pilot", passwordEncoder.encode("password123"));
         when(userRepository.findByNormalizedEmail("pilot@example.com")).thenReturn(Optional.of(user));
 
-        var response = service.login(authRequest("PILOT@example.com", null, "pw"), request);
+        var response = service.login(authRequest("PILOT@example.com", null, "password123"), request);
 
         assertThat(response.isAuthenticated()).isTrue();
         assertThat(response.getId()).isEqualTo(user.getId());
@@ -68,7 +86,7 @@ class AuthServiceTest {
 
     @Test
     void rejectsInvalidLoginPassword() throws Exception {
-        AppUser user = user("pilot@example.com", "pilot", passwordEncoder.encode("pw"));
+        AppUser user = user("pilot@example.com", "pilot", passwordEncoder.encode("password123"));
         when(userRepository.findByNormalizedEmail("pilot@example.com")).thenReturn(Optional.of(user));
 
         assertThatThrownBy(() -> service.login(authRequest("pilot@example.com", null, "wrong"), requestWithSession()))

@@ -11,15 +11,39 @@ public record MatchPlaybackDTO(
         List<ReplayFrameDTO> frames,
         String result,
         UUID winnerUserId,
-        String winnerRole,
         String message) {
 
-    public record ArenaStateDTO(int width, int height, double tagRadius, List<FighterPlacementDTO> fighters) {
+    public record ArenaStateDTO(
+            int width,
+            int height,
+            List<FighterPlacementDTO> fighters,
+            List<ObstaclePlacementDTO> obstacles) {
     }
 
-    public record FighterPlacementDTO(UUID userId, String username, String role, int slot, double x, double y) {
+    public record FighterPlacementDTO(
+            UUID userId,
+            String username,
+            int slot,
+            double x,
+            double y,
+            double rotation,
+            int hp,
+            boolean attackActive,
+            boolean blockActive) {
     }
 
-    public record ReplayFrameDTO(int tick, int elapsedMs, List<FighterPlacementDTO> fighters, boolean tagged) {
+    public record ObstaclePlacementDTO(
+            String id,
+            String type,
+            double x,
+            double y,
+            int size) {
+    }
+
+    public record ReplayFrameDTO(
+            int tick,
+            int elapsedMs,
+            List<FighterPlacementDTO> fighters,
+            List<ObstaclePlacementDTO> obstacles) {
     }
 }

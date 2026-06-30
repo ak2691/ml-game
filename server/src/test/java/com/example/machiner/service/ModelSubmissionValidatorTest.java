@@ -22,6 +22,28 @@ class ModelSubmissionValidatorTest {
     }
 
     @Test
+    void acceptsMeleeActionSchemaMetadata() {
+        ModelSubmission submission = validSubmission();
+        submission.setActionSchemaVersion("melee-actions-v1");
+        submission.setSelectedClass("melee");
+
+        ModelSubmissionValidationResult result = validator.validate(submission);
+
+        assertThat(result.isValid()).isTrue();
+    }
+
+    @Test
+    void acceptsDiscreteMeleeActionSchemaMetadata() {
+        ModelSubmission submission = validSubmission();
+        submission.setActionSchemaVersion("melee-discrete-actions-v2");
+        submission.setSelectedClass("melee");
+
+        ModelSubmissionValidationResult result = validator.validate(submission);
+
+        assertThat(result.isValid()).isTrue();
+    }
+
+    @Test
     void rejectsMissingRequiredSubmissionFields() {
         ModelSubmission submission = new ModelSubmission();
 
@@ -35,14 +57,14 @@ class ModelSubmissionValidatorTest {
     }
 
     @Test
-    void rejectsNonMovementActionSchemaForCurrentPrototype() {
+    void rejectsUnsupportedActionSchemaForCurrentPrototype() {
         ModelSubmission submission = validSubmission();
         submission.setActionSchemaVersion("attack-v1");
 
         ModelSubmissionValidationResult result = validator.validate(submission);
 
         assertThat(result.isValid()).isFalse();
-        assertThat(result.errors()).contains("actionSchemaVersion must be movement-v1");
+        assertThat(result.errors()).contains("actionSchemaVersion is not supported");
     }
 
     @Test
@@ -62,12 +84,12 @@ class ModelSubmissionValidatorTest {
     @Test
     void rejectsInvalidRewardEventJson() {
         ModelSubmission submission = validSubmission();
-        submission.setRewardEvents("{not-json");
+        submission.setTrainingMetrics("{not-json");
 
         ModelSubmissionValidationResult result = validator.validate(submission);
 
         assertThat(result.isValid()).isFalse();
-        assertThat(result.errors()).contains("rewardEvents must be valid JSON");
+        assertThat(result.errors()).contains("trainingMetrics must be valid JSON");
     }
 
     private ModelSubmission validSubmission() {
@@ -79,7 +101,7 @@ class ModelSubmissionValidatorTest {
         submission.setTrainingSessionId("local-session-1");
         submission.setTrainingDurationMs(15000);
         submission.setTrainingSteps(120);
-        submission.setRewardEvents("{\"movesTowardTarget\":12,\"collisions\":1}");
+        submission.setTrainingMetrics("{\"movementAccuracy\":0.95,\"validationLoss\":0.12}");
         submission.setModelHash("sha256:prototype");
         submission.setClientBuildVersion("local-dev");
         return submission;

@@ -13,7 +13,12 @@ public class ModelSubmissionValidator {
     private static final int MAX_TRAINING_SESSION_ID_LENGTH = 100;
     private static final int MAX_CLIENT_BUILD_VERSION_LENGTH = 100;
     private static final int MAX_MODEL_HASH_LENGTH = 128;
+    private static final int MAX_SELECTED_CLASS_LENGTH = 40;
+    private static final int MAX_BASE_MODEL_ARTIFACT_ID_LENGTH = 100;
     private static final String MOVEMENT_ACTION_SCHEMA_VERSION = "movement-v1";
+    private static final String MELEE_ACTION_SCHEMA_VERSION = "melee-actions-v1";
+    private static final String MELEE_ACTION_SCHEMA_VERSION_V2 = "melee-discrete-actions-v2";
+    private static final String MELEE_ACTION_SCHEMA_VERSION_V3 = "melee-dash-actions-v3";
 
     private final JsonMapper jsonMapper;
 
@@ -38,18 +43,24 @@ public class ModelSubmissionValidator {
         requireText(errors, submission.getActionSchemaVersion(), "actionSchemaVersion", MAX_VERSION_LENGTH);
 
         if (hasText(submission.getActionSchemaVersion())
-                && !MOVEMENT_ACTION_SCHEMA_VERSION.equals(submission.getActionSchemaVersion())) {
-            errors.add("actionSchemaVersion must be movement-v1");
+                && !MOVEMENT_ACTION_SCHEMA_VERSION.equals(submission.getActionSchemaVersion())
+                && !MELEE_ACTION_SCHEMA_VERSION.equals(submission.getActionSchemaVersion())
+                && !MELEE_ACTION_SCHEMA_VERSION_V2.equals(submission.getActionSchemaVersion())
+                && !MELEE_ACTION_SCHEMA_VERSION_V3.equals(submission.getActionSchemaVersion())) {
+            errors.add("actionSchemaVersion is not supported");
         }
 
         rejectNegative(errors, submission.getTrainingDurationMs(), "trainingDurationMs");
         rejectNegative(errors, submission.getTrainingSteps(), "trainingSteps");
 
         rejectTooLong(errors, submission.getTrainingSessionId(), "trainingSessionId", MAX_TRAINING_SESSION_ID_LENGTH);
+        rejectTooLong(errors, submission.getSelectedClass(), "selectedClass", MAX_SELECTED_CLASS_LENGTH);
+        rejectTooLong(errors, submission.getBaseModelArtifactId(),
+                "baseModelArtifactId", MAX_BASE_MODEL_ARTIFACT_ID_LENGTH);
         rejectTooLong(errors, submission.getModelHash(), "modelHash", MAX_MODEL_HASH_LENGTH);
         rejectTooLong(errors, submission.getClientBuildVersion(), "clientBuildVersion", MAX_CLIENT_BUILD_VERSION_LENGTH);
 
-        validateJson(errors, submission.getRewardEvents(), "rewardEvents");
+        validateJson(errors, submission.getTrainingMetrics(), "trainingMetrics");
 
         return new ModelSubmissionValidationResult(errors);
     }

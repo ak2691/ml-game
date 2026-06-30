@@ -6,6 +6,7 @@ import java.util.UUID;
 public class TrainingSessionResponseDTO {
 
     private UUID trainingSessionId;
+    private UUID matchId;
     private Instant startedAt;
     private Long trainingDurationMs;
     private boolean trusted;
@@ -17,6 +18,14 @@ public class TrainingSessionResponseDTO {
 
     public void setTrainingSessionId(UUID trainingSessionId) {
         this.trainingSessionId = trainingSessionId;
+    }
+
+    public UUID getMatchId() {
+        return matchId;
+    }
+
+    public void setMatchId(UUID matchId) {
+        this.matchId = matchId;
     }
 
     public Instant getStartedAt() {

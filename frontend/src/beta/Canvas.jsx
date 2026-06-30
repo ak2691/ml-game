@@ -30,6 +30,7 @@ export default function Canvas({ shapes, selectedId, onSelectShape, onUpdateShap
                     isSelected={selectedId === shape.id}
                     onSelect={onSelectShape}
                     onDragEnd={(id, pos) => onUpdateShape(id, pos)}
+                    locked={Boolean(shape.locked)}
                 />
             ))}
         </div>

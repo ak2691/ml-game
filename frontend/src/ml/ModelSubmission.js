@@ -8,6 +8,7 @@ import {
     TRAINING_SESSION_ENDPOINT,
 } from "./ModelSubmissionContract";
 import { ensureCsrfHeaders } from "../security/csrf";
+import { getBaseModelDefinition } from "./BaseModelArtifact.js";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 
@@ -52,23 +53,57 @@ async function serializeModel(model) {
 
 export async function buildModelSubmissionPayload({
     model,
+    matchId = null,
     trainingSessionId,
     trainingSteps,
-    rewardEvents,
+    trainingMetrics,
+    selectedClass = "melee",
 }) {
     const serializedModel = await serializeModel(model);
+    const baseModel = getBaseModelDefinition(selectedClass);
 
     return {
         architectureVersion: MODEL_ARCHITECTURE_VERSION,
         featureSchemaVersion: FEATURE_SCHEMA_VERSION,
         actionSchemaVersion: ACTION_SCHEMA_VERSION,
         modelFormat: MODEL_FORMAT,
+        matchId,
         trainingSessionId,
         trainingDurationMs: null,
         trainingSteps,
-        rewardEvents,
+        selectedClass,
+        baseModelArtifactId: baseModel.artifactId,
+        trainingMetrics,
         clientBuildVersion: CLIENT_BUILD_VERSION,
         model: serializedModel,
+    };
+}
+
+export async function buildModelFingerprintProbeResponse({
+    model,
+    probe,
+    trainingStepCount,
+}) {
+    if (!model || !probe?.probeId || !Array.isArray(probe.weightIndices)) {
+        throw new Error("A model and server probe request are required.");
+    }
+
+    const allWeights = [];
+    const tensors = model.getWeights();
+    for (const tensor of tensors) {
+        const values = await tensor.data();
+        for (let i = 0; i < values.length; i++) {
+            allWeights.push(values[i]);
+        }
+    }
+
+    return {
+        probeId: probe.probeId,
+        values: probe.weightIndices.map((index) => {
+            const value = allWeights[index];
+            return Number.isFinite(value) ? value : null;
+        }),
+        trainingStepCount,
     };
 }
 
@@ -95,8 +130,11 @@ export async function submitModelPayload(payload) {
     return body;
 }
 
-export async function createTrainingSession() {
-    const response = await fetch(TRAINING_SESSION_ENDPOINT, {
+export async function createTrainingSession(matchId = null) {
+    const endpoint = matchId
+        ? `${TRAINING_SESSION_ENDPOINT}?matchId=${encodeURIComponent(matchId)}`
+        : TRAINING_SESSION_ENDPOINT;
+    const response = await fetch(endpoint, {
         method: "POST",
         credentials: "include",
         headers: {

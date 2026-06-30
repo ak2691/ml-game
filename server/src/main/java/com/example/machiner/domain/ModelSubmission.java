@@ -28,6 +28,9 @@ public class ModelSubmission {
     @JoinColumn(name = "user_id", nullable = false)
     private AppUser user;
 
+    @Column(name = "match_id")
+    private UUID matchId;
+
     @Column(name = "architecture_version", nullable = false, length = 50)
     private String architectureVersion;
 
@@ -46,9 +49,15 @@ public class ModelSubmission {
     @Column(name = "training_steps")
     private Integer trainingSteps;
 
+    @Column(name = "selected_class", length = 40)
+    private String selectedClass;
+
+    @Column(name = "base_model_artifact_id", length = 100)
+    private String baseModelArtifactId;
+
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "reward_events", nullable = false)
-    private String rewardEvents = "{}";
+    @Column(name = "training_metrics", nullable = false)
+    private String trainingMetrics = "{}";
 
     @Column(name = "model_hash", length = 128)
     private String modelHash;
@@ -84,6 +93,14 @@ public class ModelSubmission {
 
     public void setUser(AppUser user) {
         this.user = user;
+    }
+
+    public UUID getMatchId() {
+        return matchId;
+    }
+
+    public void setMatchId(UUID matchId) {
+        this.matchId = matchId;
     }
 
     public String getArchitectureVersion() {
@@ -134,12 +151,28 @@ public class ModelSubmission {
         this.trainingSteps = trainingSteps;
     }
 
-    public String getRewardEvents() {
-        return rewardEvents;
+    public String getSelectedClass() {
+        return selectedClass;
     }
 
-    public void setRewardEvents(String rewardEvents) {
-        this.rewardEvents = rewardEvents;
+    public void setSelectedClass(String selectedClass) {
+        this.selectedClass = selectedClass;
+    }
+
+    public String getBaseModelArtifactId() {
+        return baseModelArtifactId;
+    }
+
+    public void setBaseModelArtifactId(String baseModelArtifactId) {
+        this.baseModelArtifactId = baseModelArtifactId;
+    }
+
+    public String getTrainingMetrics() {
+        return trainingMetrics;
+    }
+
+    public void setTrainingMetrics(String trainingMetrics) {
+        this.trainingMetrics = trainingMetrics;
     }
 
     public String getModelHash() {

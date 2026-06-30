@@ -93,6 +93,14 @@ export function createMatchmakingClient({ onEvent, onStatus }) {
                 JSON.stringify({ modelSubmissionId })
             );
         },
+        sendProbeResponse(response) {
+            if (!connected) return;
+            sendFrame(
+                "SEND",
+                { destination: "/app/matchmaking.probe", "content-type": "application/json" },
+                JSON.stringify(response)
+            );
+        },
         surrender() {
             if (!connected) return;
             sendFrame("SEND", { destination: "/app/matchmaking.surrender" }, "{}");

@@ -23,7 +23,20 @@ class ModelSubmissionValidationServiceTest {
         assertThat(result.getComputedModelHash()).startsWith("sha256:");
         assertThat(result.getWarnings()).contains(
                 "modelHash was not provided; server computed one from submitted model",
-                "trainingDurationMs is not trusted yet because server-owned sessions are not implemented");
+                "trainingDurationMs will be computed from the server-owned training session");
+    }
+
+    @Test
+    void acceptsValidMeleeModelContract() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setArchitectureVersion("melee-heads-v5");
+        payload.setFeatureSchemaVersion("duel-logic-features-v4");
+        payload.setActionSchemaVersion("melee-dash-actions-v3");
+        payload.setSelectedClass("melee");
+
+        var result = service.validate(payload);
+
+        assertThat(result.isAccepted()).isTrue();
     }
 
     @Test
@@ -47,7 +60,24 @@ class ModelSubmissionValidationServiceTest {
         var result = service.validate(payload);
 
         assertThat(result.isAccepted()).isFalse();
-        assertThat(result.getErrors()).contains("featureSchemaVersion must be arena-features-v1");
+        assertThat(result.getErrors()).contains("featureSchemaVersion is not supported");
+    }
+
+    @Test
+    void rejectsTrainingThatExceedsTheRoundBudget() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setTrainingSteps(92_161);
+        payload.setTrainingMetrics(jsonMapper.readTree("""
+                {"trainingSamples":3073,"epochsCompleted":31}
+                """));
+
+        var result = service.validate(payload);
+
+        assertThat(result.isAccepted()).isFalse();
+        assertThat(result.getErrors()).contains(
+                "trainingSteps exceeds the round training limit",
+                "trainingMetrics.trainingSamples exceeds the round sample limit",
+                "trainingMetrics.epochsCompleted exceeds the round epoch limit");
     }
 
     private ModelSubmissionPayloadDTO validPayload() throws Exception {
@@ -56,11 +86,11 @@ class ModelSubmissionValidationServiceTest {
         payload.setFeatureSchemaVersion("arena-features-v1");
         payload.setActionSchemaVersion("movement-v1");
         payload.setModelFormat("tfjs-layers-v1");
-        payload.setTrainingSessionId("local-session-1");
+        payload.setTrainingSessionId("11111111-1111-1111-1111-111111111111");
         payload.setTrainingDurationMs(null);
         payload.setTrainingSteps(3);
-        payload.setRewardEvents(jsonMapper.readTree("""
-                {"version":"reward-events-v1","events":[],"totals":{"rewardCount":0}}
+        payload.setTrainingMetrics(jsonMapper.readTree("""
+                {"version":"melee-supervised-training-metrics-v1","validationLoss":0.12}
                 """));
 
         JsonNode model = jsonMapper.readTree("""

@@ -1,60 +1,71 @@
-const MAX_OBJECTS = 10;
+const MAX_OBSTACLES = 5;
 
-export default function Toolbar({ onAddShape, onClearSelected, selectedId, submitStatus, objectCount }) {
+export default function Toolbar({ onAddShape, onSelectMain, selectedId, submitStatus, obstacleCount, obstaclesLocked = false }) {
     const shapes = [
-        { type: "opponentModel", label: "Opponent", icon: "VS" },
-        { type: "circle", label: "Circle", icon: "O" },
-        { type: "square", label: "Square", icon: "[]" },
-        { type: "triangle", label: "Triangle", icon: "^" },
+        { type: "main", label: "Player Model", icon: "M" },
+        { type: "opponentModel", label: "Opponent Model", icon: "VS" },
+    ];
+    const obstacles = [
+        { type: "healthPack", label: "Health Pack", icon: "+" },
+        { type: "damageZone", label: "Damage Zone", icon: "!" },
     ];
 
-    const atLimit = objectCount >= MAX_OBJECTS;
+    const atLimit = obstacleCount >= MAX_OBSTACLES;
+    const disableObstacleButtons = atLimit || obstaclesLocked;
 
     return (
         <div className="w-44 flex-shrink-0 bg-arena-panel border-r border-border-lo flex flex-col gap-0 overflow-y-auto px-3.5 py-5">
             <div className="flex items-center justify-between mb-2">
-                <span className="font-mono text-[10px] tracking-[0.15em] text-ink-muted">OBJECTS</span>
-                <span className={`font-mono text-[10px] tracking-widest ${atLimit ? "text-danger" : "text-ink-muted"}`}>
-                    {objectCount}/{MAX_OBJECTS}
-                </span>
+                <span className="font-mono text-[10px] tracking-[0.15em] text-ink-muted">MODELS</span>
             </div>
 
             <div className="flex flex-col gap-1.5 mb-4">
                 {shapes.map(({ type, label, icon }) => (
                     <button
                         key={type}
-                        onClick={() => onAddShape(type)}
-                        disabled={atLimit}
-                        className={`flex items-center gap-2.5 w-full px-3 py-2 bg-arena-surface border border-border-lo rounded-md font-ui font-semibold text-sm tracking-wide transition-all duration-150 ${atLimit
-                            ? "opacity-30 cursor-not-allowed text-ink-muted"
-                            : "text-ink-mid cursor-pointer hover:bg-arena-hover hover:border-border-hi hover:text-ink-white"
-                            }`}
+                        onClick={() => type === "main" ? onSelectMain() : onAddShape(type)}
+                        className="flex items-center gap-2.5 w-full px-3 py-2 bg-arena-surface border border-border-lo rounded-md font-ui font-semibold text-sm tracking-wide transition-all duration-150 text-ink-mid cursor-pointer hover:bg-arena-hover hover:border-border-hi hover:text-ink-white"
                     >
-                        <span className={`text-[13px] w-4 text-center ${atLimit ? "text-ink-muted" : "text-cyan"}`}>{icon}</span>
+                        <span className="text-[13px] w-4 text-center text-cyan">{icon}</span>
                         <span className="text-[13px]">{label}</span>
                     </button>
                 ))}
             </div>
 
-            {atLimit && (
+            <div className="flex items-center justify-between mb-2">
+                <span className="font-mono text-[10px] tracking-[0.15em] text-ink-muted">OBSTACLES</span>
+                <span className={`font-mono text-[10px] tracking-widest ${atLimit ? "text-danger" : "text-ink-muted"}`}>
+                    {obstacleCount}/{MAX_OBSTACLES}
+                </span>
+            </div>
+
+            <div className="flex flex-col gap-1.5 mb-4">
+                {obstacles.map(({ type, label, icon }) => (
+                    <button
+                        key={type}
+                        onClick={() => onAddShape(type)}
+                        disabled={disableObstacleButtons}
+                        className={`flex items-center gap-2.5 w-full px-3 py-2 bg-arena-surface border border-border-lo rounded-md font-ui font-semibold text-sm tracking-wide transition-all duration-150 ${disableObstacleButtons
+                            ? "opacity-30 cursor-not-allowed text-ink-muted"
+                            : "text-ink-mid cursor-pointer hover:bg-arena-hover hover:border-border-hi hover:text-ink-white"
+                            }`}
+                    >
+                        <span className={`text-[13px] w-4 text-center ${disableObstacleButtons ? "text-ink-muted" : "text-cyan"}`}>{icon}</span>
+                        <span className="text-[13px]">{label}</span>
+                    </button>
+                ))}
+            </div>
+
+            {(atLimit || obstaclesLocked) && (
                 <p className="font-mono text-[10px] text-danger/70 text-center mb-3 -mt-2">
-                    Max objects reached
+                    {obstaclesLocked ? "Match obstacles locked" : "Max obstacles reached"}
                 </p>
             )}
 
             {selectedId && (
-                <>
-                    <div className="h-px bg-border-lo my-3" />
-                    <span className="font-mono text-[10px] tracking-[0.15em] text-ink-muted mb-2 block">
-                        SELECTED
-                    </span>
-                    <button
-                        onClick={onClearSelected}
-                        className="w-full px-3 py-2 rounded-md font-mono text-xs tracking-widest cursor-pointer transition-all duration-150 bg-danger/[0.07] border border-danger-dim text-danger hover:bg-danger/[0.15] hover:border-danger"
-                    >
-                        REMOVE
-                    </button>
-                </>
+                <div className="mt-3 px-2.5 py-1.5 rounded font-mono text-[10px] tracking-widest text-center border border-cyan-dim bg-cyan/10 text-cyan">
+                    SELECTED
+                </div>
             )}
 
             {submitStatus && (
