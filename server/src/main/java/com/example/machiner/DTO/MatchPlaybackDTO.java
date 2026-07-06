@@ -28,8 +28,11 @@ public record MatchPlaybackDTO(
             double y,
             double rotation,
             int hp,
+            String combatClass,
             boolean attackActive,
-            boolean blockActive) {
+            boolean blockActive,
+            Integer gunAmmo,
+            Integer gunReloadMs) {
     }
 
     public record ObstaclePlacementDTO(

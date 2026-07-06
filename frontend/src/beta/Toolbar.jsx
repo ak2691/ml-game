@@ -1,6 +1,15 @@
 const MAX_OBSTACLES = 5;
 
-export default function Toolbar({ onAddShape, onSelectMain, selectedId, submitStatus, obstacleCount, obstaclesLocked = false }) {
+export default function Toolbar({
+    onAddShape,
+    onSelectMain,
+    onDeleteSelected,
+    selectedId,
+    submitStatus,
+    obstacleCount,
+    obstaclesLocked = false,
+    canDeleteSelected = false,
+}) {
     const shapes = [
         { type: "main", label: "Player Model", icon: "M" },
         { type: "opponentModel", label: "Opponent Model", icon: "VS" },
@@ -63,8 +72,16 @@ export default function Toolbar({ onAddShape, onSelectMain, selectedId, submitSt
             )}
 
             {selectedId && (
-                <div className="mt-3 px-2.5 py-1.5 rounded font-mono text-[10px] tracking-widest text-center border border-cyan-dim bg-cyan/10 text-cyan">
-                    SELECTED
+                <div className="mt-3 rounded border border-cyan-dim bg-cyan/10 px-2.5 py-2 font-mono text-[10px] tracking-widest text-center text-cyan">
+                    <div>SELECTED</div>
+                    <button
+                        type="button"
+                        onClick={onDeleteSelected}
+                        disabled={!canDeleteSelected}
+                        className="mt-2 h-8 w-full rounded border border-red-800/70 bg-red-950/30 text-[10px] font-bold tracking-widest text-red-300 disabled:cursor-not-allowed disabled:opacity-35"
+                    >
+                        DELETE
+                    </button>
                 </div>
             )}
 

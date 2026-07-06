@@ -2,7 +2,6 @@ import { BrowserRouter, Navigate, Routes, Route } from 'react-router-dom'
 import { AuthProvider } from './auth/AuthContext'
 import ProtectedRoute from './auth/ProtectedRoute'
 import BetaModel from './beta/BetaModel'
-import BaseModelViewer from './baseModels/BaseModelViewer'
 import HomePage from './pages/HomePage'
 import LoginPage from './pages/LoginPage'
 import MatchmakingPage from './pages/MatchmakingPage'
@@ -36,10 +35,6 @@ function App() {
                 <BetaModel />
               </ProtectedRoute>
             )}
-          />
-          <Route
-            path="/base-models"
-            element={<BaseModelViewer />}
           />
           <Route
             path="/matchmaking"

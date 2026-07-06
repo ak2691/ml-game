@@ -18,6 +18,7 @@ public class ModelSubmissionPayloadDTO {
     private JsonNode trainingMetrics;
     private String modelHash;
     private String clientBuildVersion;
+    private JsonNode brain;
     private JsonNode model;
 
     public UUID getMatchId() {
@@ -122,6 +123,14 @@ public class ModelSubmissionPayloadDTO {
 
     public void setClientBuildVersion(String clientBuildVersion) {
         this.clientBuildVersion = clientBuildVersion;
+    }
+
+    public JsonNode getBrain() {
+        return brain;
+    }
+
+    public void setBrain(JsonNode brain) {
+        this.brain = brain;
     }
 
     public JsonNode getModel() {

@@ -12,7 +12,7 @@ class ModelSubmissionValidatorTest {
     private final ModelSubmissionValidator validator = new ModelSubmissionValidator(new JsonMapper());
 
     @Test
-    void acceptsMovementModelSubmissionMetadata() {
+    void acceptsDeterministicBrainSubmissionMetadata() {
         ModelSubmission submission = validSubmission();
 
         ModelSubmissionValidationResult result = validator.validate(submission);
@@ -22,25 +22,25 @@ class ModelSubmissionValidatorTest {
     }
 
     @Test
-    void acceptsMeleeActionSchemaMetadata() {
+    void rejectsLegacyMovementActionSchemaMetadata() {
         ModelSubmission submission = validSubmission();
-        submission.setActionSchemaVersion("melee-actions-v1");
-        submission.setSelectedClass("melee");
+        submission.setActionSchemaVersion("movement-v1");
 
         ModelSubmissionValidationResult result = validator.validate(submission);
 
-        assertThat(result.isValid()).isTrue();
+        assertThat(result.isValid()).isFalse();
+        assertThat(result.errors()).contains("actionSchemaVersion is not supported");
     }
 
     @Test
-    void acceptsDiscreteMeleeActionSchemaMetadata() {
+    void rejectsLegacyMeleeActionSchemaMetadata() {
         ModelSubmission submission = validSubmission();
         submission.setActionSchemaVersion("melee-discrete-actions-v2");
-        submission.setSelectedClass("melee");
 
         ModelSubmissionValidationResult result = validator.validate(submission);
 
-        assertThat(result.isValid()).isTrue();
+        assertThat(result.isValid()).isFalse();
+        assertThat(result.errors()).contains("actionSchemaVersion is not supported");
     }
 
     @Test
@@ -95,13 +95,13 @@ class ModelSubmissionValidatorTest {
     private ModelSubmission validSubmission() {
         ModelSubmission submission = new ModelSubmission();
         submission.setUser(new AppUser());
-        submission.setArchitectureVersion("dense-movement-v1");
-        submission.setFeatureSchemaVersion("arena-features-v1");
-        submission.setActionSchemaVersion("movement-v1");
+        submission.setArchitectureVersion("deterministic-logic-v1");
+        submission.setFeatureSchemaVersion("duel-logic-features-v1");
+        submission.setActionSchemaVersion("melee-logic-actions-v1");
         submission.setTrainingSessionId("local-session-1");
         submission.setTrainingDurationMs(15000);
-        submission.setTrainingSteps(120);
-        submission.setTrainingMetrics("{\"movementAccuracy\":0.95,\"validationLoss\":0.12}");
+        submission.setTrainingSteps(0);
+        submission.setTrainingMetrics("{\"version\":\"deterministic-logic-check-v1\",\"trainingSamples\":0,\"epochsCompleted\":0}");
         submission.setModelHash("sha256:prototype");
         submission.setClientBuildVersion("local-dev");
         return submission;

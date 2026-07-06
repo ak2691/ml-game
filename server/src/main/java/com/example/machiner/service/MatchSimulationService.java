@@ -2,17 +2,16 @@ package com.example.machiner.service;
 
 import com.example.machiner.DTO.MatchPlaybackDTO;
 import com.example.machiner.domain.ModelSubmission;
+import com.example.machiner.simulation.DuelSimulationService;
+import com.example.machiner.simulation.DuelSimulationService.DuelArenaRequest;
+import com.example.machiner.simulation.DuelSimulationService.DuelFighterRequest;
+import com.example.machiner.simulation.DuelSimulationService.DuelSimulationRequest;
+import com.example.machiner.simulation.DuelSimulationService.ObstacleRequest;
 import com.example.machiner.service.MatchmakingService.MatchPlayer;
 import com.example.machiner.service.MatchmakingService.MatchSession;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -25,16 +24,12 @@ public class MatchSimulationService {
     private static final int FIGHTER_SIZE = 60;
     private static final int SIMULATION_DURATION_MS = 30_000;
 
-    private final URI simulationUri;
     private final JsonMapper jsonMapper;
-    private final HttpClient httpClient;
+    private final DuelSimulationService duelSimulationService;
 
-    public MatchSimulationService(
-            @Value("${machiner.ml-server.url:http://localhost:3000}") String mlServerUrl,
-            JsonMapper jsonMapper) {
-        this.simulationUri = URI.create(trimTrailingSlash(mlServerUrl) + "/api/duel-v1/simulate");
+    public MatchSimulationService(JsonMapper jsonMapper, DuelSimulationService duelSimulationService) {
         this.jsonMapper = jsonMapper;
-        this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build();
+        this.duelSimulationService = duelSimulationService;
     }
 
     public MatchPlaybackDTO buildDuelPlayback(
@@ -42,19 +37,21 @@ public class MatchSimulationService {
             Map<UUID, ModelSubmission> submissionsByUserId) {
         try {
             DuelSimulationRequest request = toRequest(session, submissionsByUserId);
-            HttpRequest httpRequest = HttpRequest.newBuilder(simulationUri)
-                    .timeout(Duration.ofSeconds(15))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(jsonMapper.writeValueAsString(request)))
-                    .build();
-            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                return failedPlayback(session, "ML simulation failed with HTTP " + response.statusCode());
-            }
-            return jsonMapper.readValue(response.body(), MatchPlaybackDTO.class);
+            return duelSimulationService.simulate(request);
         } catch (Exception ex) {
-            return failedPlayback(session, "ML simulation failed: " + ex.getClass().getSimpleName());
+            return failedPlayback(session, "Bot simulation failed: " + ex.getClass().getSimpleName());
         }
+    }
+
+    public List<MatchPlaybackDTO.ObstaclePlacementDTO> buildMatchObstacles(MatchSession session) {
+        List<DuelFighterRequest> fighters = session.players().stream()
+                .map(player -> toFighterRequest(player, null))
+                .toList();
+        return duelSimulationService.createMatchObstaclePlacements(
+                session.simulationSeed(),
+                ARENA_SIZE,
+                ARENA_SIZE,
+                fighters);
     }
 
     private DuelSimulationRequest toRequest(
@@ -67,8 +64,22 @@ public class MatchSimulationService {
                 session.matchId(),
                 DUEL_RULESET_VERSION,
                 session.simulationSeed(),
-                new DuelArenaRequest(ARENA_SIZE, ARENA_SIZE, SIMULATION_DURATION_MS),
+                new DuelArenaRequest(ARENA_SIZE, ARENA_SIZE, SIMULATION_DURATION_MS, toObstacleRequests(session.obstacles())),
                 fighters);
+    }
+
+    private List<ObstacleRequest> toObstacleRequests(List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
+        if (obstacles == null || obstacles.isEmpty()) {
+            return null;
+        }
+        return obstacles.stream()
+                .map(obstacle -> new ObstacleRequest(
+                        obstacle.id(),
+                        obstacle.type(),
+                        obstacle.x(),
+                        obstacle.y(),
+                        obstacle.size()))
+                .toList();
     }
 
     private DuelFighterRequest toFighterRequest(MatchPlayer player, ModelSubmission submission) {
@@ -79,33 +90,24 @@ public class MatchSimulationService {
                 player.slot(),
                 x,
                 ARENA_SIZE / 2.0,
-                player.slot() == 1 ? 0 : 180,
+                player.slot() == 1 ? 0.0 : 180.0,
                 FIGHTER_SIZE,
-                readModelArtifacts(submission),
-                readStrategyConfiguration(submission));
+                hasText(submission != null ? submission.getSelectedClass() : null)
+                        ? submission.getSelectedClass()
+                        : hasText(player.selectedClass()) ? player.selectedClass() : "melee",
+                readBrain(submission));
     }
 
-    private JsonNode readModelArtifacts(ModelSubmission submission) {
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private JsonNode readBrain(ModelSubmission submission) {
         if (submission == null || submission.getModelArtifacts() == null || submission.getModelArtifacts().isBlank()) {
             return jsonMapper.createObjectNode();
         }
         try {
             return jsonMapper.readTree(submission.getModelArtifacts());
-        } catch (Exception ex) {
-            return jsonMapper.createObjectNode();
-        }
-    }
-
-    private JsonNode readStrategyConfiguration(ModelSubmission submission) {
-        if (submission == null || submission.getTrainingMetrics() == null || submission.getTrainingMetrics().isBlank()) {
-            return jsonMapper.createObjectNode();
-        }
-        try {
-            JsonNode metrics = jsonMapper.readTree(submission.getTrainingMetrics());
-            JsonNode configuration = metrics.get("configuration");
-            return configuration != null && configuration.isObject()
-                    ? configuration
-                    : jsonMapper.createObjectNode();
         } catch (Exception ex) {
             return jsonMapper.createObjectNode();
         }
@@ -121,45 +123,25 @@ public class MatchSimulationService {
                         ARENA_SIZE / 2.0,
                         player.slot() == 1 ? 0 : 180,
                         100,
+                        hasText(player.selectedClass()) ? player.selectedClass() : "melee",
                         false,
-                        false))
+                        false,
+                        null,
+                        null))
                 .toList();
         return new MatchPlaybackDTO(
                 session.matchId(),
                 DUEL_RULESET_VERSION,
                 "FAILED",
-                new MatchPlaybackDTO.ArenaStateDTO(ARENA_SIZE, ARENA_SIZE, fighters, List.of()),
+                new MatchPlaybackDTO.ArenaStateDTO(
+                        ARENA_SIZE,
+                        ARENA_SIZE,
+                        fighters,
+                        session.obstacles() != null ? session.obstacles() : List.of()),
                 List.of(),
                 "ERROR",
                 null,
                 message);
     }
 
-    private static String trimTrailingSlash(String value) {
-        if (value == null || value.isBlank()) return "http://localhost:3000";
-        return value.endsWith("/") ? value.substring(0, value.length() - 1) : value;
-    }
-
-    private record DuelSimulationRequest(
-            UUID matchId,
-            String rulesetVersion,
-            long seed,
-            DuelArenaRequest arena,
-            List<DuelFighterRequest> fighters) {
-    }
-
-    private record DuelArenaRequest(int width, int height, int durationMs) {
-    }
-
-    private record DuelFighterRequest(
-            UUID userId,
-            String username,
-            int slot,
-            double x,
-            double y,
-            double rotation,
-            int size,
-            JsonNode model,
-            JsonNode strategy) {
-    }
 }

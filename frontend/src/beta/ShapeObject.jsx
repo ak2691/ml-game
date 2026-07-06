@@ -1,10 +1,49 @@
 import { useEffect, useRef } from "react";
+import { BLOCK_MAX_CHARGES, BLOCK_RECHARGE_MS } from "./classes/MeleeClass.jsx";
+import { GUN_COOLDOWN_MS, GUN_RANGE, RANGED_AMMO_MAX, RANGED_RELOAD_MS } from "./classes/RangedClass.jsx";
 
 const CANVAS_SIZE = 800;
 const MAIN_RADIUS = 30;
 
 function WeaponVisual({ shape }) {
     const size = shape.id === "main" ? MAIN_RADIUS * 2 : shape.size;
+    const isRanged = shape.combatClass === "ranged";
+    const gunActiveMs = shape.gunActiveMs ?? 0;
+    const gunOpacity = Math.max(0, Math.min(1, gunActiveMs / GUN_COOLDOWN_MS));
+
+    if (isRanged) {
+        const barrelLength = size * 0.68;
+        const barrelHeight = 10;
+        const barrelLeft = size / 2;
+        const rayLeft = barrelLeft + barrelLength;
+        return (
+            <>
+                <div
+                    className="absolute rounded-sm border border-amber-100 bg-amber-300/65 shadow-[0_0_10px_rgba(251,191,36,0.38)]"
+                    style={{
+                        width: barrelLength,
+                        height: barrelHeight,
+                        left: barrelLeft,
+                        top: size / 2 - barrelHeight / 2,
+                        transformOrigin: "0 50%",
+                    }}
+                />
+                {gunActiveMs > 0 && (
+                    <div
+                        className="pointer-events-none absolute bg-amber-100 shadow-[0_0_12px_rgba(251,191,36,0.65)]"
+                        style={{
+                            width: GUN_RANGE,
+                            height: 2,
+                            left: rayLeft,
+                            top: size / 2 - 1,
+                            opacity: gunOpacity,
+                        }}
+                    />
+                )}
+            </>
+        );
+    }
+
     const activeSwing = (shape.swingActiveMs ?? 0) > 0;
     const activeBlock = (shape.blockActiveMs ?? 0) > 0;
     const width = activeSwing ? size * 1.08 : activeBlock ? size * 0.95 : size * 0.72;
@@ -45,6 +84,95 @@ function HealthBar({ shape }) {
                     style={{ width: `${hpPct * 100}%` }}
                 />
             </div>
+        </div>
+    );
+}
+
+function ShieldChargeBars({ shape }) {
+    if (shape.combatClass !== "melee") return null;
+
+    const rotation = Number.isFinite(Number(shape.rotation)) ? Number(shape.rotation) : 0;
+    const charges = Math.max(0, Math.min(
+        BLOCK_MAX_CHARGES,
+        Math.round(Number(shape.blockCharges ?? BLOCK_MAX_CHARGES)),
+    ));
+    const rechargeMs = Math.max(0, Math.min(
+        BLOCK_RECHARGE_MS,
+        Number(shape.blockRechargeMs ?? shape.blockCooldownMs ?? 0),
+    ));
+    const rechargeIndex = charges < BLOCK_MAX_CHARGES ? charges : -1;
+    const rechargePct = rechargeIndex >= 0 ? rechargeMs / BLOCK_RECHARGE_MS : 0;
+    const active = (shape.blockActiveMs ?? 0) > 0;
+
+    return (
+        <div
+            className={`pointer-events-none absolute left-[calc(100%+8px)] top-1/2 flex w-5 -translate-y-1/2 flex-col-reverse gap-0.5 rounded border bg-zinc-950/85 p-1 shadow transition-shadow duration-100 ${active
+                ? "border-blue-200 shadow-[0_0_14px_rgba(96,165,250,0.55)]"
+                : "border-zinc-700"
+            }`}
+            style={{ transform: `translateY(-50%) rotate(${-rotation}deg)` }}
+            title={`${charges}/${BLOCK_MAX_CHARGES} shield charges`}
+        >
+            {Array.from({ length: BLOCK_MAX_CHARGES }, (_, index) => {
+                const filled = index < charges;
+                const recharging = index === rechargeIndex;
+                return (
+                    <div
+                        key={index}
+                        className={`relative h-1.5 w-3 overflow-hidden rounded-sm border ${filled
+                            ? "border-blue-100 bg-blue-300 shadow-[0_0_6px_rgba(147,197,253,0.55)]"
+                            : "border-zinc-600 bg-zinc-800"
+                        }`}
+                    >
+                        {!filled && recharging && (
+                            <div
+                                className="absolute inset-y-0 left-0 bg-blue-400/70"
+                                style={{ width: `${rechargePct * 100}%` }}
+                            />
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+function AmmoBars({ shape }) {
+    if (shape.combatClass !== "ranged") return null;
+
+    const rotation = Number.isFinite(Number(shape.rotation)) ? Number(shape.rotation) : 0;
+    const ammo = Math.max(0, Math.min(
+        RANGED_AMMO_MAX,
+        Math.round(Number(shape.gunAmmo ?? RANGED_AMMO_MAX)),
+    ));
+    const reloadMs = Math.max(0, Math.min(RANGED_RELOAD_MS, Number(shape.gunReloadMs ?? 0)));
+    const reloadPct = reloadMs > 0 ? 1 - reloadMs / RANGED_RELOAD_MS : 0;
+
+    return (
+        <div
+            className="pointer-events-none absolute left-[calc(100%+8px)] top-1/2 flex w-8 -translate-y-1/2 flex-col gap-1 rounded border border-amber-800/70 bg-zinc-950/85 p-1 shadow"
+            style={{ transform: `translateY(-50%) rotate(${-rotation}deg)` }}
+            title={reloadMs > 0 ? "Reloading" : `${ammo}/${RANGED_AMMO_MAX} ammo`}
+        >
+            <div className="text-center font-mono text-[8px] font-bold leading-none text-amber-200">
+                {ammo}
+            </div>
+            <div className="grid grid-cols-5 gap-0.5">
+                {Array.from({ length: RANGED_AMMO_MAX }, (_, index) => (
+                    <div
+                        key={index}
+                        className={`h-1.5 rounded-sm border ${index < ammo
+                            ? "border-amber-100 bg-amber-300"
+                            : "border-zinc-600 bg-zinc-800"
+                        }`}
+                    />
+                ))}
+            </div>
+            {reloadMs > 0 && (
+                <div className="h-1 overflow-hidden rounded bg-zinc-800">
+                    <div className="h-full bg-amber-300" style={{ width: `${reloadPct * 100}%` }} />
+                </div>
+            )}
         </div>
     );
 }
@@ -102,6 +230,8 @@ function ShapeVisual({ shape, isSelected }) {
                     }`}
             >
                 <HealthBar shape={shape} />
+                <ShieldChargeBars shape={shape} />
+                <AmmoBars shape={shape} />
                 <WeaponVisual shape={shape} />
                 <span className="font-mono text-xs font-bold tracking-widest text-fuchsia-200">OP</span>
             </div>
@@ -127,6 +257,24 @@ function ShapeVisual({ shape, isSelected }) {
                 style={{ width: size, height: size }}
                 className={`rounded-full border-2 bg-red-500/14 transition-all duration-100 ${sel ? "border-white shadow-[0_0_0_3px_rgba(255,255,255,0.2)]" : "border-red-400 shadow-[inset_0_0_24px_rgba(248,113,113,0.2)]"
                     }`}
+            />
+        );
+    }
+
+    if (type === "grenade") {
+        return (
+            <div
+                style={{ width: size, height: size }}
+                className="rounded-full border border-lime-100 bg-lime-300 shadow-[0_0_10px_rgba(190,242,100,0.45)]"
+            />
+        );
+    }
+
+    if (type === "grenadeExplosion") {
+        return (
+            <div
+                style={{ width: size, height: size }}
+                className="rounded-full border-2 border-orange-200 bg-orange-400/25 shadow-[0_0_24px_rgba(251,146,60,0.6)]"
             />
         );
     }
@@ -204,6 +352,8 @@ export default function ShapeObject({ shape, isSelected, onSelect, onDragEnd, lo
                         }`}
                 >
                     <HealthBar shape={shape} />
+                    <ShieldChargeBars shape={shape} />
+                    <AmmoBars shape={shape} />
                     <WeaponVisual shape={shape} />
                     <span className="font-mono text-sm font-bold text-cyan tracking-wide">M</span>
                 </div>

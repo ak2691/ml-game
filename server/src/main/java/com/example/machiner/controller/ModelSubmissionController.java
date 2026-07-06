@@ -35,7 +35,7 @@ public class ModelSubmissionController {
         ModelSubmissionValidationResponseDTO validation = modelSubmissionService.submit(payload, authentication);
 
         log.info(
-                "Model submission persisted. id={}, accepted={}, session={}, architecture={}, features={}, actions={}, steps={}, submittedHash={}, computedHash={}",
+                "Bot brain submission persisted. id={}, accepted={}, session={}, architecture={}, features={}, actions={}, steps={}, submittedHash={}, computedHash={}",
                 validation.getModelSubmissionId(),
                 validation.isAccepted(),
                 payload == null ? null : payload.getTrainingSessionId(),

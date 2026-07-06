@@ -1,8 +1,8 @@
 package com.example.machiner.controller;
 
+import com.example.machiner.DTO.MatchClassSelectionDTO;
 import com.example.machiner.DTO.MatchFinishDTO;
 import com.example.machiner.DTO.MatchmakingEventDTO;
-import com.example.machiner.DTO.ModelFingerprintProbeResponseDTO;
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.repository.UserRepository;
 import com.example.machiner.service.AuthException;
@@ -36,7 +36,9 @@ public class MatchmakingSocketController {
     @MessageMapping("/matchmaking.join")
     public void joinQueue(Principal principal) {
         AppUser user = requireUser(principal);
-        publish(matchmakingService.joinQueue(user.getId(), user.getUsername(), principal.getName()));
+        List<OutboundMatchmakingEvent> events = matchmakingService.joinQueue(user.getId(), user.getUsername(), principal.getName());
+        publish(events);
+        scheduleClassSelectionTimeouts(events);
     }
 
     @MessageMapping("/matchmaking.leave")
@@ -51,16 +53,16 @@ public class MatchmakingSocketController {
         publish(matchmakingService.markFinished(user.getId(), payload == null ? null : payload.modelSubmissionId()));
     }
 
+    @MessageMapping("/matchmaking.selectClass")
+    public void selectClass(@Payload MatchClassSelectionDTO payload, Principal principal) {
+        AppUser user = requireUser(principal);
+        publish(matchmakingService.selectClass(user.getId(), payload == null ? null : payload.selectedClass()));
+    }
+
     @MessageMapping("/matchmaking.surrender")
     public void surrender(Principal principal) {
         AppUser user = requireUser(principal);
         publish(matchmakingService.surrender(user.getId()));
-    }
-
-    @MessageMapping("/matchmaking.probe")
-    public void probe(@Payload ModelFingerprintProbeResponseDTO payload, Principal principal) {
-        AppUser user = requireUser(principal);
-        matchmakingService.recordProbeResponse(user.getId(), payload);
     }
 
     private AppUser requireUser(Principal principal) {
@@ -80,6 +82,16 @@ public class MatchmakingSocketController {
                 publish(event);
             }
         }
+    }
+
+    private void scheduleClassSelectionTimeouts(List<OutboundMatchmakingEvent> events) {
+        events.stream()
+                .map(OutboundMatchmakingEvent::event)
+                .filter(event -> "MATCH_FOUND".equals(event.type()) && "CLASS_SELECT".equals(event.status()))
+                .map(MatchmakingEventDTO::matchId)
+                .distinct()
+                .forEach(matchId -> CompletableFuture.delayedExecutor(30, TimeUnit.SECONDS)
+                        .execute(() -> publish(matchmakingService.resolveClassSelectionTimeout(matchId))));
     }
 
     private void publish(OutboundMatchmakingEvent event) {

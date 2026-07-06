@@ -4,30 +4,12 @@ import Toolbar from "./Toolbar";
 import StrategyTrainingPanel from "./StrategyTrainingPanel";
 import "./BetaModel.css";
 import {
-    loadOrCreateModel,
-    loadOrCreateMatchModel,
-    cloneCombatModel,
-    createModel,
-    getMatchModelKey,
-    getPracticeModelKey,
-    saveModel,
-    warmUpModel
-} from "../ml/Model";
-import {
-    predictPolicyAction,
-    trainMeleeStrategy,
-} from "../ml/MeleeStrategyTrainer.js";
-import { trainSupervisedMeleeBase } from "../ml/SupervisedMeleeBase";
-import { exportApprovedBaseArtifact } from "../ml/BaseModelArtifact";
-import {
     createDefaultMeleeStrategyConfiguration,
     normalizeMeleeStrategyConfiguration,
-    selectMeleeStrategyIntent,
-    shouldAllowMeleeStrategyDash,
+    selectMeleeStrategyActionPlan,
 } from "../ml/MeleeStrategy.js";
 import {
     buildModelSubmissionPayload,
-    buildModelFingerprintProbeResponse,
     createTrainingSession,
     fetchTrainingSessionDuration,
     submitModelPayload
@@ -37,20 +19,43 @@ import {
     FEATURE_SCHEMA_VERSION,
     MODEL_ARCHITECTURE_VERSION,
 } from "../ml/ModelSubmissionContract";
-//test
+import {
+    BLOCK_MAX_CHARGES,
+    BLOCK_RECHARGE_MS,
+    MELEE_DAMAGE,
+    MELEE_HP,
+    SWING_ACTIVE_MS,
+    SWING_COOLDOWN_MS,
+} from "./classes/MeleeClass.jsx";
+import {
+    GUN_ACTIVE_MS,
+    GUN_COOLDOWN_MS,
+    GUN_RANGE,
+    GRENADE_COOLDOWN_MS,
+    GRENADE_DECELERATION_PER_TICK,
+    GRENADE_EXPLOSION_RADIUS,
+    GRENADE_SIZE,
+    GRENADE_STOP_FUSE_MS,
+    GRENADE_THROW_SPEED,
+    RANGED_AMMO_MAX,
+    RANGED_DAMAGE_FALLOFF,
+    RANGED_RELOAD_MS,
+} from "./classes/RangedClass.jsx";
+import {
+    actionIdsForCombatClass,
+    combatClassConfig,
+    combatClassHp,
+    combatClassMoveSpeed,
+} from "./classes/CombatClasses.js";
+
 const CANVAS_SIZE = 800;
-const AUTO_SPEED = 8;
+const MOVE_ACCELERATION_PER_TICK = 4;
+const MOVE_BRAKE_ACCELERATION_PER_TICK = 8;
 const AUTO_STEP_MS = 100;
-const ROTATION_STEP_DEG = 24;
-const SWING_COOLDOWN_MS = 1000;
-const SWING_ACTIVE_MS = 200;
-const BLOCK_ACTIVE_MS = 500;
-const BLOCK_COOLDOWN_MS = 1000;
+const ROTATION_STEP_DEG = 18;
 const DASH_DURATION_MS = 1000;
 const DASH_COOLDOWN_MS = 4500;
 const DASH_SPEED = 20;
-const MELEE_DAMAGE = 20;
-const MELEE_HP = 100;
 const MAX_OBSTACLES = 5;
 const DUEL_SLOT_ONE_X = 240;
 const DUEL_SLOT_TWO_X = 560;
@@ -73,10 +78,22 @@ const MAIN_SHAPE = {
     swingActiveMs: 0,
     blockCooldownMs: 0,
     blockActiveMs: 0,
+    blockCharges: BLOCK_MAX_CHARGES,
+    blockRechargeMs: 0,
+    gunCooldownMs: 0,
+    gunActiveMs: 0,
+    gunShotActive: false,
+    gunAmmo: 0,
+    gunReloadMs: 0,
+    grenadeCooldownMs: 0,
+    grenadeSerial: 1,
+    thrownGrenade: null,
     dashCooldownMs: 0,
     dashActiveMs: 0,
     dashDirectionX: 0,
     dashDirectionY: 0,
+    movementVelocityX: 0,
+    movementVelocityY: 0,
     velocityX: 0,
     velocityY: 0,
 };
@@ -88,7 +105,13 @@ const SESSION_KEY = "arena-training-session-id";
 function matchStrategyConfigurationKey(matchId, userId, combatClass) {
     return matchId && userId
         ? `arena-match-strategy-v1-${combatClass}-${matchId}-${userId}`
-        : null;
+        : `arena-training-strategy-v1-${combatClass}`;
+}
+
+function opponentStrategyConfigurationKey(matchId, userId, combatClass) {
+    return matchId && userId
+        ? `arena-match-opponent-strategy-v1-${combatClass}-${matchId}-${userId}`
+        : `arena-training-opponent-strategy-v1-${combatClass}`;
 }
 
 function loadStoredStrategyConfiguration(key) {
@@ -103,11 +126,35 @@ function loadStoredStrategyConfiguration(key) {
     }
 }
 
-function learningRateForRound(roundNumber) {
-    const round = Math.max(1, Math.round(Number(roundNumber) || 1));
-    if (round === 1) return 0.01;
-    if (round === 2) return 0.006;
-    return 0.004;
+function sanitizeStrategyConfigurationForClass(configuration, combatClass) {
+    const source = configuration && typeof configuration === "object"
+        ? configuration
+        : createDefaultMeleeStrategyConfiguration();
+    const allowedActionIds = new Set(actionIdsForCombatClass(combatClass));
+    const sanitizeBlock = (block) => {
+        if (!block || typeof block !== "object") return block;
+        return allowedActionIds.has(block.action)
+            ? block
+            : { ...block, action: "move_stop", actionTarget: "opponent" };
+    };
+    return {
+        ...source,
+        blocks: Array.isArray(source.blocks) ? source.blocks.map(sanitizeBlock) : [],
+        clusters: Array.isArray(source.clusters) ? source.clusters.map((cluster) => ({
+            ...cluster,
+            blocks: Array.isArray(cluster?.blocks) ? cluster.blocks.map(sanitizeBlock) : [],
+        })) : [],
+    };
+}
+
+function hasStrategyActions(configuration) {
+    const normalized = normalizeMeleeStrategyConfiguration(configuration);
+    return normalized.blocks.length > 0 || normalized.clusters.some((cluster) => cluster.blocks.length > 0);
+}
+
+function countStrategyBlocks(configuration) {
+    const normalized = normalizeMeleeStrategyConfiguration(configuration);
+    return normalized.blocks.length + normalized.clusters.reduce((total, cluster) => total + cluster.blocks.length, 0);
 }
 
 function secondsRemaining(targetTime) {
@@ -140,10 +187,22 @@ function buildOpponentShape(opponent) {
         swingActiveMs: 0,
         blockCooldownMs: 0,
         blockActiveMs: 0,
+        blockCharges: BLOCK_MAX_CHARGES,
+        blockRechargeMs: 0,
+        gunCooldownMs: 0,
+        gunActiveMs: 0,
+        gunShotActive: false,
+        gunAmmo: RANGED_AMMO_MAX,
+        gunReloadMs: 0,
+        grenadeCooldownMs: 0,
+        grenadeSerial: 1,
+        thrownGrenade: null,
         dashCooldownMs: 0,
         dashActiveMs: 0,
         dashDirectionX: 0,
         dashDirectionY: 0,
+        movementVelocityX: 0,
+        movementVelocityY: 0,
         velocityX: 0,
         velocityY: 0,
         opponentUsername: opponent?.username,
@@ -158,20 +217,43 @@ function buildInitialArenaShapes(matchContext) {
 }
 
 function buildMatchSpawnShapes(matchContext) {
+    const playerClass = matchContext?.player?.selectedClass ?? "melee";
+    const opponentClass = matchContext?.opponent?.selectedClass ?? "melee";
     const fighters = [
-        resetFighterShape({ ...MAIN_SHAPE, x: DUEL_SLOT_ONE_X, y: CANVAS_SIZE / 2, rotation: 0 }),
+        resetFighterShape({ ...MAIN_SHAPE, combatClass: playerClass, x: DUEL_SLOT_ONE_X, y: CANVAS_SIZE / 2, rotation: 0 }),
         resetFighterShape({
             ...buildOpponentShape(matchContext?.opponent),
+            combatClass: opponentClass,
             x: DUEL_SLOT_TWO_X,
             y: CANVAS_SIZE / 2,
             rotation: 180,
-            locked: true,
         }),
     ];
+    const matchObstacles = matchObstacleShapes(matchContext?.obstacles, true);
     return [
         ...fighters,
-        ...createRandomArenaObstacles(createSeededRandom(obstacleSeed(matchContext)), true, fighters),
+        ...(matchObstacles.length
+            ? matchObstacles
+            : createRandomArenaObstacles(createSeededRandom(obstacleSeed(matchContext)), true, fighters)),
     ];
+}
+
+function matchObstacleShapes(obstacles, locked = false) {
+    if (!Array.isArray(obstacles)) return [];
+    return obstacles
+        .filter((obstacle) => isObstacleType(obstacle?.type))
+        .slice(0, MAX_OBSTACLES)
+        .map((obstacle, index) => ({
+            id: obstacle.id ?? `object_${index + 1}`,
+            type: obstacle.type,
+            x: Number.isFinite(Number(obstacle.x)) ? Number(obstacle.x) : CANVAS_SIZE / 2,
+            y: Number.isFinite(Number(obstacle.y)) ? Number(obstacle.y) : CANVAS_SIZE / 2,
+            size: Number.isFinite(Number(obstacle.size))
+                ? Number(obstacle.size)
+                : obstacle.type === "healthPack" ? HEALTH_PACK_SIZE : DAMAGE_ZONE_SIZE,
+            rotation: 0,
+            locked,
+        }));
 }
 
 function createRandomArenaObstacles(random = Math.random, locked = false, occupiedShapes = []) {
@@ -247,17 +329,30 @@ function cloneShapes(shapes) {
 }
 
 function resetFighterShape(shape) {
+    const combatClass = shape.combatClass ?? "melee";
     return {
         ...shape,
-        hp: MELEE_HP,
+        hp: combatClassHp(combatClass),
         swingCooldownMs: 0,
         swingActiveMs: 0,
         blockCooldownMs: 0,
         blockActiveMs: 0,
+        blockCharges: combatClass === "melee" ? BLOCK_MAX_CHARGES : 0,
+        blockRechargeMs: 0,
+        gunCooldownMs: 0,
+        gunActiveMs: 0,
+        gunShotActive: false,
+        gunAmmo: combatClass === "ranged" ? RANGED_AMMO_MAX : 0,
+        gunReloadMs: 0,
+        grenadeCooldownMs: 0,
+        grenadeSerial: 1,
+        thrownGrenade: null,
         dashCooldownMs: 0,
         dashActiveMs: 0,
         dashDirectionX: 0,
         dashDirectionY: 0,
+        movementVelocityX: 0,
+        movementVelocityY: 0,
         velocityX: 0,
         velocityY: 0,
         damageZoneIds: [],
@@ -265,22 +360,40 @@ function resetFighterShape(shape) {
     };
 }
 
-function buildCleanPlayStartShapes(currentShapes, matchContext, isMatchTraining) {
-    if (isMatchTraining) return buildMatchSpawnShapes(matchContext);
+function buildAutoPlayStartShapes(currentShapes, matchContext, isMatchTraining) {
+    const fallbackShapes = isMatchTraining ? buildMatchSpawnShapes(matchContext) : [];
+    const fallbackMain = fallbackShapes.find((shape) => shape.id === "main");
+    const fallbackOpponent = fallbackShapes.find((shape) => shape.id === "opponent-model");
 
-    const fighters = currentShapes
-        .filter((shape) => shape.id === "main" || shape.id === "opponent-model")
-        .map(resetFighterShape);
-    if (!fighters.some((shape) => shape.id === "main")) fighters.unshift(resetFighterShape({ ...MAIN_SHAPE }));
-    if (!fighters.some((shape) => shape.id === "opponent-model")) fighters.push(resetFighterShape(buildOpponentShape()));
+    const nextShapes = cloneShapes(currentShapes);
+    if (!nextShapes.some((shape) => shape.id === "main")) {
+        nextShapes.unshift(resetFighterShape(fallbackMain ?? { ...MAIN_SHAPE }));
+    }
+    if (!nextShapes.some((shape) => shape.id === "opponent-model")) {
+        nextShapes.push(resetFighterShape(fallbackOpponent ?? buildOpponentShape(matchContext?.opponent)));
+    }
 
-    const obstacles = currentShapes.filter((shape) => isObstacleType(shape.type));
+    const fighters = nextShapes.filter((shape) => shape.id === "main" || shape.id === "opponent-model");
+    const obstacles = nextShapes.filter((shape) => isObstacleType(shape.type));
+    const fallbackObstacles = fallbackShapes.filter((shape) => isObstacleType(shape.type));
     return [
-        ...fighters,
-        ...(obstacles.length
-            ? cloneShapes(obstacles)
-            : createRandomArenaObstacles(Math.random, false, fighters)),
+        ...nextShapes,
+        ...(!obstacles.length
+            ? fallbackObstacles.length
+                ? cloneShapes(fallbackObstacles)
+                : createRandomArenaObstacles(Math.random, false, fighters)
+            : []),
     ];
+}
+
+function resetArenaStartShapes(shapes, selectedClass, opponentSelectedClass) {
+    return shapes.map((shape) => {
+        if (shape.id === "main") return resetFighterShape({ ...shape, combatClass: selectedClass });
+        if (shape.id === "opponent-model") {
+            return resetFighterShape({ ...shape, combatClass: opponentSelectedClass, locked: false });
+        }
+        return cloneShape(shape);
+    });
 }
 
 function clamp(value, min, max) {
@@ -296,15 +409,48 @@ function angleDelta(fromDeg, toDeg) {
 }
 
 function tickCombat(shape, elapsedMs) {
+    const blockRecharge = rechargeBlockCharges(shape, elapsedMs);
     return {
         ...shape,
         swingCooldownMs: Math.max(0, (shape.swingCooldownMs ?? 0) - elapsedMs),
         swingActiveMs: Math.max(0, (shape.swingActiveMs ?? 0) - elapsedMs),
-        blockCooldownMs: Math.max(0, (shape.blockCooldownMs ?? 0) - elapsedMs),
-        blockActiveMs: Math.max(0, (shape.blockActiveMs ?? 0) - elapsedMs),
+        blockCooldownMs: blockRecharge.rechargeMs,
+        blockActiveMs: 0,
+        blockCharges: blockRecharge.charges,
+        blockRechargeMs: blockRecharge.rechargeMs,
+        gunCooldownMs: Math.max(0, (shape.gunCooldownMs ?? 0) - elapsedMs),
+        gunActiveMs: Math.max(0, (shape.gunActiveMs ?? 0) - elapsedMs),
+        gunShotActive: false,
+        ...tickGunReload(shape, elapsedMs),
+        grenadeCooldownMs: Math.max(0, (shape.grenadeCooldownMs ?? 0) - elapsedMs),
+        thrownGrenade: null,
         dashCooldownMs: Math.max(0, (shape.dashCooldownMs ?? 0) - elapsedMs),
         dashActiveMs: Math.max(0, (shape.dashActiveMs ?? 0) - elapsedMs),
     };
+}
+
+function tickGunReload(shape, elapsedMs) {
+    if (shape.combatClass !== "ranged") return { gunAmmo: 0, gunReloadMs: 0 };
+    const ammo = Math.max(0, Math.min(RANGED_AMMO_MAX, Math.round(Number(shape.gunAmmo ?? RANGED_AMMO_MAX))));
+    const reloadMs = Math.max(0, Number(shape.gunReloadMs ?? 0) - elapsedMs);
+    if (ammo <= 0 && reloadMs <= 0) {
+        return { gunAmmo: RANGED_AMMO_MAX, gunReloadMs: 0 };
+    }
+    return { gunAmmo: ammo, gunReloadMs: reloadMs };
+}
+
+function rechargeBlockCharges(shape, elapsedMs) {
+    if (shape.combatClass !== "melee") return { charges: 0, rechargeMs: 0 };
+    let charges = Math.max(0, Math.min(BLOCK_MAX_CHARGES, Math.round(Number(shape.blockCharges ?? BLOCK_MAX_CHARGES))));
+    let rechargeMs = Math.max(0, Number(shape.blockRechargeMs ?? shape.blockCooldownMs ?? 0));
+    if (charges >= BLOCK_MAX_CHARGES) return { charges: BLOCK_MAX_CHARGES, rechargeMs: 0 };
+    rechargeMs += elapsedMs;
+    while (charges < BLOCK_MAX_CHARGES && rechargeMs >= BLOCK_RECHARGE_MS) {
+        charges += 1;
+        rechargeMs -= BLOCK_RECHARGE_MS;
+    }
+    if (charges >= BLOCK_MAX_CHARGES) rechargeMs = 0;
+    return { charges, rechargeMs };
 }
 
 function applyActionToShape(shape, action, elapsedMs) {
@@ -312,7 +458,9 @@ function applyActionToShape(shape, action, elapsedMs) {
     const mag = Math.hypot(action.dx ?? 0, action.dy ?? 0);
     const dx = mag > 0.001 ? action.dx / mag : 0;
     const dy = mag > 0.001 ? action.dy / mag : 0;
-    const dashAvailable = (shape.dashCooldownMs ?? 0) <= 0;
+    const dashAvailable = combatClassConfig(shape.combatClass).actionIds.includes("dash")
+        && (shape.dashCooldownMs ?? 0) <= 0;
+    const maxMoveSpeed = combatClassMoveSpeed(shape.combatClass);
     let next = { ...shape };
     const isContinuingDash = (shape.dashActiveMs ?? 0) > 0;
     next.rotation = normalizeAngle((shape.rotation ?? 0) + clamp(action.dRot ?? 0, -1, 1) * ROTATION_STEP_DEG);
@@ -324,6 +472,8 @@ function applyActionToShape(shape, action, elapsedMs) {
             ...next,
             x: clamp(shape.x + dashX * DASH_SPEED, shape.size / 2, CANVAS_SIZE - shape.size / 2),
             y: clamp(shape.y + dashY * DASH_SPEED, shape.size / 2, CANVAS_SIZE - shape.size / 2),
+            movementVelocityX: dashX * maxMoveSpeed,
+            movementVelocityY: dashY * maxMoveSpeed,
             velocityX: dashX * DASH_SPEED / seconds,
             velocityY: dashY * DASH_SPEED / seconds,
         };
@@ -339,32 +489,107 @@ function applyActionToShape(shape, action, elapsedMs) {
             dashCooldownMs: DASH_COOLDOWN_MS,
             dashDirectionX: dashX,
             dashDirectionY: dashY,
+            movementVelocityX: dashX * maxMoveSpeed,
+            movementVelocityY: dashY * maxMoveSpeed,
             velocityX: dashX * DASH_SPEED / seconds,
             velocityY: dashY * DASH_SPEED / seconds,
         };
     } else {
+        const movementVelocity = nextMovementVelocity(shape, dx, dy, mag, maxMoveSpeed);
         next = {
             ...next,
-            x: clamp(shape.x + dx * AUTO_SPEED, shape.size / 2, CANVAS_SIZE - shape.size / 2),
-            y: clamp(shape.y + dy * AUTO_SPEED, shape.size / 2, CANVAS_SIZE - shape.size / 2),
-            velocityX: dx * AUTO_SPEED / seconds,
-            velocityY: dy * AUTO_SPEED / seconds,
+            x: clamp(shape.x + movementVelocity.dx, shape.size / 2, CANVAS_SIZE - shape.size / 2),
+            y: clamp(shape.y + movementVelocity.dy, shape.size / 2, CANVAS_SIZE - shape.size / 2),
+            movementVelocityX: movementVelocity.dx,
+            movementVelocityY: movementVelocity.dy,
+            velocityX: movementVelocity.dx / seconds,
+            velocityY: movementVelocity.dy / seconds,
         };
     }
 
-    const swingAvailable = (next.swingCooldownMs ?? 0) <= 0;
+    const blockActive = shape.combatClass === "melee" && (action.block ?? 0) > 0.5 && (next.blockCharges ?? 0) > 0;
+    if (blockActive) {
+        next.blockActiveMs = 1;
+    }
+
+    const swingAvailable = !blockActive && (next.swingCooldownMs ?? 0) <= 0;
     if ((action.swing ?? 0) > 0.5 && swingAvailable) {
         next.swingCooldownMs = SWING_COOLDOWN_MS;
         next.swingActiveMs = SWING_ACTIVE_MS;
     }
 
-    const blockAvailable = (next.blockCooldownMs ?? 0) <= 0 && (next.blockActiveMs ?? 0) <= 0;
-    if ((action.block ?? 0) > 0.5 && blockAvailable) {
-        next.blockActiveMs = BLOCK_ACTIVE_MS;
-        next.blockCooldownMs = BLOCK_ACTIVE_MS + BLOCK_COOLDOWN_MS;
+    const gunAvailable = !blockActive && next.combatClass === "ranged"
+        && (next.gunAmmo ?? RANGED_AMMO_MAX) > 0
+        && (next.gunReloadMs ?? 0) <= 0
+        && (next.gunCooldownMs ?? 0) <= 0
+        && (next.gunActiveMs ?? 0) <= 0;
+    const firedGun = (action.gun ?? 0) > 0.5 && gunAvailable;
+    if (firedGun) {
+        const nextAmmo = Math.max(0, (next.gunAmmo ?? RANGED_AMMO_MAX) - 1);
+        next.gunAmmo = nextAmmo;
+        next.gunReloadMs = nextAmmo <= 0 ? RANGED_RELOAD_MS : 0;
+        next.gunActiveMs = GUN_ACTIVE_MS;
+        next.gunCooldownMs = GUN_COOLDOWN_MS;
     }
 
-    return tickCombat(next, elapsedMs);
+    const grenadeAvailable = !blockActive && next.combatClass === "ranged" && (next.grenadeCooldownMs ?? 0) <= 0;
+    const threwGrenade = (action.grenade ?? 0) > 0.5 && grenadeAvailable;
+    if (threwGrenade) {
+        next.grenadeCooldownMs = GRENADE_COOLDOWN_MS;
+        next.thrownGrenade = createGrenadeShape(next);
+        next.grenadeSerial = (next.grenadeSerial ?? 1) + 1;
+    }
+
+    const ticked = tickCombat(next, elapsedMs);
+    return {
+        ...ticked,
+        blockActiveMs: blockActive ? 1 : ticked.blockActiveMs,
+        gunShotActive: firedGun,
+        thrownGrenade: next.thrownGrenade ?? null,
+    };
+}
+
+function nextMovementVelocity(shape, inputX, inputY, inputMagnitude, maxMoveSpeed) {
+    const current = {
+        dx: shape.movementVelocityX ?? 0,
+        dy: shape.movementVelocityY ?? 0,
+    };
+    if (!Number.isFinite(inputMagnitude) || inputMagnitude <= 0.001) {
+        return {
+            dx: decelerateVelocityComponent(current.dx, MOVE_ACCELERATION_PER_TICK),
+            dy: decelerateVelocityComponent(current.dy, MOVE_ACCELERATION_PER_TICK),
+        };
+    }
+
+    return clampVelocity({
+        dx: nextVelocityComponent(current.dx, inputX),
+        dy: nextVelocityComponent(current.dy, inputY),
+    }, maxMoveSpeed);
+}
+
+function nextVelocityComponent(current, input) {
+    if (!Number.isFinite(current) || !Number.isFinite(input)) return 0;
+    if (Math.abs(input) <= 0.001) {
+        return decelerateVelocityComponent(current, MOVE_ACCELERATION_PER_TICK);
+    }
+    const acceleration = current * input < -0.001
+        ? MOVE_BRAKE_ACCELERATION_PER_TICK
+        : MOVE_ACCELERATION_PER_TICK;
+    return current + input * acceleration;
+}
+
+function decelerateVelocityComponent(value, amount) {
+    if (!Number.isFinite(value) || Math.abs(value) <= amount) return 0;
+    return value > 0 ? value - amount : value + amount;
+}
+
+function clampVelocity(velocity, maxSpeed) {
+    const speed = Math.hypot(velocity.dx, velocity.dy);
+    if (!Number.isFinite(speed) || speed <= maxSpeed) return velocity;
+    return {
+        dx: velocity.dx / speed * maxSpeed,
+        dy: velocity.dy / speed * maxSpeed,
+    };
 }
 
 function isSwingHitting(attacker, defender) {
@@ -389,29 +614,220 @@ function isSwingHitting(attacker, defender) {
 }
 
 function isBlockingHit(defender, attacker) {
-    if ((defender.blockActiveMs ?? 0) <= 0) return false;
+    if ((defender.blockActiveMs ?? 0) <= 0 || (defender.blockCharges ?? 0) <= 0) return false;
 
     const incomingAngle = Math.atan2(attacker.y - defender.y, attacker.x - defender.x) * 180 / Math.PI;
     return Math.abs(angleDelta(defender.rotation ?? 0, incomingAngle)) <= 95;
 }
 
-function resolveMeleeDamage(first, second) {
+function resolveCombatDamage(first, second) {
     let nextFirst = first;
     let nextSecond = second;
 
-    if (isSwingHitting(first, second) && !isBlockingHit(second, first)) {
-        nextSecond = { ...nextSecond, hp: Math.max(0, (nextSecond.hp ?? MELEE_HP) - incomingMeleeDamage(nextSecond)) };
+    if (isSwingHitting(first, second)) {
+        if (isBlockingHit(second, first)) {
+            nextSecond = consumeBlockCharges(nextSecond, 1);
+        } else {
+            nextSecond = { ...nextSecond, hp: Math.max(0, (nextSecond.hp ?? MELEE_HP) - incomingMeleeDamage(nextSecond)) };
+        }
     }
 
-    if (isSwingHitting(second, first) && !isBlockingHit(first, second)) {
-        nextFirst = { ...nextFirst, hp: Math.max(0, (nextFirst.hp ?? MELEE_HP) - incomingMeleeDamage(nextFirst)) };
+    if (isSwingHitting(second, first)) {
+        if (isBlockingHit(first, second)) {
+            nextFirst = consumeBlockCharges(nextFirst, 1);
+        } else {
+            nextFirst = { ...nextFirst, hp: Math.max(0, (nextFirst.hp ?? MELEE_HP) - incomingMeleeDamage(nextFirst)) };
+        }
+    }
+
+    if (isGunHitting(first, second)) {
+        if (isBlockingHit(second, first)) {
+            nextSecond = consumeBlockCharges(nextSecond, 1);
+        } else {
+            nextSecond = { ...nextSecond, hp: Math.max(0, (nextSecond.hp ?? MELEE_HP) - incomingGunDamage(first, second)) };
+        }
+    }
+
+    if (isGunHitting(second, first)) {
+        if (isBlockingHit(first, second)) {
+            nextFirst = consumeBlockCharges(nextFirst, 1);
+        } else {
+            nextFirst = { ...nextFirst, hp: Math.max(0, (nextFirst.hp ?? MELEE_HP) - incomingGunDamage(second, first)) };
+        }
     }
 
     return [nextFirst, nextSecond];
 }
 
+function consumeBlockCharges(fighter, charges) {
+    const nextCharges = Math.max(0, (fighter.blockCharges ?? 0) - charges);
+    return {
+        ...fighter,
+        blockCharges: nextCharges,
+        blockRechargeMs: nextCharges < BLOCK_MAX_CHARGES ? (fighter.blockRechargeMs ?? fighter.blockCooldownMs ?? 0) : 0,
+        blockCooldownMs: nextCharges < BLOCK_MAX_CHARGES ? (fighter.blockRechargeMs ?? fighter.blockCooldownMs ?? 0) : 0,
+        blockActiveMs: nextCharges > 0 ? fighter.blockActiveMs : 0,
+    };
+}
+
 function incomingMeleeDamage(defender) {
     return Math.round(MELEE_DAMAGE * (defender.inDamageZone ? DAMAGE_ZONE_DAMAGE_MULTIPLIER : 1));
+}
+
+function isGunHitting(attacker, defender) {
+    if (!attacker.gunShotActive) return false;
+
+    const angle = (attacker.rotation ?? 0) * Math.PI / 180;
+    const forwardX = Math.cos(angle);
+    const forwardY = Math.sin(angle);
+    const rightX = -forwardY;
+    const rightY = forwardX;
+    const relX = defender.x - attacker.x;
+    const relY = defender.y - attacker.y;
+    const forwardDistance = relX * forwardX + relY * forwardY;
+    const sideDistance = relX * rightX + relY * rightY;
+    const defenderRadius = defender.size / 2;
+
+    return forwardDistance >= 0
+        && forwardDistance <= GUN_RANGE + defenderRadius
+        && Math.abs(sideDistance) <= defenderRadius;
+}
+
+function incomingGunDamage(attacker, defender) {
+    const distance = Math.hypot(defender.x - attacker.x, defender.y - attacker.y);
+    let damage = 0;
+    const falloff = RANGED_DAMAGE_FALLOFF;
+    if (distance <= falloff[0].distance) damage = falloff[0].damage;
+    else {
+        for (let index = 1; index < falloff.length; index += 1) {
+            const previous = falloff[index - 1];
+            const next = falloff[index];
+            if (distance <= next.distance) {
+                damage = interpolateDamage(distance, previous.distance, next.distance, previous.damage, next.damage);
+                break;
+            }
+        }
+    }
+    return Math.round(damage * (defender.inDamageZone ? DAMAGE_ZONE_DAMAGE_MULTIPLIER : 1));
+}
+
+function createGrenadeShape(shape) {
+    const angle = (shape.rotation ?? 0) * Math.PI / 180;
+    const directionX = Math.cos(angle);
+    const directionY = Math.sin(angle);
+    const spawnDistance = (shape.size ?? 60) / 2 + GRENADE_SIZE / 2 + 2;
+    return {
+        id: `grenade-${shape.id}-${shape.grenadeSerial ?? 1}`,
+        type: "grenade",
+        ownerId: shape.id,
+        x: shape.x + directionX * spawnDistance,
+        y: shape.y + directionY * spawnDistance,
+        size: GRENADE_SIZE,
+        rotation: 0,
+        velocityX: directionX * GRENADE_THROW_SPEED,
+        velocityY: directionY * GRENADE_THROW_SPEED,
+        stoppedMs: 0,
+        locked: true,
+    };
+}
+
+function updateGrenades(grenades, fighters) {
+    const remaining = [];
+    const explosions = [];
+    for (const grenade of grenades) {
+        if (grenade.type === "grenadeExplosion") {
+            const remainingMs = Math.max(0, (grenade.remainingMs ?? 0) - AUTO_STEP_MS);
+            if (remainingMs > 0) remaining.push({ ...grenade, remainingMs });
+            continue;
+        }
+        const next = advanceGrenade(grenade);
+        const touchedOpponent = fighters.some((fighter) => (
+            fighter.id !== next.ownerId && overlapsShape(fighter, next)
+        ));
+        const stoppedLongEnough = Math.hypot(next.velocityX ?? 0, next.velocityY ?? 0) <= 0.001
+            && (next.stoppedMs ?? 0) >= GRENADE_STOP_FUSE_MS;
+        if (touchedOpponent || stoppedLongEnough) {
+            explosions.push(createGrenadeExplosionShape(next));
+        } else {
+            remaining.push(next);
+        }
+    }
+    return { grenades: remaining, explosions };
+}
+
+function advanceGrenade(grenade) {
+    const intendedX = grenade.x + (grenade.velocityX ?? 0);
+    const intendedY = grenade.y + (grenade.velocityY ?? 0);
+    let next = {
+        ...grenade,
+        x: clamp(intendedX, GRENADE_SIZE / 2, CANVAS_SIZE - GRENADE_SIZE / 2),
+        y: clamp(intendedY, GRENADE_SIZE / 2, CANVAS_SIZE - GRENADE_SIZE / 2),
+    };
+    const hitWall = next.x !== intendedX || next.y !== intendedY;
+    if (hitWall) {
+        next.velocityX = 0;
+        next.velocityY = 0;
+    } else {
+        const speed = Math.hypot(next.velocityX ?? 0, next.velocityY ?? 0);
+        if (speed <= GRENADE_DECELERATION_PER_TICK) {
+            next.velocityX = 0;
+            next.velocityY = 0;
+        } else {
+            const nextSpeed = speed - GRENADE_DECELERATION_PER_TICK;
+            next.velocityX = next.velocityX / speed * nextSpeed;
+            next.velocityY = next.velocityY / speed * nextSpeed;
+        }
+    }
+    next.stoppedMs = Math.hypot(next.velocityX ?? 0, next.velocityY ?? 0) <= 0.001
+        ? (next.stoppedMs ?? 0) + AUTO_STEP_MS
+        : 0;
+    return next;
+}
+
+function createGrenadeExplosionShape(grenade) {
+    return {
+        id: `${grenade.id}-explosion`,
+        type: "grenadeExplosion",
+        ownerId: grenade.ownerId,
+        x: grenade.x,
+        y: grenade.y,
+        size: GRENADE_EXPLOSION_RADIUS * 2,
+        rotation: 0,
+        remainingMs: 200,
+        locked: true,
+    };
+}
+
+function applyGrenadeExplosionDamage(fighters, explosions) {
+    return fighters.map((fighter) => {
+        const damage = explosions.reduce((total, explosion) => total + grenadeDamageToFighter(explosion, fighter), 0);
+        const shieldCharges = explosions.reduce((total, explosion) => total + grenadeShieldChargesToFighter(explosion, fighter), 0);
+        if ((fighter.blockActiveMs ?? 0) > 0 && (fighter.blockCharges ?? 0) > 0 && shieldCharges > 0) {
+            return consumeBlockCharges(fighter, shieldCharges);
+        }
+        return damage > 0
+            ? { ...fighter, hp: Math.max(0, (fighter.hp ?? MELEE_HP) - damage) }
+            : fighter;
+    });
+}
+
+function grenadeDamageToFighter(explosion, fighter) {
+    const nearestBodyDistance = Math.max(0, Math.hypot(fighter.x - explosion.x, fighter.y - explosion.y) - (fighter.size ?? 60) / 2);
+    if (nearestBodyDistance > GRENADE_EXPLOSION_RADIUS) return 0;
+    const rawDamage = interpolateDamage(nearestBodyDistance, 0, GRENADE_EXPLOSION_RADIUS, 50, 25);
+    return clamp(Math.round(rawDamage / 5) * 5, 25, 50);
+}
+
+function grenadeShieldChargesToFighter(explosion, fighter) {
+    const nearestBodyDistance = Math.max(0, Math.hypot(fighter.x - explosion.x, fighter.y - explosion.y) - (fighter.size ?? 60) / 2);
+    if (nearestBodyDistance > GRENADE_EXPLOSION_RADIUS) return 0;
+    const rawCharges = interpolateDamage(nearestBodyDistance, 0, GRENADE_EXPLOSION_RADIUS, 5, 1);
+    return clamp(Math.round(rawCharges), 1, 5);
+}
+
+function interpolateDamage(distance, minDistance, maxDistance, nearDamage, farDamage) {
+    const t = clamp((distance - minDistance) / (maxDistance - minDistance), 0, 1);
+    return nearDamage + (farDamage - nearDamage) * t;
 }
 
 function overlapsObstacle(shape, obstacle) {
@@ -438,7 +854,10 @@ function resolveObstacleEffects(fighters, obstacles) {
         }
         nextFighters[collectorIndex] = {
             ...nextFighters[collectorIndex],
-            hp: Math.min(MELEE_HP, (nextFighters[collectorIndex].hp ?? MELEE_HP) + HEALTH_PACK_HEAL),
+            hp: Math.min(
+                combatClassHp(nextFighters[collectorIndex].combatClass),
+                (nextFighters[collectorIndex].hp ?? combatClassHp(nextFighters[collectorIndex].combatClass)) + HEALTH_PACK_HEAL,
+            ),
         };
     }
 
@@ -460,58 +879,130 @@ function resolveObstacleEffects(fighters, obstacles) {
     return { fighters: nextFighters, obstacles: remainingObstacles };
 }
 
-function buildScriptedMeleeOpponentAction(opponent, target) {
-    if (!opponent || !target) return { dx: 0, dy: 0, dRot: 0, swing: 0, block: 0, dash: 0 };
-
-    const dx = target.x - opponent.x;
-    const dy = target.y - opponent.y;
-    const distance = Math.hypot(dx, dy);
-    const bearing = Math.atan2(dy, dx) * 180 / Math.PI;
-    const turn = angleDelta(opponent.rotation ?? 0, bearing);
-    const facingTarget = Math.abs(turn) <= 35;
-    const targetSwinging = (target.swingActiveMs ?? 0) > 0;
-    const targetFacing = Math.abs(angleDelta(target.rotation ?? 0, bearing + 180)) <= 55;
-    const shouldBlock = targetSwinging && targetFacing && distance <= 130;
-    const shouldSwing = facingTarget && distance <= 96 && (opponent.swingCooldownMs ?? 0) <= 0;
-    const shouldDash = distance > 260 && (opponent.dashCooldownMs ?? 0) <= 0;
-
+function buildDeterministicLogicAction(configuration, stateSnapshot) {
+    const plan = selectMeleeStrategyActionPlan(configuration, stateSnapshot);
+    const movementBlock = plan.movement ?? plan.dashMovement ?? null;
+    const facingBlock = plan.rotation ?? plan.swing ?? plan.block ?? plan.grenade;
+    const movementTarget = resolveActionTarget(stateSnapshot, movementBlock?.actionTarget);
+    const facingTarget = resolveActionTarget(stateSnapshot, facingBlock?.actionTarget ?? movementBlock?.actionTarget);
+    const movement = movementVectorForAction(movementBlock?.action ?? "move_stop", stateSnapshot.playerModel, movementTarget);
+    const turnAction = facingBlock?.action ?? "move_stop";
+    const shouldTurn = turnAction === "rotate_toward_enemy" || turnAction === "swing" || turnAction === "block" || turnAction === "throw_grenade";
     return {
-        dx: distance > 82 ? dx : 0,
-        dy: distance > 82 ? dy : 0,
-        dRot: clamp(turn / ROTATION_STEP_DEG, -1, 1),
-        swing: shouldSwing ? 1 : 0,
-        block: shouldBlock ? 1 : 0,
-        dash: shouldDash ? 1 : 0,
+        dx: movement.dx,
+        dy: movement.dy,
+        dRot: shouldTurn ? turnTowardTarget(stateSnapshot.playerModel, facingTarget) : 0,
+        swing: plan.swing?.action === "swing" ? 1 : 0,
+        block: plan.block?.action === "block" ? 1 : 0,
+        gun: plan.gun?.action === "fire_gun" ? 1 : 0,
+        grenade: plan.grenade?.action === "throw_grenade" ? 1 : 0,
+        dash: plan.dash?.action?.startsWith("dash") ? 1 : 0,
+    };
+}
+
+function resolveActionTarget(stateSnapshot, actionTarget = "opponent") {
+    const objects = Array.isArray(stateSnapshot?.objects) ? stateSnapshot.objects : [];
+    if (actionTarget && actionTarget !== "opponent") {
+        return objects.find((object) => object.id === actionTarget) ?? null;
+    }
+    return objects.find((object) => object.type === "opponentModel") ?? null;
+}
+
+function movementVectorForAction(action, player, target) {
+    if (!player || action === "move_stop" || action === "rotate_toward_enemy" || action === "swing" || action === "block" || action === "fire_gun" || action === "throw_grenade") {
+        return { dx: 0, dy: 0 };
+    }
+    if (action === "move_center") {
+        return { dx: CANVAS_SIZE / 2 - player.x, dy: CANVAS_SIZE / 2 - player.y };
+    }
+    if (action === "move_north") return { dx: 0, dy: -1 };
+    if (action === "move_south") return { dx: 0, dy: 1 };
+    if (action === "move_east") return { dx: 1, dy: 0 };
+    if (action === "move_west") return { dx: -1, dy: 0 };
+    if (action === "move_northeast") return { dx: Math.SQRT1_2, dy: -Math.SQRT1_2 };
+    if (action === "move_northwest") return { dx: -Math.SQRT1_2, dy: -Math.SQRT1_2 };
+    if (action === "move_southeast") return { dx: Math.SQRT1_2, dy: Math.SQRT1_2 };
+    if (action === "move_southwest") return { dx: -Math.SQRT1_2, dy: Math.SQRT1_2 };
+    if (action === "dash_north") return { dx: 0, dy: -1 };
+    if (action === "dash_south") return { dx: 0, dy: 1 };
+    if (action === "dash_east") return { dx: 1, dy: 0 };
+    if (action === "dash_west") return { dx: -1, dy: 0 };
+    if (action === "dash_northeast") return { dx: Math.SQRT1_2, dy: -Math.SQRT1_2 };
+    if (action === "dash_northwest") return { dx: -Math.SQRT1_2, dy: -Math.SQRT1_2 };
+    if (action === "dash_southeast") return { dx: Math.SQRT1_2, dy: Math.SQRT1_2 };
+    if (action === "dash_southwest") return { dx: -Math.SQRT1_2, dy: Math.SQRT1_2 };
+    if (!target) return { dx: 0, dy: 0 };
+    const inward = { dx: target.x - player.x, dy: target.y - player.y };
+    const outward = { dx: -inward.dx, dy: -inward.dy };
+    const tangentLeft = { dx: inward.dy, dy: -inward.dx };
+    const tangentRight = { dx: -inward.dy, dy: inward.dx };
+    if (action === "move_inward" || action === "dash") return inward;
+    if (action === "move_outward" || action === "dash_outward") return outward;
+    if (action === "move_tangent_left" || action === "dash_tangent_left") return tangentLeft;
+    if (action === "move_tangent_right" || action === "dash_tangent_right") return tangentRight;
+    if (action === "move_diagonal_in_left" || action === "dash_diagonal_in_left") return addVectors(inward, tangentLeft);
+    if (action === "move_diagonal_in_right" || action === "dash_diagonal_in_right") return addVectors(inward, tangentRight);
+    if (action === "move_diagonal_out_left" || action === "dash_diagonal_out_left") return addVectors(outward, tangentLeft);
+    if (action === "move_diagonal_out_right" || action === "dash_diagonal_out_right") return addVectors(outward, tangentRight);
+    return { dx: 0, dy: 0 };
+}
+
+function addVectors(first, second) {
+    return { dx: first.dx + second.dx, dy: first.dy + second.dy };
+}
+
+function turnTowardTarget(player, target) {
+    if (!player || !target) return 0;
+    const bearing = Math.atan2(target.y - player.y, target.x - player.x) * 180 / Math.PI;
+    return clamp(angleDelta(player.rotation ?? 0, bearing) / ROTATION_STEP_DEG, -1, 1);
+}
+
+function idleAction() {
+    return {
+        dx: 0,
+        dy: 0,
+        dRot: 0,
+        swing: 0,
+        block: 0,
+        gun: 0,
+        grenade: 0,
+        dash: 0,
     };
 }
 
 export default function BetaModel({
     matchContext = null,
     finishStatus = null,
-    onFinishMatch = null
+    onFinishMatch = null,
+    onSurrenderMatch = null
 }) {
     const matchId = matchContext?.matchId;
     const matchUserId = matchContext?.player?.userId;
     const isMatchTraining = Boolean(matchId && matchUserId);
     const playerRoundWins = Math.max(0, Number(matchContext?.player?.roundWins) || 0);
     const opponentRoundWins = Math.max(0, Number(matchContext?.opponent?.roundWins) || 0);
-    const selectedClass = "melee";
+    const [selectedClass, setSelectedClass] = useState(() => matchContext?.player?.selectedClass ?? "melee");
+    const [opponentSelectedClass, setOpponentSelectedClass] = useState(() => matchContext?.opponent?.selectedClass ?? "melee");
     const strategyStorageKey = matchStrategyConfigurationKey(matchId, matchUserId, selectedClass);
+    const opponentStrategyStorageKey = opponentStrategyConfigurationKey(matchId, matchUserId, opponentSelectedClass);
     const [shapes, setShapes] = useState(() => buildInitialArenaShapes(matchContext));
     const [selectedId, setSelectedId] = useState(null);
     const [submitStatus, setSubmitStatus] = useState(null);
     const [isAutoPlaying, setIsAutoPlaying] = useState(false);
-    const [hasCleanPlaySnapshot, setHasCleanPlaySnapshot] = useState(false);
-    const [isBaseTraining, setIsBaseTraining] = useState(false);
-    const [baseCandidate, setBaseCandidate] = useState(null);
-    const [baseExportState, setBaseExportState] = useState("idle");
+    const [hasArenaCheckpoint, setHasArenaCheckpoint] = useState(false);
+    const [isBaseTraining] = useState(false);
+    const [baseCandidate] = useState(null);
+    const [baseExportState] = useState("idle");
     const [isEditingArena, setIsEditingArena] = useState(true);
     const [trainingConfiguration, setTrainingConfiguration] = useState(() => (
-        isMatchTraining ? loadStoredStrategyConfiguration(strategyStorageKey) : createDefaultMeleeStrategyConfiguration()
+        sanitizeStrategyConfigurationForClass(loadStoredStrategyConfiguration(strategyStorageKey), selectedClass)
+    ));
+    const [opponentTrainingConfiguration, setOpponentTrainingConfiguration] = useState(() => (
+        sanitizeStrategyConfigurationForClass(loadStoredStrategyConfiguration(opponentStrategyStorageKey), opponentSelectedClass)
     ));
     const [isStrategyTraining, setIsStrategyTraining] = useState(false);
-    const [trainingProgress, setTrainingProgress] = useState(null);
-    const [trainingSummary, setTrainingSummary] = useState(null);
+    const [, setTrainingProgress] = useState(null);
+    const [, setTrainingSummary] = useState(null);
     const [trainingSessionId, setTrainingSessionId] = useState(() => isMatchTraining
         ? null
         : localStorage.getItem(SESSION_KEY));
@@ -520,14 +1011,22 @@ export default function BetaModel({
     const [trainingRemaining, setTrainingRemaining] = useState(() =>
         secondsRemaining(matchContext?.trainingEndsAtMs ?? matchContext?.trainingEndsAt));
 
-    const modelRef = useRef(null);
-    const roundCheckpointRef = useRef(null);
     const autoIntervalRef = useRef(null);
-    const cleanPlayInitialShapesRef = useRef(null);
+    const originalArenaShapesRef = useRef(null);
+    const arenaCheckpointShapesRef = useRef(null);
     const finishHandlerRef = useRef(null);
-    const handledProbeIdsRef = useRef(new Set());
     const trainingRunRef = useRef(null);
     const trainingSummaryRef = useRef(null);
+
+    useEffect(() => {
+        if (!originalArenaShapesRef.current) {
+            originalArenaShapesRef.current = resetArenaStartShapes(
+                cloneShapes(shapes),
+                selectedClass,
+                opponentSelectedClass,
+            );
+        }
+    }, [opponentSelectedClass, selectedClass, shapes]);
 
     const ensureTrainingSession = useCallback(async ({ required = false } = {}) => {
         try {
@@ -552,44 +1051,15 @@ export default function BetaModel({
     }, [isMatchTraining, matchId]);
 
     useEffect(() => {
-        let cancelled = false;
-        async function initializeModel() {
-            if (isMatchTraining) {
-                return loadOrCreateMatchModel(matchId, matchUserId, selectedClass);
-            }
-            return loadOrCreateModel(selectedClass);
-        }
-
-        initializeModel().then(async (m) => {
-            try {
-                await warmUpModel(m);
-            } catch (err) {
-                console.warn("[arena-ml] Model warmup failed; continuing without full warmup.", err);
-            }
-            if (cancelled) {
-                m.dispose();
-                return;
-            }
-            modelRef.current?.dispose();
-            roundCheckpointRef.current?.dispose();
-            modelRef.current = m;
-            roundCheckpointRef.current = cloneCombatModel(m);
-            console.log(`[arena-ml] ${isMatchTraining ? "Fresh match round checkpoint" : "Practice checkpoint"} ready.`);
-        });
         const trainingSessionTimeoutId = window.setTimeout(() => ensureTrainingSession(), 0);
 
         return () => {
-            cancelled = true;
             window.clearTimeout(trainingSessionTimeoutId);
             if (autoIntervalRef.current) {
                 clearInterval(autoIntervalRef.current);
             }
-            modelRef.current?.dispose();
-            roundCheckpointRef.current?.dispose();
-            modelRef.current = null;
-            roundCheckpointRef.current = null;
         };
-    }, [ensureTrainingSession, isMatchTraining, matchId, matchUserId, selectedClass]);
+    }, [ensureTrainingSession]);
 
     useEffect(() => {
         if (!matchContext?.opponent) return;
@@ -597,7 +1067,12 @@ export default function BetaModel({
             setShapes((prev) => {
                 if (prev.some((shape) => shape.type === "opponentModel")) {
                     return prev.map((shape) => shape.type === "opponentModel"
-                        ? { ...shape, opponentUsername: matchContext.opponent.username }
+                        ? {
+                            ...shape,
+                            opponentUsername: matchContext.opponent.username,
+                            combatClass: matchContext.opponent.selectedClass ?? shape.combatClass ?? "melee",
+                            hp: combatClassHp(matchContext.opponent.selectedClass ?? shape.combatClass ?? "melee"),
+                        }
                         : shape);
                 }
                 return [...prev, buildOpponentShape(matchContext.opponent)];
@@ -605,45 +1080,6 @@ export default function BetaModel({
         }, 0);
         return () => window.clearTimeout(timeoutId);
     }, [matchContext?.opponent]);
-
-    useEffect(() => {
-        const probe = matchContext?.probeRequest;
-        if (!isMatchTraining || !probe?.probeId || handledProbeIdsRef.current.has(probe.probeId)) return;
-        handledProbeIdsRef.current.add(probe.probeId);
-
-        let cancelled = false;
-        const respond = async () => {
-            if (cancelled || !modelRef.current || !matchContext?.onProbeResponse) return;
-
-            try {
-                const response = await buildModelFingerprintProbeResponse({
-                    model: modelRef.current,
-                    probe,
-                    trainingStepCount: trainingSummaryRef.current?.trainingSamples ?? 0,
-                });
-                if (!cancelled) {
-                    matchContext.onProbeResponse(response);
-                }
-            } catch (err) {
-                console.warn("[arena-ml] Model fingerprint probe failed.", err);
-            }
-        };
-
-        const idleCallbackId = typeof window.requestIdleCallback === "function"
-            ? window.requestIdleCallback(respond, { timeout: 500 })
-            : null;
-        const timeoutId = idleCallbackId == null ? window.setTimeout(respond, 0) : null;
-
-        return () => {
-            cancelled = true;
-            if (idleCallbackId != null && typeof window.cancelIdleCallback === "function") {
-                window.cancelIdleCallback(idleCallbackId);
-            }
-            if (timeoutId != null) {
-                window.clearTimeout(timeoutId);
-            }
-        };
-    }, [isMatchTraining, matchContext]);
 
     const fetchTrustedTrainingDuration = async (sessionId = trainingSessionId) => {
         if (!sessionId) return null;
@@ -656,10 +1092,81 @@ export default function BetaModel({
     };
 
     const updateTrainingConfiguration = (configuration) => {
-        setTrainingConfiguration(configuration);
+        const sanitized = sanitizeStrategyConfigurationForClass(configuration, selectedClass);
+        setTrainingConfiguration(sanitized);
         if (strategyStorageKey) {
-            localStorage.setItem(strategyStorageKey, JSON.stringify(configuration));
+            localStorage.setItem(strategyStorageKey, JSON.stringify(sanitized));
         }
+    };
+
+    const updateOpponentTrainingConfiguration = (configuration) => {
+        const sanitized = sanitizeStrategyConfigurationForClass(configuration, opponentSelectedClass);
+        setOpponentTrainingConfiguration(sanitized);
+        localStorage.setItem(opponentStrategyStorageKey, JSON.stringify(sanitized));
+    };
+
+    const handleClassChange = (combatClass) => {
+        if (isMatchTraining || isAutoPlaying || isStrategyTraining) return;
+        setSelectedClass(combatClass);
+        setTrainingConfiguration(sanitizeStrategyConfigurationForClass(
+            loadStoredStrategyConfiguration(matchStrategyConfigurationKey(matchId, matchUserId, combatClass)),
+            combatClass,
+        ));
+        setShapes((prev) => prev.map((shape) => (
+            shape.id === "main"
+                ? {
+                    ...shape,
+                    combatClass,
+                    hp: combatClassHp(combatClass),
+                    blockCooldownMs: 0,
+                    blockActiveMs: 0,
+                    blockCharges: combatClass === "melee" ? BLOCK_MAX_CHARGES : 0,
+                    blockRechargeMs: 0,
+                    gunCooldownMs: 0,
+                    gunActiveMs: 0,
+                    gunShotActive: false,
+                    gunAmmo: combatClass === "ranged" ? RANGED_AMMO_MAX : 0,
+                    gunReloadMs: 0,
+                    grenadeCooldownMs: 0,
+                    grenadeSerial: 1,
+                    thrownGrenade: null,
+                    movementVelocityX: 0,
+                    movementVelocityY: 0,
+                }
+                : shape
+        )));
+    };
+
+    const handleOpponentClassChange = (combatClass) => {
+        if (isMatchTraining || isAutoPlaying || isStrategyTraining) return;
+        setOpponentSelectedClass(combatClass);
+        setOpponentTrainingConfiguration(sanitizeStrategyConfigurationForClass(
+            loadStoredStrategyConfiguration(opponentStrategyConfigurationKey(matchId, matchUserId, combatClass)),
+            combatClass,
+        ));
+        setShapes((prev) => prev.map((shape) => (
+            shape.id === "opponent-model"
+                ? {
+                    ...shape,
+                    combatClass,
+                    hp: combatClassHp(combatClass),
+                    blockCooldownMs: 0,
+                    blockActiveMs: 0,
+                    blockCharges: combatClass === "melee" ? BLOCK_MAX_CHARGES : 0,
+                    blockRechargeMs: 0,
+                    gunCooldownMs: 0,
+                    gunActiveMs: 0,
+                    gunShotActive: false,
+                    gunAmmo: combatClass === "ranged" ? RANGED_AMMO_MAX : 0,
+                    gunReloadMs: 0,
+                    grenadeCooldownMs: 0,
+                    grenadeSerial: 1,
+                    thrownGrenade: null,
+                    movementVelocityX: 0,
+                    movementVelocityY: 0,
+                }
+                : shape
+        )));
     };
 
     const handleAddShape = useCallback((type) => {
@@ -687,23 +1194,35 @@ export default function BetaModel({
                 y: Math.round(150 + Math.random() * 500),
                 size: type === "opponentModel" ? 64 : 60,
                 rotation: 0,
-                combatClass: type === "opponentModel" ? "melee" : undefined,
-                hp: type === "opponentModel" ? MELEE_HP : undefined,
+                combatClass: type === "opponentModel" ? opponentSelectedClass : undefined,
+                hp: type === "opponentModel" ? combatClassHp(opponentSelectedClass) : undefined,
                 swingCooldownMs: 0,
                 swingActiveMs: 0,
                 blockCooldownMs: 0,
                 blockActiveMs: 0,
+                blockCharges: type === "opponentModel" && opponentSelectedClass === "melee" ? BLOCK_MAX_CHARGES : 0,
+                blockRechargeMs: 0,
+                gunCooldownMs: 0,
+                gunActiveMs: 0,
+                gunShotActive: false,
+                gunAmmo: type === "opponentModel" && opponentSelectedClass === "ranged" ? RANGED_AMMO_MAX : 0,
+                gunReloadMs: 0,
+                grenadeCooldownMs: 0,
+                grenadeSerial: 1,
+                thrownGrenade: null,
                 dashCooldownMs: 0,
                 dashActiveMs: 0,
                 dashDirectionX: 0,
                 dashDirectionY: 0,
+                movementVelocityX: 0,
+                movementVelocityY: 0,
                 velocityX: 0,
                 velocityY: 0,
             };
             setSelectedId(s.id);
             return [...prev, s];
         });
-    }, [isMatchTraining]);
+    }, [isMatchTraining, opponentSelectedClass]);
 
     const handleUpdateShape = useCallback((id, updates) => {
         setShapes((prev) =>
@@ -711,10 +1230,45 @@ export default function BetaModel({
                 if (s.id !== id) return s;
                 if (s.locked) return s;
                 if (s.id === "main") {
-                    const { x, y, rotation, hp, swingCooldownMs, swingActiveMs, blockCooldownMs, blockActiveMs } = updates;
+                    const {
+                        x,
+                        y,
+                        rotation,
+                        hp,
+                        swingCooldownMs,
+                        swingActiveMs,
+                        blockCooldownMs,
+                        blockActiveMs,
+                        blockCharges,
+                        blockRechargeMs,
+                        gunCooldownMs,
+                        gunActiveMs,
+                        gunShotActive,
+                        gunAmmo,
+                        gunReloadMs,
+                        grenadeCooldownMs,
+                        grenadeSerial,
+                        thrownGrenade,
+                        dashCooldownMs,
+                        dashActiveMs,
+                        dashDirectionX,
+                        dashDirectionY,
+                        movementVelocityX,
+                        movementVelocityY,
+                        velocityX,
+                        velocityY,
+                    } = updates;
                     return (x !== undefined || y !== undefined || rotation !== undefined || hp !== undefined
                         || swingCooldownMs !== undefined || swingActiveMs !== undefined
-                        || blockCooldownMs !== undefined || blockActiveMs !== undefined)
+                        || blockCooldownMs !== undefined || blockActiveMs !== undefined
+                        || blockCharges !== undefined || blockRechargeMs !== undefined
+                        || gunCooldownMs !== undefined || gunActiveMs !== undefined || gunShotActive !== undefined
+                        || gunAmmo !== undefined || gunReloadMs !== undefined
+                        || grenadeCooldownMs !== undefined || grenadeSerial !== undefined || thrownGrenade !== undefined
+                        || dashCooldownMs !== undefined || dashActiveMs !== undefined
+                        || dashDirectionX !== undefined || dashDirectionY !== undefined
+                        || movementVelocityX !== undefined || movementVelocityY !== undefined
+                        || velocityX !== undefined || velocityY !== undefined)
                         ? {
                             ...s,
                             x: x ?? s.x,
@@ -725,6 +1279,24 @@ export default function BetaModel({
                             swingActiveMs: swingActiveMs ?? s.swingActiveMs,
                             blockCooldownMs: blockCooldownMs ?? s.blockCooldownMs,
                             blockActiveMs: blockActiveMs ?? s.blockActiveMs,
+                            blockCharges: blockCharges ?? s.blockCharges,
+                            blockRechargeMs: blockRechargeMs ?? s.blockRechargeMs,
+                            gunCooldownMs: gunCooldownMs ?? s.gunCooldownMs,
+                            gunActiveMs: gunActiveMs ?? s.gunActiveMs,
+                            gunShotActive: gunShotActive ?? s.gunShotActive,
+                            gunAmmo: gunAmmo ?? s.gunAmmo,
+                            gunReloadMs: gunReloadMs ?? s.gunReloadMs,
+                            grenadeCooldownMs: grenadeCooldownMs ?? s.grenadeCooldownMs,
+                            grenadeSerial: grenadeSerial ?? s.grenadeSerial,
+                            thrownGrenade: thrownGrenade ?? s.thrownGrenade,
+                            dashCooldownMs: dashCooldownMs ?? s.dashCooldownMs,
+                            dashActiveMs: dashActiveMs ?? s.dashActiveMs,
+                            dashDirectionX: dashDirectionX ?? s.dashDirectionX,
+                            dashDirectionY: dashDirectionY ?? s.dashDirectionY,
+                            movementVelocityX: movementVelocityX ?? s.movementVelocityX,
+                            movementVelocityY: movementVelocityY ?? s.movementVelocityY,
+                            velocityX: velocityX ?? s.velocityX,
+                            velocityY: velocityY ?? s.velocityY,
                         }
                         : s;
                 }
@@ -732,6 +1304,29 @@ export default function BetaModel({
             })
         );
     }, []);
+
+    const handleDeleteSelectedShape = useCallback(() => {
+        setShapes((prev) => {
+            const selected = prev.find((shape) => shape.id === selectedId);
+            if (!isEditingArena || !selected || selected.id === "main" || selected.locked) return prev;
+            setSelectedId(null);
+            return prev.filter((shape) => shape.id !== selected.id);
+        });
+    }, [isEditingArena, selectedId]);
+
+    useEffect(() => {
+        const handleKeyDown = (event) => {
+            if (event.key !== "Delete" && event.key !== "Backspace") return;
+            if (event.target?.closest?.("input,select,textarea,button")) return;
+            const selected = shapes.find((shape) => shape.id === selectedId);
+            if (!selected || selected.id === "main" || selected.locked || !isEditingArena) return;
+            event.preventDefault();
+            handleDeleteSelectedShape();
+        };
+
+        window.addEventListener("keydown", handleKeyDown);
+        return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [handleDeleteSelectedShape, isEditingArena, selectedId, shapes]);
 
     const buildStatePayload = (currentShapes, actorId = "main") => {
         const main = currentShapes.find((s) => s.id === actorId);
@@ -743,13 +1338,27 @@ export default function BetaModel({
                 rotation: Math.round(main.rotation ?? 0),
                 swingAvailable: (main.swingCooldownMs ?? 0) <= 0,
                 swingCooldownRemainingMs: Math.round(main.swingCooldownMs ?? 0),
-                blockAvailable: (main.blockCooldownMs ?? 0) <= 0 && (main.blockActiveMs ?? 0) <= 0,
+                blockAvailable: (main.blockCharges ?? 0) > 0,
                 blockActive: (main.blockActiveMs ?? 0) > 0,
-                blockActiveRemainingMs: Math.round(main.blockActiveMs ?? 0),
-                blockCooldownRemainingMs: Math.round(main.blockCooldownMs ?? 0),
+                blockActiveRemainingMs: (main.blockActiveMs ?? 0) > 0 ? 1 : 0,
+                blockCooldownRemainingMs: Math.max(0, BLOCK_RECHARGE_MS - Math.round(main.blockRechargeMs ?? main.blockCooldownMs ?? 0)),
+                blockCharges: main.blockCharges ?? 0,
+                combatClass: main.combatClass ?? selectedClass,
+                gunAvailable: (main.combatClass ?? selectedClass) === "ranged"
+                    && (main.gunAmmo ?? RANGED_AMMO_MAX) > 0
+                    && (main.gunReloadMs ?? 0) <= 0
+                    && (main.gunCooldownMs ?? 0) <= 0
+                    && (main.gunActiveMs ?? 0) <= 0,
+                gunActive: (main.gunActiveMs ?? 0) > 0,
+                gunCooldownRemainingMs: Math.round(main.gunCooldownMs ?? 0),
+                gunAmmo: main.gunAmmo ?? ((main.combatClass ?? selectedClass) === "ranged" ? RANGED_AMMO_MAX : 0),
+                gunReloadRemainingMs: Math.round(main.gunReloadMs ?? 0),
+                grenadeAvailable: (main.combatClass ?? selectedClass) === "ranged" && (main.grenadeCooldownMs ?? 0) <= 0,
+                grenadeCooldownRemainingMs: Math.round(main.grenadeCooldownMs ?? 0),
                 hp: main.hp ?? MELEE_HP,
                 size: main.size,
-                dashAvailable: (main.dashCooldownMs ?? 0) <= 0 && (main.dashActiveMs ?? 0) <= 0,
+                dashAvailable: combatClassConfig(main.combatClass ?? selectedClass).actionIds.includes("dash")
+                    && (main.dashCooldownMs ?? 0) <= 0 && (main.dashActiveMs ?? 0) <= 0,
                 dashActive: (main.dashActiveMs ?? 0) > 0,
                 dashCooldownRemainingMs: Math.round(main.dashCooldownMs ?? 0),
             },
@@ -757,6 +1366,7 @@ export default function BetaModel({
                 .filter((s) => s.id !== actorId)
                 .map((s) => ({
                     id: s.id,
+                    ownerId: s.ownerId,
                     type: s.id === "main" && actorId !== "main" ? "opponentModel" : s.type,
                     x: Math.round(s.x),
                     y: Math.round(s.y),
@@ -765,55 +1375,75 @@ export default function BetaModel({
                     combatClass: s.combatClass,
                     hp: s.hp ?? MELEE_HP,
                     swingActive: (s.swingActiveMs ?? 0) > 0,
+                    swingAvailable: (s.swingCooldownMs ?? 0) <= 0,
+                    swingCooldownRemainingMs: Math.round(s.swingCooldownMs ?? 0),
                     blockActive: (s.blockActiveMs ?? 0) > 0,
+                    blockAvailable: (s.blockCharges ?? 0) > 0,
+                    blockCooldownRemainingMs: Math.max(0, BLOCK_RECHARGE_MS - Math.round(s.blockRechargeMs ?? s.blockCooldownMs ?? 0)),
+                    blockCharges: s.blockCharges ?? 0,
+                    gunActive: (s.gunActiveMs ?? 0) > 0,
+                    gunAvailable: s.combatClass === "ranged"
+                        && (s.gunAmmo ?? RANGED_AMMO_MAX) > 0
+                        && (s.gunReloadMs ?? 0) <= 0
+                        && (s.gunCooldownMs ?? 0) <= 0
+                        && (s.gunActiveMs ?? 0) <= 0,
+                    gunCooldownRemainingMs: Math.round(s.gunCooldownMs ?? 0),
+                    gunAmmo: s.gunAmmo ?? (s.combatClass === "ranged" ? RANGED_AMMO_MAX : 0),
+                    gunReloadRemainingMs: Math.round(s.gunReloadMs ?? 0),
+                    grenadeAvailable: s.combatClass === "ranged" && (s.grenadeCooldownMs ?? 0) <= 0,
+                    grenadeCooldownRemainingMs: Math.round(s.grenadeCooldownMs ?? 0),
+                    dashActive: (s.dashActiveMs ?? 0) > 0,
+                    dashAvailable: combatClassConfig(s.combatClass).actionIds.includes("dash")
+                        && (s.dashCooldownMs ?? 0) <= 0 && (s.dashActiveMs ?? 0) <= 0,
+                    dashCooldownRemainingMs: Math.round(s.dashCooldownMs ?? 0),
                     velocityX: s.velocityX ?? 0,
                     velocityY: s.velocityY ?? 0,
                 })),
         };
     };
 
-    const runCleanPlay = () => {
-        if (isAutoPlaying || !modelRef.current) return;
+    const runAutoPlay = () => {
+        if (isAutoPlaying) return;
         setIsEditingArena(false);
         setIsAutoPlaying(true);
         setSelectedId(null);
-        setShapes((prevShapes) => {
-            const initialShapes = buildCleanPlayStartShapes(prevShapes, matchContext, isMatchTraining);
-            cleanPlayInitialShapesRef.current = cloneShapes(initialShapes);
-            return initialShapes;
-        });
-        setHasCleanPlaySnapshot(true);
+        setShapes((prevShapes) => buildAutoPlayStartShapes(prevShapes, matchContext, isMatchTraining));
 
         autoIntervalRef.current = setInterval(() => {
             setShapes((prevShapes) => {
                 const stateSnapshot = buildStatePayload(prevShapes);
-                const activeIntent = selectMeleeStrategyIntent(trainingConfiguration, stateSnapshot);
-                const predictedAction = predictPolicyAction(modelRef.current, {
-                    ...stateSnapshot,
-                    intent: activeIntent,
-                });
-                const playerAction = shouldAllowMeleeStrategyDash(trainingConfiguration, stateSnapshot)
-                    ? predictedAction
-                    : { ...predictedAction, dash: 0 };
+                const playerAction = buildDeterministicLogicAction(trainingConfiguration, stateSnapshot);
                 const mainBefore = prevShapes.find((s) => s.id === "main");
                 const opponentBefore = prevShapes.find((s) => s.id === "opponent-model");
-                const opponentAction = buildScriptedMeleeOpponentAction(opponentBefore, mainBefore);
+                const opponentAction = opponentBefore && hasStrategyActions(opponentTrainingConfiguration)
+                    ? buildDeterministicLogicAction(opponentTrainingConfiguration, buildStatePayload(prevShapes, "opponent-model"))
+                    : idleAction();
 
                 let mainAfter = applyActionToShape(mainBefore, playerAction, AUTO_STEP_MS);
                 let opponentAfter = opponentBefore
                     ? applyActionToShape(opponentBefore, opponentAction, AUTO_STEP_MS)
                     : null;
+                let grenadeShapes = prevShapes.filter((shape) => shape.type === "grenade" || shape.type === "grenadeExplosion");
+                grenadeShapes.push(...[mainAfter.thrownGrenade, opponentAfter?.thrownGrenade].filter(Boolean));
+                mainAfter = { ...mainAfter, thrownGrenade: null };
+                if (opponentAfter) opponentAfter = { ...opponentAfter, thrownGrenade: null };
 
                 let obstacleShapes = prevShapes.filter((shape) => isObstacleType(shape.type));
                 if (opponentAfter) {
                     const resolved = resolveObstacleEffects([mainAfter, opponentAfter], obstacleShapes);
                     [mainAfter, opponentAfter] = resolved.fighters;
                     obstacleShapes = resolved.obstacles;
-                    [mainAfter, opponentAfter] = resolveMeleeDamage(mainAfter, opponentAfter);
+                    [mainAfter, opponentAfter] = resolveCombatDamage(mainAfter, opponentAfter);
+                    const grenadeUpdate = updateGrenades(grenadeShapes, [mainAfter, opponentAfter]);
+                    [mainAfter, opponentAfter] = applyGrenadeExplosionDamage([mainAfter, opponentAfter], grenadeUpdate.explosions);
+                    grenadeShapes = [...grenadeUpdate.grenades, ...grenadeUpdate.explosions];
                 } else {
                     const resolved = resolveObstacleEffects([mainAfter], obstacleShapes);
                     [mainAfter] = resolved.fighters;
                     obstacleShapes = resolved.obstacles;
+                    const grenadeUpdate = updateGrenades(grenadeShapes, [mainAfter]);
+                    [mainAfter] = applyGrenadeExplosionDamage([mainAfter], grenadeUpdate.explosions);
+                    grenadeShapes = [...grenadeUpdate.grenades, ...grenadeUpdate.explosions];
                 }
                 const obstacleById = new Map(obstacleShapes.map((shape) => [shape.id, shape]));
 
@@ -821,10 +1451,11 @@ export default function BetaModel({
                     if (s.id === "main") return mainAfter;
                     if (s.id === "opponent-model" && opponentAfter) return opponentAfter;
                     if (isObstacleType(s.type)) return obstacleById.get(s.id) ?? null;
+                    if (s.type === "grenade" || s.type === "grenadeExplosion") return null;
                     return tickCombat(s, AUTO_STEP_MS);
                 }).filter(Boolean);
 
-                return nextShapes;
+                return [...nextShapes, ...grenadeShapes];
             });
         }, AUTO_STEP_MS);
     };
@@ -837,85 +1468,93 @@ export default function BetaModel({
         setIsAutoPlaying(false);
     };
 
-    const resetCleanPlay = () => {
-        if (!cleanPlayInitialShapesRef.current) return;
+    const resetArenaStats = () => {
         setSelectedId(null);
-        setShapes(cloneShapes(cleanPlayInitialShapesRef.current));
+        setShapes((prevShapes) => prevShapes
+            .filter((shape) => shape.type !== "grenade" && shape.type !== "grenadeExplosion")
+            .map((shape) => (shape.id === "main" || shape.id === "opponent-model")
+                ? resetFighterShape(shape)
+                : cloneShape(shape)));
+        setSubmitStatus({ ok: true, message: "Bot stats reset." });
+        setTimeout(() => setSubmitStatus(null), 2500);
+    };
+
+    const handleSaveArenaCheckpoint = () => {
+        if (isAutoPlaying || isStrategyTraining || isBaseTraining) return;
+        arenaCheckpointShapesRef.current = cloneShapes(shapes);
+        setHasArenaCheckpoint(true);
+        setSubmitStatus({ ok: true, message: "Training checkpoint saved." });
+        setTimeout(() => setSubmitStatus(null), 2500);
+    };
+
+    const handleResetArenaCheckpoint = () => {
+        if (!arenaCheckpointShapesRef.current || isStrategyTraining || isBaseTraining) return;
+        stopAutoPlay();
+        setIsEditingArena(true);
+        setSelectedId(null);
+        setShapes(cloneShapes(arenaCheckpointShapesRef.current));
+        setSubmitStatus({ ok: true, message: "Restored training checkpoint." });
+        setTimeout(() => setSubmitStatus(null), 2500);
+    };
+
+    const handleFullArenaReset = () => {
+        if (isStrategyTraining || isBaseTraining) return;
+        const originalShapes = originalArenaShapesRef.current
+            ?? resetArenaStartShapes(buildInitialArenaShapes(matchContext), selectedClass, opponentSelectedClass);
+        stopAutoPlay();
+        setIsEditingArena(true);
+        setSelectedId(null);
+        setShapes(resetArenaStartShapes(cloneShapes(originalShapes), selectedClass, opponentSelectedClass));
+        setSubmitStatus({ ok: true, message: "Arena reset to the original start." });
+        setTimeout(() => setSubmitStatus(null), 2500);
     };
 
     const stopStrategyTraining = () => {
         if (trainingRunRef.current) {
             trainingRunRef.current.cancelled = true;
-            setSubmitStatus({ ok: null, message: "Stopping after the current batch..." });
+            setSubmitStatus({ ok: null, message: "Stopping bot check..." });
         }
     };
 
     const startStrategyTraining = async () => {
-        if (isStrategyTraining || isBaseTraining || !modelRef.current || !roundCheckpointRef.current) return;
-        const configuration = normalizeMeleeStrategyConfiguration(trainingConfiguration);
+        if (isStrategyTraining || isBaseTraining) return;
+        const configuration = normalizeMeleeStrategyConfiguration(
+            sanitizeStrategyConfigurationForClass(trainingConfiguration, selectedClass),
+        );
         stopAutoPlay();
-        setBaseCandidate(null);
-        setBaseExportState("idle");
         const serverDeadline = matchContext?.trainingEndsAtMs ?? matchContext?.trainingEndsAt;
         const parsedServerDeadline = serverDeadline ? new Date(serverDeadline).getTime() : Number.POSITIVE_INFINITY;
         // Event-handler wall-clock check; intentionally sampled at click time.
         // eslint-disable-next-line react-hooks/purity
         const serverTimeRemainingMs = parsedServerDeadline - Date.now();
         if (serverDeadline && (!Number.isFinite(serverTimeRemainingMs) || serverTimeRemainingMs <= 0)) {
-            setSubmitStatus({ ok: false, message: "The ten-minute training window has ended." });
+            setSubmitStatus({ ok: false, message: "The tuning window has ended." });
             return;
         }
 
         const run = { cancelled: false };
+        const summary = {
+            version: "deterministic-logic-check-v1",
+            configuration,
+            ruleCount: countStrategyBlocks(configuration),
+        };
         trainingRunRef.current = run;
         updateTrainingConfiguration(configuration);
         setTrainingProgress(null);
-        setTrainingSummary(null);
+        setTrainingSummary(summary);
+        trainingSummaryRef.current = summary;
         setIsEditingArena(false);
         setIsStrategyTraining(true);
-        setSubmitStatus({ ok: null, message: "Generating temporary supervised examples..." });
+        setSubmitStatus({ ok: null, message: "Checking deterministic bot rules..." });
 
-        let candidateModel = cloneCombatModel(roundCheckpointRef.current);
-        const previousModel = modelRef.current;
-        modelRef.current = candidateModel;
         try {
-            await warmUpModel(candidateModel);
-            const summary = await trainMeleeStrategy(candidateModel, configuration, {
-                timeLimitMs: serverDeadline ? Math.min(15_000, serverTimeRemainingMs) : 15_000,
-                learningRate: isMatchTraining ? learningRateForRound(matchContext?.roundNumber) : 0.01,
-                shouldStop: () => run.cancelled,
-                onEpoch: (progress) => {
-                    setTrainingProgress(progress);
-                    setSubmitStatus({
-                        ok: null,
-                        message: `Training ${progress.epoch}/${progress.epochs} · loss ${progress.loss?.toFixed(4) ?? "—"} · validation ${progress.validationLoss?.toFixed(4) ?? "—"}`,
-                    });
-                },
-            });
-            if (summary.stoppedByUser) {
-                throw new Error("Training stopped; the previous round candidate remains active.");
-            }
-            await saveModel(
-                candidateModel,
-                isMatchTraining
-                    ? getMatchModelKey(matchId, matchUserId, selectedClass)
-                    : getPracticeModelKey(selectedClass)
-            );
-            candidateModel = null;
-            previousModel?.dispose();
             setSubmittedModelId(null);
-            trainingSummaryRef.current = summary;
-            setTrainingSummary(summary);
-            setSubmitStatus({ ok: null, message: "Training complete. Submitting round candidate..." });
+            setSubmitStatus({ ok: null, message: "Bot rules checked. Submitting brain..." });
             await handleSubmitModel({ preserveStatus: true });
         } catch (err) {
-            if (candidateModel && modelRef.current === candidateModel) {
-                modelRef.current = previousModel;
-            }
-            console.warn("[arena-ml] Supervised strategy training failed.", err);
-            setSubmitStatus({ ok: false, message: `Training failed: ${err.message}` });
+            console.warn("[arena-bot] Deterministic bot check failed.", err);
+            setSubmitStatus({ ok: false, message: `Bot check failed: ${err.message}` });
         } finally {
-            candidateModel?.dispose();
             trainingRunRef.current = null;
             setIsStrategyTraining(false);
             setIsEditingArena(true);
@@ -923,154 +1562,54 @@ export default function BetaModel({
     };
 
     const handleTrainBaseModel = async () => {
-        if (isBaseTraining || isStrategyTraining || isMatchTraining) return;
-        stopAutoPlay();
-        setBaseCandidate(null);
-        setBaseExportState("idle");
-        setIsEditingArena(false);
-        setIsBaseTraining(true);
-        setSubmitStatus({ ok: null, message: "Preparing fresh supervised base..." });
-        const freshModel = createModel();
-
-        try {
-            await warmUpModel(freshModel);
-            const metrics = await trainSupervisedMeleeBase(freshModel, {
-                onEpoch: ({ epoch, epochs, loss }) => {
-                    setSubmitStatus({
-                        ok: null,
-                        message: `Training melee base ${epoch}/${epochs} · loss ${loss.toFixed(4)}`,
-                    });
-                },
-            });
-
-            trainingSummaryRef.current = null;
-            setTrainingSummary(null);
-            setTrainingProgress(null);
-            await saveModel(freshModel, getPracticeModelKey(selectedClass));
-            modelRef.current?.dispose();
-            modelRef.current = freshModel;
-            roundCheckpointRef.current?.dispose();
-            roundCheckpointRef.current = cloneCombatModel(freshModel);
-            setBaseCandidate({ combatClass: selectedClass, metrics });
-            setSubmitStatus({
-                ok: true,
-                message: `Base ready · swing ${(metrics.swingAccuracy * 100).toFixed(1)}% · rotation MAE ${metrics.rotationMeanAbsoluteError.toFixed(3)}`,
-            });
-            setTimeout(() => setSubmitStatus(null), 6000);
-        } catch (err) {
-            freshModel.dispose();
-            setSubmitStatus({ ok: false, message: `Base training failed: ${err.message}` });
-        } finally {
-            setIsBaseTraining(false);
-            setIsEditingArena(true);
-        }
+        setSubmitStatus({ ok: false, message: "Base model training was removed. Bots now submit deterministic logic." });
     };
 
     const handleExportBaseModel = async () => {
-        if (isBaseTraining || isStrategyTraining || isMatchTraining) return;
-        if (!baseCandidate) {
-            setBaseExportState("error");
-            setSubmitStatus({
-                ok: false,
-                message: "Train a fresh base candidate before approving it. A page refresh clears candidate approval state.",
-            });
-            return;
-        }
-        if (!modelRef.current) {
-            setBaseExportState("error");
-            setSubmitStatus({ ok: false, message: "The base model is still loading. Try export again in a moment." });
-            return;
-        }
-
-        setBaseExportState("exporting");
-        setSubmitStatus({ ok: null, message: "Approving and exporting base artifact..." });
-
-        try {
-            const { metrics } = baseCandidate;
-            const artifact = await exportApprovedBaseArtifact({
-                model: modelRef.current,
-                combatClass: baseCandidate.combatClass,
-                trainingMetrics: {
-                    finalLoss: metrics.finalLoss,
-                    rotationMeanAbsoluteError: metrics.rotationMeanAbsoluteError,
-                    swingAccuracy: metrics.swingAccuracy,
-                    validationSamples: metrics.validationSamples,
-                },
-                trainingRecipe: {
-                    type: "synthetic-supervised-mechanics",
-                    sampleCount: metrics.sampleCount,
-                    epochs: metrics.epochs,
-                    batchSize: metrics.batchSize,
-                    trainedHeads: ["rotation", "swing"],
-                    neutralHeads: ["movement", "block", "dash"],
-                },
-            });
-            setSubmitStatus({
-                ok: true,
-                message: `Exported approved ${artifact.baseModel.artifactId}`,
-            });
-            setBaseExportState("exported");
-            setTimeout(() => setSubmitStatus(null), 6000);
-        } catch (err) {
-            setBaseExportState("error");
-            setSubmitStatus({ ok: false, message: `Base export failed: ${err.message}` });
-        }
+        setSubmitStatus({ ok: false, message: "Base artifact export was removed. Logic blocks are the submitted brain." });
     };
-
-    const handleCleanPlayToggle = () => {
+    const handleAutoPlayToggle = () => {
         if (isAutoPlaying) {
             stopAutoPlay();
             setIsEditingArena(true);
             return;
         }
-        runCleanPlay();
+        runAutoPlay();
     };
 
     const handleResetRoundModel = async () => {
         if (!isMatchTraining || isBaseTraining || isStrategyTraining || finishStatus !== "TRAINING") return;
-        if (!roundCheckpointRef.current) return;
-
-        const resetModel = cloneCombatModel(roundCheckpointRef.current);
-        const previousModel = modelRef.current;
-        try {
-            await warmUpModel(resetModel);
-            await saveModel(resetModel, getMatchModelKey(matchId, matchUserId, selectedClass));
-            modelRef.current = resetModel;
-            previousModel?.dispose();
-            setSubmittedModelId(null);
-            trainingSummaryRef.current = null;
-            setTrainingSummary(null);
-            setTrainingProgress(null);
-            setSubmitStatus({ ok: true, message: "Round model reset to checkpoint." });
-            setTimeout(() => setSubmitStatus(null), 3000);
-        } catch (err) {
-            resetModel.dispose();
-            setSubmitStatus({ ok: false, message: `Reset failed: ${err.message}` });
-        }
+        setSubmittedModelId(null);
+        trainingSummaryRef.current = null;
+        setTrainingSummary(null);
+        setTrainingProgress(null);
+        setSubmitStatus({ ok: true, message: "Submitted bot brain reset. Current logic blocks are still editable." });
+        setTimeout(() => setSubmitStatus(null), 3000);
     };
-
     const handleSubmitModel = async ({ preserveStatus = false } = {}) => {
-        if (!modelRef.current) return null;
-        setSubmitStatus({ ok: null, message: "Submitting model..." });
+        setSubmitStatus({ ok: null, message: "Submitting bot brain..." });
 
         try {
             const activeTrainingSessionId = trainingSessionId ?? await ensureTrainingSession({ required: true });
             if (!activeTrainingSessionId) {
-                throw new Error("A server training session is required before submission.");
+                throw new Error("A server tuning session is required before submission.");
             }
             const trustedDurationMs = await fetchTrustedTrainingDuration(activeTrainingSessionId);
+            const configuration = normalizeMeleeStrategyConfiguration(
+                sanitizeStrategyConfigurationForClass(trainingConfiguration, selectedClass),
+            );
             const trainingMetrics = trainingSummaryRef.current ?? {
-                version: "melee-supervised-training-metrics-v1",
-                configuration: normalizeMeleeStrategyConfiguration(trainingConfiguration),
+                version: "deterministic-logic-submission-v1",
+                configuration,
                 trainingSamples: 0,
                 validationSamples: 0,
                 epochsCompleted: 0,
             };
             const payload = await buildModelSubmissionPayload({
-                model: modelRef.current,
+                brain: configuration,
                 matchId: isMatchTraining ? matchId : null,
                 trainingSessionId: activeTrainingSessionId,
-                trainingSteps: trainingMetrics.trainingSamples * trainingMetrics.epochsCompleted,
+                trainingSteps: 0,
                 selectedClass,
                 trainingMetrics,
             });
@@ -1078,13 +1617,13 @@ export default function BetaModel({
             payload.trainingDurationMs = trustedDurationMs;
 
             const result = await submitModelPayload(payload);
-            console.info("[arena-ml] Submitted model contract:", payload);
+            console.info("[arena-bot] Submitted bot brain contract:", payload);
             if (result.modelSubmissionId) {
                 setSubmittedModelId(result.modelSubmissionId);
             }
             setSubmitStatus({
                 ok: result.accepted !== false,
-                message: result.message ?? "Model contract submitted",
+                message: result.message ?? "Bot brain submitted",
             });
             if (!preserveStatus) {
                 setTimeout(() => setSubmitStatus(null), 4000);
@@ -1101,7 +1640,6 @@ export default function BetaModel({
             return null;
         }
     };
-
     const handleFinishMatch = async () => {
         if (!onFinishMatch || finishStatus === "FINISHED" || finishStatus === "SURRENDERED" || isFinishingMatch) return;
         setIsFinishingMatch(true);
@@ -1112,7 +1650,7 @@ export default function BetaModel({
 
         if (result?.modelSubmissionId && result.accepted !== false) {
             onFinishMatch(result.modelSubmissionId);
-            setSubmitStatus({ ok: true, message: "Model submitted. Waiting for opponent." });
+            setSubmitStatus({ ok: true, message: "Bot brain submitted. Waiting for opponent." });
         } else {
             setIsFinishingMatch(false);
         }
@@ -1136,6 +1674,14 @@ export default function BetaModel({
 
         return () => clearInterval(interval);
     }, [matchContext?.trainingEndsAt, matchContext?.trainingEndsAtMs, finishStatus, onFinishMatch]);
+
+    const selectedShape = shapes.find((shape) => shape.id === selectedId);
+    const canDeleteSelectedShape = Boolean(
+        isEditingArena
+        && selectedShape
+        && selectedShape.id !== "main"
+        && !selectedShape.locked,
+    );
 
     return (
         <div className="flex h-screen flex-col bg-arena-deep text-ink-hi font-ui overflow-hidden">
@@ -1197,33 +1743,7 @@ export default function BetaModel({
                     <span className="hidden lg:inline font-mono text-[11px] tracking-widest text-ink-muted">
                         {shapes.filter((shape) => isObstacleType(shape.type)).length} OBSTACLES
                     </span>
-                    {/*
-                        <>
-                    <button
-                        onClick={handleExportBaseModel}
-                        disabled={isBaseTraining || isStrategyTraining || isMatchTraining}
-                        title={baseCandidate
-                            ? "Freeze this candidate as the approved class base artifact."
-                            : "Train a fresh base candidate before exporting."}
-                        className={`text-[10px] border px-2 py-1 rounded ${isBaseTraining || isStrategyTraining || isMatchTraining
-                            ? "bg-zinc-900 text-ink-muted border-border-lo cursor-not-allowed"
-                            : baseExportState === "exported"
-                                ? "bg-green-900/40 text-green-300 border-green-700/60"
-                                : baseExportState === "error"
-                                    ? "bg-red-900/40 hover:bg-red-800 text-red-200 border-red-700/60"
-                            : "bg-amber-900/40 hover:bg-amber-800 text-amber-200 border-amber-800/50"
-                            }`}
-                    >
-                        {baseExportState === "exporting"
-                            ? "EXPORTING..."
-                            : baseExportState === "exported"
-                                ? "EXPORTED ✓"
-                                : baseExportState === "error"
-                                    ? "EXPORT FAILED"
-                                    : "APPROVE + EXPORT"}
-                    </button>
-                        </>
-                    */}
+
                 </div>
             </header>
 
@@ -1231,10 +1751,12 @@ export default function BetaModel({
                 <Toolbar
                     onAddShape={handleAddShape}
                     onSelectMain={() => setSelectedId("main")}
+                    onDeleteSelected={handleDeleteSelectedShape}
                     selectedId={selectedId}
                     submitStatus={submitStatus}
                     obstacleCount={shapes.filter((shape) => isObstacleType(shape.type)).length}
                     obstaclesLocked={isMatchTraining}
+                    canDeleteSelected={canDeleteSelectedShape}
                 />
 
                 <main className="min-w-0 flex-1 flex items-center justify-center bg-arena-deep overflow-auto p-6">
@@ -1255,12 +1777,17 @@ export default function BetaModel({
                 <StrategyTrainingPanel
                     configuration={trainingConfiguration}
                     onChange={updateTrainingConfiguration}
+                    opponentConfiguration={opponentTrainingConfiguration}
+                    onOpponentChange={updateOpponentTrainingConfiguration}
                     onStartTraining={startStrategyTraining}
                     onStopTraining={stopStrategyTraining}
                     isTraining={isStrategyTraining}
-                    progress={trainingProgress}
-                    summary={trainingSummary}
                     selectedClass={selectedClass}
+                    onClassChange={handleClassChange}
+                    opponentSelectedClass={opponentSelectedClass}
+                    onOpponentClassChange={handleOpponentClassChange}
+                    canChangeClass={!isMatchTraining && !isAutoPlaying && !isStrategyTraining}
+                    canChangeOpponentClass={!isMatchTraining && !isAutoPlaying && !isStrategyTraining}
                     isMatchTraining={isMatchTraining}
                     matchContext={matchContext}
                     trainingRemaining={trainingRemaining}
@@ -1268,19 +1795,23 @@ export default function BetaModel({
                     opponentRoundWins={opponentRoundWins}
                     obstacleCount={shapes.filter((shape) => isObstacleType(shape.type)).length}
                     isAutoPlaying={isAutoPlaying}
-                    hasCleanPlaySnapshot={hasCleanPlaySnapshot}
+                    hasArenaCheckpoint={hasArenaCheckpoint}
                     isBaseTraining={isBaseTraining}
                     baseCandidate={baseCandidate}
                     baseExportState={baseExportState}
                     finishStatus={finishStatus}
                     isFinishingMatch={isFinishingMatch}
                     canFinishMatch={Boolean(onFinishMatch)}
-                    onCleanPlayToggle={handleCleanPlayToggle}
-                    onResetCleanPlay={resetCleanPlay}
+                    onAutoPlayToggle={handleAutoPlayToggle}
+                    onResetArenaStats={resetArenaStats}
+                    onSaveArenaCheckpoint={handleSaveArenaCheckpoint}
+                    onResetArenaCheckpoint={handleResetArenaCheckpoint}
+                    onFullArenaReset={handleFullArenaReset}
                     onResetRoundModel={handleResetRoundModel}
                     onTrainBaseModel={handleTrainBaseModel}
                     onExportBaseModel={handleExportBaseModel}
                     onFinishMatch={handleFinishMatch}
+                    onSurrenderMatch={onSurrenderMatch}
                 />
             </div>
         </div>

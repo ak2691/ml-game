@@ -14,6 +14,7 @@ export const INTENT_TYPES = Object.freeze([
 export const INTENT_TARGET_TYPES = Object.freeze([
     "none",
     "opponent",
+    "opponent_grenade",
     "object_1",
     "object_2",
     "object_3",
@@ -32,6 +33,14 @@ export const MOVEMENT_STYLE_TYPES = Object.freeze([
     "diagonal_out_left",
     "diagonal_out_right",
     "center",
+    "north",
+    "south",
+    "east",
+    "west",
+    "northeast",
+    "northwest",
+    "southeast",
+    "southwest",
     "stop",
 ]);
 
@@ -58,6 +67,14 @@ const MOVEMENT_STYLE_BY_ACTION = Object.freeze({
     move_diagonal_out_left: "diagonal_out_left",
     move_diagonal_out_right: "diagonal_out_right",
     move_center: "center",
+    move_north: "north",
+    move_south: "south",
+    move_east: "east",
+    move_west: "west",
+    move_northeast: "northeast",
+    move_northwest: "northwest",
+    move_southeast: "southeast",
+    move_southwest: "southwest",
     move_stop: "stop",
     dash: "direct_in",
     dash_outward: "direct_out",
@@ -67,21 +84,35 @@ const MOVEMENT_STYLE_BY_ACTION = Object.freeze({
     dash_diagonal_in_right: "diagonal_in_right",
     dash_diagonal_out_left: "diagonal_out_left",
     dash_diagonal_out_right: "diagonal_out_right",
+    dash_north: "north",
+    dash_south: "south",
+    dash_east: "east",
+    dash_west: "west",
+    dash_northeast: "northeast",
+    dash_northwest: "northwest",
+    dash_southeast: "southeast",
+    dash_southwest: "southwest",
 });
 
 export function intentFromAction(actionId, actionTarget = "opponent") {
     const target = normalizeIntentTarget(actionTarget);
-    const objectTarget = target.startsWith("object_");
+    const objectTarget = target.startsWith("object_") || target === "opponent_grenade";
     const movementStyle = MOVEMENT_STYLE_BY_ACTION[actionId] ?? "stop";
     const dash = actionId?.startsWith("dash") ? 1 : 0;
 
     if (actionId === "move_center") {
         return { intent: "reposition", target: "none", movementStyle, dash };
     }
+    if (movementStyle === "north" || movementStyle === "south"
+        || movementStyle === "east" || movementStyle === "west"
+        || movementStyle === "northeast" || movementStyle === "northwest"
+        || movementStyle === "southeast" || movementStyle === "southwest") {
+        return { intent: "reposition", target: "none", movementStyle, dash };
+    }
     if (actionId === "move_stop") {
         return { ...DEFAULT_INTENT };
     }
-    if (actionId === "rotate_toward_enemy" || actionId === "swing") {
+    if (actionId === "rotate_toward_enemy" || actionId === "swing" || actionId === "fire_gun" || actionId === "throw_grenade") {
         return { intent: "attack_target", target, movementStyle: "stop", dash: 0 };
     }
     if (actionId === "block") {

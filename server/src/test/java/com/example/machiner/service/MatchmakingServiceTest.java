@@ -37,10 +37,11 @@ class MatchmakingServiceTest {
     private final MatchRepository matchRepository = mock(MatchRepository.class);
     private final MatchParticipantRepository matchParticipantRepository = mock(MatchParticipantRepository.class);
     private final ModelSubmissionRepository modelSubmissionRepository = mock(ModelSubmissionRepository.class);
-    private final ModelFingerprintProbeService modelFingerprintProbeService = mock(ModelFingerprintProbeService.class);
     private final ProfileRepository profileRepository = mock(ProfileRepository.class);
     private final UserRepository userRepository = mock(UserRepository.class);
     private final Clock clock = Clock.fixed(Instant.parse("2026-06-03T12:00:00Z"), ZoneOffset.UTC);
+    private final List<MatchPlaybackDTO.ObstaclePlacementDTO> matchObstacles = List.of(
+            new MatchPlaybackDTO.ObstaclePlacementDTO("object_1", "healthPack", 300.0, 400.0, 42));
     private final List<MatchParticipant> participants = new ArrayList<>();
 
     private Match savedMatch;
@@ -53,11 +54,9 @@ class MatchmakingServiceTest {
                 matchRepository,
                 matchParticipantRepository,
                 modelSubmissionRepository,
-                modelFingerprintProbeService,
                 profileRepository,
                 userRepository,
                 clock);
-        when(modelFingerprintProbeService.scheduleProbes(any(), any(), any(), any())).thenReturn(List.of());
 
         when(matchRepository.save(any(Match.class))).thenAnswer(invocation -> {
             savedMatch = invocation.getArgument(0);
@@ -86,8 +85,10 @@ class MatchmakingServiceTest {
                     .findFirst();
         });
         when(profileRepository.findByUserId(any(UUID.class))).thenReturn(Optional.empty());
+        when(simulationService.buildMatchObstacles(any(MatchSession.class))).thenReturn(matchObstacles);
         when(simulationService.buildDuelPlayback(any(MatchSession.class), any())).thenAnswer(invocation -> {
             MatchSession session = invocation.getArgument(0);
+            assertThat(session.obstacles()).isEqualTo(matchObstacles);
             MatchmakingService.MatchPlayer winner = session.players().stream()
                     .filter(player -> player.slot() == 2)
                     .findFirst()
@@ -134,17 +135,50 @@ class MatchmakingServiceTest {
         assertThat(events).allSatisfy(outbound -> {
             MatchmakingEventDTO event = outbound.event();
             assertThat(event.type()).isEqualTo("MATCH_FOUND");
-            assertThat(event.status()).isEqualTo("COUNTDOWN");
+            assertThat(event.status()).isEqualTo("CLASS_SELECT");
             assertThat(event.matchId()).isNotNull();
             assertThat(event.players()).hasSize(2);
             assertThat(event.players()).extracting("slot").containsExactlyInAnyOrder(1, 2);
+            assertThat(event.players()).extracting("selectedClass").containsOnly("melee");
+            assertThat(event.players()).extracting("classSelected").containsOnly(false);
             assertThat(event.opponent()).isNotNull();
-            assertThat(event.countdownEndsAt()).isNotNull();
-            assertThat(event.trainingEndsAt()).isNotNull();
-            assertThat(event.trainingEndsAt()).isEqualTo(event.countdownEndsAt().plusSeconds(600));
+            assertThat(event.classSelectionEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:00:30Z"));
+            assertThat(event.countdownEndsAt()).isNull();
+            assertThat(event.trainingEndsAt()).isNull();
             assertThat(event.rulesetVersion()).isEqualTo("duel-v1");
+            assertThat(event.obstacles()).isEqualTo(matchObstacles);
         });
         assertThat(participants).hasSize(2);
+    }
+
+    @Test
+    void bothPlayersSelectingClassStartsCountdown() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+
+        List<MatchmakingService.OutboundMatchmakingEvent> firstSelection =
+                service.selectClass(firstUserId, "ranged");
+        assertThat(firstSelection).hasSize(2);
+        assertThat(firstSelection).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_CLASS_SELECTED");
+            assertThat(outbound.event().status()).isEqualTo("CLASS_SELECT");
+            assertThat(outbound.event().player().selectedClass()).isIn("ranged", "melee");
+            assertThat(outbound.event().countdownEndsAt()).isNull();
+        });
+
+        List<MatchmakingService.OutboundMatchmakingEvent> secondSelection =
+                service.selectClass(secondUserId, "melee");
+        assertThat(secondSelection).hasSize(2);
+        assertThat(secondSelection).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_COUNTDOWN_READY");
+            assertThat(outbound.event().status()).isEqualTo("COUNTDOWN");
+            assertThat(outbound.event().countdownEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:00:05Z"));
+            assertThat(outbound.event().trainingEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:10:05Z"));
+            assertThat(outbound.event().players()).extracting("classSelected").containsOnly(true);
+            assertThat(outbound.event().players()).extracting("selectedClass").containsExactlyInAnyOrder("ranged", "melee");
+        });
     }
 
     @Test
@@ -166,7 +200,11 @@ class MatchmakingServiceTest {
         UUID firstSubmissionId = UUID.randomUUID();
         UUID secondSubmissionId = UUID.randomUUID();
         service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
-        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        List<MatchmakingService.OutboundMatchmakingEvent> matchFoundEvents =
+                service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        Long initialSeed = matchFoundEvents.getFirst().event().simulationSeed();
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
         stubSubmission(firstUserId, firstSubmissionId);
         stubSubmission(secondUserId, secondSubmissionId);
 
@@ -208,6 +246,8 @@ class MatchmakingServiceTest {
                     assertThat(outbound.event().status()).isEqualTo("COUNTDOWN");
                     assertThat(outbound.event().roundNumber()).isEqualTo(2);
                     assertThat(outbound.event().winsRequired()).isEqualTo(2);
+                    assertThat(outbound.event().simulationSeed()).isEqualTo(initialSeed);
+                    assertThat(outbound.event().obstacles()).isEqualTo(matchObstacles);
                     assertThat(outbound.event().player().finished()).isFalse();
                     assertThat(outbound.event().players()).extracting("roundWins").containsExactlyInAnyOrder(0, 1);
                     assertThat(outbound.delayMillis()).isPositive();
@@ -221,6 +261,8 @@ class MatchmakingServiceTest {
         UUID secondUserId = UUID.randomUUID();
         service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
         service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
 
         UUID firstRoundFirstSubmission = UUID.randomUUID();
         UUID firstRoundSecondSubmission = UUID.randomUUID();
@@ -294,6 +336,7 @@ class MatchmakingServiceTest {
         submission.setActionSchemaVersion("movement-v1");
         submission.setTrainingMetrics("{}");
         submission.setModelArtifacts("{}");
+        submission.setSelectedClass("melee");
         submission.setStatus(ModelSubmissionStatus.VALIDATED);
         when(modelSubmissionRepository.findByIdAndUserId(eq(submissionId), eq(userId)))
                 .thenReturn(Optional.of(submission));

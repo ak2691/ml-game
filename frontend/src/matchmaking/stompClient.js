@@ -93,12 +93,12 @@ export function createMatchmakingClient({ onEvent, onStatus }) {
                 JSON.stringify({ modelSubmissionId })
             );
         },
-        sendProbeResponse(response) {
+        selectClass(selectedClass) {
             if (!connected) return;
             sendFrame(
                 "SEND",
-                { destination: "/app/matchmaking.probe", "content-type": "application/json" },
-                JSON.stringify(response)
+                { destination: "/app/matchmaking.selectClass", "content-type": "application/json" },
+                JSON.stringify({ selectedClass })
             );
         },
         surrender() {

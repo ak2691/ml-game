@@ -13,14 +13,15 @@ public record MatchmakingEventDTO(
         MatchmakingPlayerDTO opponent,
         List<MatchmakingPlayerDTO> players,
         Instant serverNow,
+        Instant classSelectionEndsAt,
         Instant countdownEndsAt,
         Instant trainingEndsAt,
         Instant playbackStartsAt,
         Instant resultRevealsAt,
         String rulesetVersion,
         MatchPlaybackDTO playback,
-        ModelFingerprintProbeDTO probe,
         Integer roundNumber,
         Integer winsRequired,
-        String message) {
+        String message,
+        List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
 }

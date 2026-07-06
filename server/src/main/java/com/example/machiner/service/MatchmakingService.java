@@ -3,7 +3,6 @@ package com.example.machiner.service;
 import com.example.machiner.DTO.MatchPlaybackDTO;
 import com.example.machiner.DTO.MatchmakingEventDTO;
 import com.example.machiner.DTO.MatchmakingPlayerDTO;
-import com.example.machiner.DTO.ModelFingerprintProbeResponseDTO;
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.domain.Match;
 import com.example.machiner.domain.MatchParticipant;
@@ -32,6 +31,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class MatchmakingService {
 
     private static final int COUNTDOWN_SECONDS = 5;
+    private static final int CLASS_SELECTION_SECONDS = 30;
     private static final int TRAINING_SECONDS = 600;
     private static final int RESULT_REVEAL_BUFFER_MS = 250;
     private static final int WINS_REQUIRED = 2;
@@ -42,7 +42,6 @@ public class MatchmakingService {
     private final MatchRepository matchRepository;
     private final MatchParticipantRepository matchParticipantRepository;
     private final ModelSubmissionRepository modelSubmissionRepository;
-    private final ModelFingerprintProbeService modelFingerprintProbeService;
     private final ProfileRepository profileRepository;
     private final UserRepository userRepository;
     private final Clock clock;
@@ -54,7 +53,6 @@ public class MatchmakingService {
             MatchRepository matchRepository,
             MatchParticipantRepository matchParticipantRepository,
             ModelSubmissionRepository modelSubmissionRepository,
-            ModelFingerprintProbeService modelFingerprintProbeService,
             ProfileRepository profileRepository,
             UserRepository userRepository,
             Clock clock) {
@@ -62,7 +60,6 @@ public class MatchmakingService {
         this.matchRepository = matchRepository;
         this.matchParticipantRepository = matchParticipantRepository;
         this.modelSubmissionRepository = modelSubmissionRepository;
-        this.modelFingerprintProbeService = modelFingerprintProbeService;
         this.profileRepository = profileRepository;
         this.userRepository = userRepository;
         this.clock = clock;
@@ -89,35 +86,42 @@ public class MatchmakingService {
         }
 
         QueuedPlayer opponent = queue.remove(0);
-        Instant countdownEndsAt = Instant.now(clock).plusSeconds(COUNTDOWN_SECONDS);
-        Instant trainingEndsAt = countdownEndsAt.plusSeconds(TRAINING_SECONDS);
+        Instant classSelectionEndsAt = Instant.now(clock).plusSeconds(CLASS_SELECTION_SECONDS);
         Match match = createMatch(opponent, player);
         long seed = match.getSimulationSeed();
+        List<MatchPlayer> players = List.of(
+                new MatchPlayer(
+                        opponent.userId(),
+                        opponent.username(),
+                        opponent.principalName(),
+                        1,
+                        false,
+                        null,
+                        0,
+                        "melee",
+                        false),
+                new MatchPlayer(
+                        player.userId(),
+                        player.username(),
+                        player.principalName(),
+                        2,
+                        false,
+                        null,
+                        0,
+                        "melee",
+                        false));
 
-        MatchSession session = new MatchSession(
+        MatchSession pendingSession = new MatchSession(
                 match.getId(),
                 seed,
-                List.of(
-                        new MatchPlayer(
-                                opponent.userId(),
-                                opponent.username(),
-                                opponent.principalName(),
-                                1,
-                                false,
-                                null,
-                                0),
-                        new MatchPlayer(
-                                player.userId(),
-                                player.username(),
-                                player.principalName(),
-                                2,
-                                false,
-                                null,
-                                0)),
-                countdownEndsAt,
-                trainingEndsAt,
+                players,
+                classSelectionEndsAt,
+                null,
+                null,
                 1,
-                WINS_REQUIRED);
+                WINS_REQUIRED,
+                List.of());
+        MatchSession session = pendingSession.withObstacles(matchSimulationService.buildMatchObstacles(pendingSession));
         createParticipants(match, session);
         activeSessionsByUserId.put(opponent.userId(), session);
         activeSessionsByUserId.put(player.userId(), session);
@@ -125,16 +129,55 @@ public class MatchmakingService {
         List<OutboundMatchmakingEvent> events = new ArrayList<>(session.players().stream()
                 .map(matchPlayer -> eventForPlayer(session, matchPlayer, "MATCH_FOUND"))
                 .toList());
-        events.addAll(scheduledProbeEvents(session));
         return events;
+    }
+
+    @Transactional
+    public synchronized List<OutboundMatchmakingEvent> selectClass(UUID userId, String selectedClass) {
+        MatchSession session = activeSessionsByUserId.get(userId);
+        if (session == null) {
+            return List.of();
+        }
+        if (session.countdownEndsAt() != null) {
+            return List.of(eventForPlayer(session, playerForUser(session, userId), "MATCH_COUNTDOWN_READY"));
+        }
+
+        MatchSession selectedSession = session.withSelectedClass(userId, normalizeSelectedClass(selectedClass), true);
+        if (selectedSession.players().stream().allMatch(MatchPlayer::classSelected)) {
+            return startCountdown(selectedSession, "MATCH_COUNTDOWN_READY", "Both classes locked.");
+        }
+
+        for (MatchPlayer player : selectedSession.players()) {
+            activeSessionsByUserId.put(player.userId(), selectedSession);
+        }
+        return selectedSession.players().stream()
+                .map(player -> eventForPlayer(
+                        selectedSession,
+                        player,
+                        "MATCH_CLASS_SELECTED",
+                        "CLASS_SELECT",
+                        null,
+                        playerForUser(selectedSession, userId).username() + " locked a class."))
+                .toList();
+    }
+
+    @Transactional
+    public synchronized List<OutboundMatchmakingEvent> resolveClassSelectionTimeout(UUID matchId) {
+        MatchSession session = activeSessionsByUserId.values().stream()
+                .filter(candidate -> candidate.matchId().equals(matchId))
+                .findFirst()
+                .orElse(null);
+        if (session == null || session.countdownEndsAt() != null) {
+            return List.of();
+        }
+        if (session.classSelectionEndsAt() != null && Instant.now(clock).isBefore(session.classSelectionEndsAt())) {
+            return List.of();
+        }
+        return startCountdown(session.withDefaultClassSelections(), "MATCH_COUNTDOWN_READY", "Class selection ended.");
     }
 
     public synchronized void leaveQueue(UUID userId) {
         queue.removeIf(player -> player.userId().equals(userId));
-    }
-
-    public synchronized void recordProbeResponse(UUID userId, ModelFingerprintProbeResponseDTO response) {
-        modelFingerprintProbeService.recordProbeResponse(userId, response);
     }
 
     public synchronized void requireActiveMatchForUser(UUID userId, UUID matchId) {
@@ -162,7 +205,6 @@ public class MatchmakingService {
         completeMatchByResignation(session.matchId(), resigningPlayer, winner);
         for (MatchPlayer player : session.players()) {
             activeSessionsByUserId.remove(player.userId());
-            modelFingerprintProbeService.clearUser(player.userId());
         }
 
         MatchPlaybackDTO result = new MatchPlaybackDTO(
@@ -198,6 +240,11 @@ public class MatchmakingService {
         }
 
         ModelSubmission submission = requireValidatedSubmission(userId, modelSubmissionId, session.matchId());
+        MatchPlayer submittingPlayer = playerForUser(session, userId);
+        String submissionClass = normalizeSelectedClass(submission.getSelectedClass());
+        if (!submissionClass.equals(submittingPlayer.selectedClass())) {
+            throw new AuthException("model submission class does not match the selected match class");
+        }
         MatchSession updatedSession = session.withFinishedPlayer(userId, submission.getId());
         for (MatchPlayer player : updatedSession.players()) {
             activeSessionsByUserId.put(player.userId(), updatedSession);
@@ -228,7 +275,6 @@ public class MatchmakingService {
 
             for (MatchPlayer player : scoredSession.players()) {
                 activeSessionsByUserId.remove(player.userId());
-                modelFingerprintProbeService.clearUser(player.userId());
             }
         }
         MatchPlaybackDTO replayOnlyPlayback = withoutResult(playback);
@@ -263,7 +309,6 @@ public class MatchmakingService {
             Instant nextCountdownEndsAt = resultRevealsAt.plusSeconds(COUNTDOWN_SECONDS);
             Instant nextTrainingEndsAt = nextCountdownEndsAt.plusSeconds(TRAINING_SECONDS);
             MatchSession nextRoundSession = scoredSession.nextRound(
-                    ThreadLocalRandom.current().nextLong(1, Long.MAX_VALUE),
                     nextCountdownEndsAt,
                     nextTrainingEndsAt);
             for (MatchPlayer player : nextRoundSession.players()) {
@@ -314,6 +359,25 @@ public class MatchmakingService {
         return Math.max(RESULT_REVEAL_BUFFER_MS, (long) finalElapsedMs + RESULT_REVEAL_BUFFER_MS);
     }
 
+    private List<OutboundMatchmakingEvent> startCountdown(MatchSession session, String type, String message) {
+        Instant countdownEndsAt = Instant.now(clock).plusSeconds(COUNTDOWN_SECONDS);
+        Instant trainingEndsAt = countdownEndsAt.plusSeconds(TRAINING_SECONDS);
+        MatchSession countdownSession = session.withCountdown(countdownEndsAt, trainingEndsAt);
+        for (MatchPlayer player : countdownSession.players()) {
+            activeSessionsByUserId.put(player.userId(), countdownSession);
+            updateParticipantSelectedClass(countdownSession.matchId(), player);
+        }
+        return countdownSession.players().stream()
+                .map(player -> eventForPlayer(
+                        countdownSession,
+                        player,
+                        type,
+                        "COUNTDOWN",
+                        null,
+                        message))
+                .toList();
+    }
+
     private OutboundMatchmakingEvent waitingEvent(UUID userId, String username, String principalName) {
         return new OutboundMatchmakingEvent(
                 principalName,
@@ -322,10 +386,11 @@ public class MatchmakingService {
                         null,
                         null,
                         "WAITING",
-                        new MatchmakingPlayerDTO(userId, username, 1, false, 0),
+                        new MatchmakingPlayerDTO(userId, username, 1, false, 0, "melee", false),
                         null,
                         List.of(),
                         Instant.now(clock),
+                        null,
                         null,
                         null,
                         null,
@@ -338,22 +403,8 @@ public class MatchmakingService {
                         null));
     }
 
-    private List<OutboundMatchmakingEvent> scheduledProbeEvents(MatchSession session) {
-        return modelFingerprintProbeService.scheduleProbes(
-                        session.matchId(),
-                        session.players().stream()
-                                .map(player -> new ModelFingerprintProbeService.ProbeTarget(
-                                        player.userId(),
-                                        player.principalName()))
-                                .toList(),
-                        session.countdownEndsAt(),
-                        session.trainingEndsAt())
-                .stream()
-                .map(probe -> new OutboundMatchmakingEvent(
-                        probe.principalName(),
-                        modelFingerprintProbeService.toProbeEvent(probe.probe()),
-                        probe.delayMillis()))
-                .toList();
+    private String normalizeSelectedClass(String selectedClass) {
+        return "ranged".equals(selectedClass) ? "ranged" : "melee";
     }
 
     private Match createMatch(QueuedPlayer firstPlayer, QueuedPlayer secondPlayer) {
@@ -372,10 +423,19 @@ public class MatchmakingService {
                     participant.setMatch(match);
                     participant.setUser(userRepository.getReferenceById(player.userId()));
                     participant.setSlot((short) player.slot());
+                    participant.setSelectedClass(player.selectedClass());
                     return participant;
                 })
                 .toList();
         matchParticipantRepository.saveAll(participants);
+    }
+
+    private void updateParticipantSelectedClass(UUID matchId, MatchPlayer player) {
+        matchParticipantRepository.findByMatchIdAndUserId(matchId, player.userId())
+                .ifPresent(participant -> {
+                    participant.setSelectedClass(player.selectedClass());
+                    matchParticipantRepository.save(participant);
+                });
     }
 
     private ModelSubmission requireValidatedSubmission(UUID userId, UUID modelSubmissionId, UUID matchId) {
@@ -484,7 +544,7 @@ public class MatchmakingService {
     }
 
     private OutboundMatchmakingEvent eventForPlayer(MatchSession session, MatchPlayer player, String type) {
-        return eventForPlayer(session, player, type, "COUNTDOWN", null, null);
+        return eventForPlayer(session, player, type, session.countdownEndsAt() == null ? "CLASS_SELECT" : "COUNTDOWN", null, null);
     }
 
     private OutboundMatchmakingEvent eventForPlayer(
@@ -533,16 +593,17 @@ public class MatchmakingService {
                         opponent == null ? null : opponent.toDto(),
                         session.players().stream().map(MatchPlayer::toDto).toList(),
                         Instant.now(clock),
+                        session.classSelectionEndsAt(),
                         session.countdownEndsAt(),
                         session.trainingEndsAt(),
                         playbackStartsAt,
                         resultRevealsAt,
                         MatchSimulationService.DUEL_RULESET_VERSION,
                         playback,
-                        null,
                         session.roundNumber(),
                         session.winsRequired(),
-                        message),
+                        message,
+                        session.obstacles()),
                 delayMillis);
     }
 
@@ -563,9 +624,11 @@ public class MatchmakingService {
             int slot,
             boolean finished,
             UUID modelSubmissionId,
-            int roundWins) {
+            int roundWins,
+            String selectedClass,
+            boolean classSelected) {
         MatchmakingPlayerDTO toDto() {
-            return new MatchmakingPlayerDTO(userId, username, slot, finished, roundWins);
+            return new MatchmakingPlayerDTO(userId, username, slot, finished, roundWins, selectedClass, classSelected);
         }
     }
 
@@ -573,10 +636,25 @@ public class MatchmakingService {
             UUID matchId,
             long simulationSeed,
             List<MatchPlayer> players,
+            Instant classSelectionEndsAt,
             Instant countdownEndsAt,
             Instant trainingEndsAt,
             int roundNumber,
-            int winsRequired) {
+            int winsRequired,
+            List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
+        MatchSession withObstacles(List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
+            return new MatchSession(
+                    matchId,
+                    simulationSeed,
+                    players,
+                    classSelectionEndsAt,
+                    countdownEndsAt,
+                    trainingEndsAt,
+                    roundNumber,
+                    winsRequired,
+                    obstacles != null ? List.copyOf(obstacles) : List.of());
+        }
+
         MatchSession withFinishedPlayer(UUID userId, UUID modelSubmissionId) {
             return new MatchSession(
                     matchId,
@@ -590,13 +668,17 @@ public class MatchmakingService {
                                             player.slot(),
                                             true,
                                             modelSubmissionId,
-                                            player.roundWins())
+                                            player.roundWins(),
+                                            player.selectedClass(),
+                                            player.classSelected())
                                     : player)
                             .toList(),
+                    classSelectionEndsAt,
                     countdownEndsAt,
                     trainingEndsAt,
                     roundNumber,
-                    winsRequired);
+                    winsRequired,
+                    obstacles);
         }
 
         MatchSession withRoundResult(UUID winnerUserId) {
@@ -612,19 +694,23 @@ public class MatchmakingService {
                                             player.slot(),
                                             player.finished(),
                                             player.modelSubmissionId(),
-                                            player.roundWins() + 1)
+                                            player.roundWins() + 1,
+                                            player.selectedClass(),
+                                            player.classSelected())
                                     : player)
                             .toList(),
+                    classSelectionEndsAt,
                     countdownEndsAt,
                     trainingEndsAt,
                     roundNumber,
-                    winsRequired);
+                    winsRequired,
+                    obstacles);
         }
 
-        MatchSession nextRound(long nextSeed, Instant nextCountdownEndsAt, Instant nextTrainingEndsAt) {
+        MatchSession nextRound(Instant nextCountdownEndsAt, Instant nextTrainingEndsAt) {
             return new MatchSession(
                     matchId,
-                    nextSeed,
+                    simulationSeed,
                     players.stream()
                             .map(player -> new MatchPlayer(
                                     player.userId(),
@@ -633,12 +719,90 @@ public class MatchmakingService {
                                     player.slot(),
                                     false,
                                     null,
-                                    player.roundWins()))
+                                    player.roundWins(),
+                                    player.selectedClass(),
+                                    player.classSelected()))
                             .toList(),
+                    classSelectionEndsAt,
                     nextCountdownEndsAt,
                     nextTrainingEndsAt,
                     roundNumber + 1,
-                    winsRequired);
+                    winsRequired,
+                    obstacles);
+        }
+
+        MatchSession withSelectedClass(UUID userId, String selectedClass, boolean classSelected) {
+            return new MatchSession(
+                    matchId,
+                    simulationSeed,
+                    players.stream()
+                            .map(player -> player.userId().equals(userId)
+                                    ? new MatchPlayer(
+                                            player.userId(),
+                                            player.username(),
+                                            player.principalName(),
+                                            player.slot(),
+                                            player.finished(),
+                                            player.modelSubmissionId(),
+                                            player.roundWins(),
+                                            selectedClass,
+                                            classSelected)
+                                    : player)
+                            .toList(),
+                    classSelectionEndsAt,
+                    countdownEndsAt,
+                    trainingEndsAt,
+                    roundNumber,
+                    winsRequired,
+                    obstacles);
+        }
+
+        MatchSession withDefaultClassSelections() {
+            return new MatchSession(
+                    matchId,
+                    simulationSeed,
+                    players.stream()
+                            .map(player -> new MatchPlayer(
+                                    player.userId(),
+                                    player.username(),
+                                    player.principalName(),
+                                    player.slot(),
+                                    player.finished(),
+                                    player.modelSubmissionId(),
+                                    player.roundWins(),
+                                    player.selectedClass() != null ? player.selectedClass() : "melee",
+                                    true))
+                            .toList(),
+                    classSelectionEndsAt,
+                    countdownEndsAt,
+                    trainingEndsAt,
+                    roundNumber,
+                    winsRequired,
+                    obstacles);
+        }
+
+        MatchSession withCountdown(Instant nextCountdownEndsAt, Instant nextTrainingEndsAt) {
+            return new MatchSession(
+                    matchId,
+                    simulationSeed,
+                    players.stream()
+                            .map(player -> new MatchPlayer(
+                                    player.userId(),
+                                    player.username(),
+                                    player.principalName(),
+                                    player.slot(),
+                                    player.finished(),
+                                    player.modelSubmissionId(),
+                                    player.roundWins(),
+                                    player.selectedClass() != null ? player.selectedClass() : "melee",
+                                    true))
+                            .toList(),
+                    classSelectionEndsAt,
+                    nextCountdownEndsAt,
+                    nextTrainingEndsAt,
+                    roundNumber,
+                    winsRequired,
+                    obstacles);
         }
     }
 

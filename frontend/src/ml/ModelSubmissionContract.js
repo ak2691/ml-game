@@ -1,7 +1,7 @@
-export const MODEL_ARCHITECTURE_VERSION = "melee-heads-v7";
-export const FEATURE_SCHEMA_VERSION = "duel-intent-features-v6";
-export const ACTION_SCHEMA_VERSION = "melee-dash-actions-v3";
-export const MODEL_FORMAT = "tfjs-layers-v1";
+export const MODEL_ARCHITECTURE_VERSION = "deterministic-logic-v1";
+export const FEATURE_SCHEMA_VERSION = "duel-logic-features-v1";
+export const ACTION_SCHEMA_VERSION = "melee-logic-actions-v1";
+export const MODEL_FORMAT = "logic-blocks-v1";
 const ENV = import.meta.env ?? {};
 
 export const CLIENT_BUILD_VERSION =

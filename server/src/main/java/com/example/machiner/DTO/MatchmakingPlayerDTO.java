@@ -7,5 +7,7 @@ public record MatchmakingPlayerDTO(
         String username,
         int slot,
         boolean finished,
-        int roundWins) {
+        int roundWins,
+        String selectedClass,
+        boolean classSelected) {
 }

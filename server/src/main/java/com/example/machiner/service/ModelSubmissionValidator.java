@@ -15,10 +15,7 @@ public class ModelSubmissionValidator {
     private static final int MAX_MODEL_HASH_LENGTH = 128;
     private static final int MAX_SELECTED_CLASS_LENGTH = 40;
     private static final int MAX_BASE_MODEL_ARTIFACT_ID_LENGTH = 100;
-    private static final String MOVEMENT_ACTION_SCHEMA_VERSION = "movement-v1";
-    private static final String MELEE_ACTION_SCHEMA_VERSION = "melee-actions-v1";
-    private static final String MELEE_ACTION_SCHEMA_VERSION_V2 = "melee-discrete-actions-v2";
-    private static final String MELEE_ACTION_SCHEMA_VERSION_V3 = "melee-dash-actions-v3";
+    private static final String LOGIC_ACTION_SCHEMA_VERSION = "melee-logic-actions-v1";
 
     private final JsonMapper jsonMapper;
 
@@ -43,10 +40,7 @@ public class ModelSubmissionValidator {
         requireText(errors, submission.getActionSchemaVersion(), "actionSchemaVersion", MAX_VERSION_LENGTH);
 
         if (hasText(submission.getActionSchemaVersion())
-                && !MOVEMENT_ACTION_SCHEMA_VERSION.equals(submission.getActionSchemaVersion())
-                && !MELEE_ACTION_SCHEMA_VERSION.equals(submission.getActionSchemaVersion())
-                && !MELEE_ACTION_SCHEMA_VERSION_V2.equals(submission.getActionSchemaVersion())
-                && !MELEE_ACTION_SCHEMA_VERSION_V3.equals(submission.getActionSchemaVersion())) {
+                && !LOGIC_ACTION_SCHEMA_VERSION.equals(submission.getActionSchemaVersion())) {
             errors.add("actionSchemaVersion is not supported");
         }
 

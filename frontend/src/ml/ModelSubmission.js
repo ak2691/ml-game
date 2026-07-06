@@ -8,59 +8,19 @@ import {
     TRAINING_SESSION_ENDPOINT,
 } from "./ModelSubmissionContract";
 import { ensureCsrfHeaders } from "../security/csrf";
-import { getBaseModelDefinition } from "./BaseModelArtifact.js";
+import { normalizeMeleeStrategyConfiguration } from "./MeleeStrategy.js";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 
-function arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = "";
-
-    for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-
-    return btoa(binary);
-}
-
-async function serializeModel(model) {
-    let savedArtifacts = null;
-
-    await model.save({
-        save: async (artifacts) => {
-            savedArtifacts = artifacts;
-            return {
-                modelArtifactsInfo: {
-                    dateSaved: new Date(),
-                    modelTopologyType: "JSON",
-                },
-            };
-        },
-    });
-
-    if (!savedArtifacts) {
-        throw new Error("Unable to serialize model artifacts.");
-    }
-
-    return {
-        modelTopology: savedArtifacts.modelTopology,
-        weightSpecs: savedArtifacts.weightSpecs ?? [],
-        weightDataBase64: savedArtifacts.weightData
-            ? arrayBufferToBase64(savedArtifacts.weightData)
-            : null,
-    };
-}
-
 export async function buildModelSubmissionPayload({
-    model,
+    brain,
     matchId = null,
     trainingSessionId,
-    trainingSteps,
-    trainingMetrics,
+    trainingSteps = 0,
+    trainingMetrics = null,
     selectedClass = "melee",
 }) {
-    const serializedModel = await serializeModel(model);
-    const baseModel = getBaseModelDefinition(selectedClass);
+    const normalizedBrain = normalizeMeleeStrategyConfiguration(brain);
 
     return {
         architectureVersion: MODEL_ARCHITECTURE_VERSION,
@@ -72,38 +32,16 @@ export async function buildModelSubmissionPayload({
         trainingDurationMs: null,
         trainingSteps,
         selectedClass,
-        baseModelArtifactId: baseModel.artifactId,
-        trainingMetrics,
+        baseModelArtifactId: null,
+        trainingMetrics: trainingMetrics ?? {
+            version: "deterministic-logic-submission-v1",
+            configuration: normalizedBrain,
+            trainingSamples: 0,
+            validationSamples: 0,
+            epochsCompleted: 0,
+        },
         clientBuildVersion: CLIENT_BUILD_VERSION,
-        model: serializedModel,
-    };
-}
-
-export async function buildModelFingerprintProbeResponse({
-    model,
-    probe,
-    trainingStepCount,
-}) {
-    if (!model || !probe?.probeId || !Array.isArray(probe.weightIndices)) {
-        throw new Error("A model and server probe request are required.");
-    }
-
-    const allWeights = [];
-    const tensors = model.getWeights();
-    for (const tensor of tensors) {
-        const values = await tensor.data();
-        for (let i = 0; i < values.length; i++) {
-            allWeights.push(values[i]);
-        }
-    }
-
-    return {
-        probeId: probe.probeId,
-        values: probe.weightIndices.map((index) => {
-            const value = allWeights[index];
-            return Number.isFinite(value) ? value : null;
-        }),
-        trainingStepCount,
+        brain: normalizedBrain,
     };
 }
 

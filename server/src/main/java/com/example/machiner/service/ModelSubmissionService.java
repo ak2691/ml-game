@@ -27,6 +27,7 @@ import tools.jackson.databind.json.JsonMapper;
 @Service
 public class ModelSubmissionService {
 
+    private static final String FALLBACK_ACTION_SCHEMA_VERSION = "melee-logic-actions-v1";
     private static final int MAX_VERSION_LENGTH = 50;
     private static final int MAX_TRAINING_SESSION_ID_LENGTH = 100;
     private static final int MAX_CLIENT_BUILD_VERSION_LENGTH = 100;
@@ -41,7 +42,6 @@ public class ModelSubmissionService {
     private final ValidationResultRepository validationResultRepository;
     private final CurrentUserService currentUserService;
     private final ModelSubmissionRateLimiter rateLimiter;
-    private final ApprovedBaseModelRegistry approvedBaseModelRegistry;
     private final MatchmakingService matchmakingService;
     private final JsonMapper jsonMapper;
 
@@ -52,7 +52,6 @@ public class ModelSubmissionService {
             ValidationResultRepository validationResultRepository,
             CurrentUserService currentUserService,
             ModelSubmissionRateLimiter rateLimiter,
-            ApprovedBaseModelRegistry approvedBaseModelRegistry,
             MatchmakingService matchmakingService,
             JsonMapper jsonMapper) {
         this.validationService = validationService;
@@ -61,7 +60,6 @@ public class ModelSubmissionService {
         this.validationResultRepository = validationResultRepository;
         this.currentUserService = currentUserService;
         this.rateLimiter = rateLimiter;
-        this.approvedBaseModelRegistry = approvedBaseModelRegistry;
         this.matchmakingService = matchmakingService;
         this.jsonMapper = jsonMapper;
     }
@@ -86,20 +84,7 @@ public class ModelSubmissionService {
     private void rejectDuplicateFinalHash(
             ModelSubmissionPayloadDTO payload,
             ModelSubmissionValidationResponseDTO validation) {
-        if (!hasText(validation.getComputedModelHash())) {
-            return;
-        }
-
-        if (approvedBaseModelRegistry.isApprovedMatchBase(payload, validation.getComputedModelHash())) {
-            addWarning(validation, "unchanged approved base model accepted for this match");
-            return;
-        }
-
-        if (modelSubmissionRepository.existsByModelHashAndStatus(
-                validation.getComputedModelHash(),
-                ModelSubmissionStatus.VALIDATED)) {
-            rejectValidation(validation, "modelHash exactly matches a previous validated submission");
-        }
+        // Deterministic bot brains may intentionally be resubmitted unchanged across rounds.
     }
 
     private ModelSubmissionValidationResponseDTO validateSafely(ModelSubmissionPayloadDTO payload) {
@@ -109,7 +94,7 @@ public class ModelSubmissionService {
             ModelSubmissionValidationResponseDTO response = new ModelSubmissionValidationResponseDTO();
             response.setAccepted(false);
             response.setStatus("ERROR");
-            response.setMessage("Model submission validation failed unexpectedly");
+            response.setMessage("Bot brain validation failed unexpectedly");
             response.setValidatorVersion(VALIDATOR_VERSION);
             response.setSubmittedModelHash(payload == null ? null : payload.getModelHash());
             response.setComputedModelHash(null);
@@ -135,7 +120,7 @@ public class ModelSubmissionService {
             submission.setFeatureSchemaVersion(cleanText(
                     payload.getFeatureSchemaVersion(), "missing-features", MAX_VERSION_LENGTH));
             submission.setActionSchemaVersion(cleanText(
-                    payload.getActionSchemaVersion(), "movement-v1", MAX_VERSION_LENGTH));
+                    payload.getActionSchemaVersion(), FALLBACK_ACTION_SCHEMA_VERSION, MAX_VERSION_LENGTH));
             submission.setTrainingSessionId(cleanNullableText(
                     payload.getTrainingSessionId(), MAX_TRAINING_SESSION_ID_LENGTH));
             submission.setTrainingDurationMs(cleanNonNegative(trustedTrainingDurationMs));
@@ -147,11 +132,11 @@ public class ModelSubmissionService {
             submission.setTrainingMetrics(toJson(payload.getTrainingMetrics(), "{}"));
             submission.setClientBuildVersion(cleanNullableText(
                     payload.getClientBuildVersion(), MAX_CLIENT_BUILD_VERSION_LENGTH));
-            submission.setModelArtifacts(toJson(payload.getModel(), "{}"));
+            submission.setModelArtifacts(toJson(payload.getBrain() != null ? payload.getBrain() : payload.getModel(), "{}"));
         } else {
             submission.setArchitectureVersion("missing-payload");
             submission.setFeatureSchemaVersion("missing-payload");
-            submission.setActionSchemaVersion("movement-v1");
+            submission.setActionSchemaVersion(FALLBACK_ACTION_SCHEMA_VERSION);
             submission.setModelArtifacts("{}");
         }
 
@@ -237,7 +222,7 @@ public class ModelSubmissionService {
     private void rejectValidation(ModelSubmissionValidationResponseDTO validation, String error) {
         validation.setAccepted(false);
         validation.setStatus("REJECTED");
-        validation.setMessage("Model submission failed validation stub");
+        validation.setMessage("Bot brain failed validation");
 
         List<String> errors = validation.getErrors() == null
                 ? new ArrayList<>()

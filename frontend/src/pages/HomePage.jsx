@@ -31,7 +31,7 @@ export default function HomePage() {
                 </div>
                 <h1 className="text-3xl font-bold tracking-wide text-ink-white">Machiner</h1>
                 <p className="mt-3 max-w-[560px] text-sm text-ink-muted">
-                    Train a small browser fighter, submit it to the server, and build toward rated model battles.
+                    Build a deterministic fighter brain, submit it to the server, and iterate through rated bot battles.
                 </p>
                 <div className="mt-7 flex flex-wrap gap-3">
                     <button
@@ -44,13 +44,7 @@ export default function HomePage() {
                         onClick={() => navigate("/beta")}
                         className="rounded border border-border-lo bg-zinc-900 px-5 py-2 text-sm font-bold text-ink-muted hover:text-ink-white"
                     >
-                        OPEN TRAINING ROOM
-                    </button>
-                    <button
-                        onClick={() => navigate("/base-models")}
-                        className="rounded border border-border-lo bg-zinc-900 px-5 py-2 text-sm font-bold text-ink-muted hover:text-ink-white"
-                    >
-                        VIEW BASE MODELS
+                        OPEN BOT ROOM
                     </button>
                 </div>
             </section>

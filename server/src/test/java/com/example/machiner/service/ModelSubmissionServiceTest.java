@@ -7,7 +7,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.machiner.DTO.ModelSubmissionPayloadDTO;
-import com.example.machiner.DTO.ModelSubmissionValidationResponseDTO;
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.domain.ModelSubmission;
 import com.example.machiner.domain.ModelSubmissionStatus;
@@ -17,6 +16,9 @@ import com.example.machiner.domain.ValidationStatus;
 import com.example.machiner.repository.ModelSubmissionRepository;
 import com.example.machiner.repository.TrainingSessionRepository;
 import com.example.machiner.repository.ValidationResultRepository;
+import com.example.machiner.simulation.classes.CombatClassRegistry;
+import com.example.machiner.simulation.classes.MeleeClassSpec;
+import com.example.machiner.simulation.classes.RangedClassSpec;
 import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.List;
@@ -40,17 +42,16 @@ class ModelSubmissionServiceTest {
             org.mockito.Mockito.mock(ValidationResultRepository.class);
     private final CurrentUserService currentUserService = org.mockito.Mockito.mock(CurrentUserService.class);
     private final ModelSubmissionRateLimiter rateLimiter = org.mockito.Mockito.mock(ModelSubmissionRateLimiter.class);
-    private final ApprovedBaseModelRegistry approvedBaseModelRegistry =
-            org.mockito.Mockito.mock(ApprovedBaseModelRegistry.class);
     private final MatchmakingService matchmakingService = org.mockito.Mockito.mock(MatchmakingService.class);
     private final ModelSubmissionService service = new ModelSubmissionService(
-            new ModelSubmissionValidationService(jsonMapper),
+            new ModelSubmissionValidationService(
+                    jsonMapper,
+                    new CombatClassRegistry(List.of(new MeleeClassSpec(), new RangedClassSpec()))),
             modelSubmissionRepository,
             trainingSessionRepository,
             validationResultRepository,
             currentUserService,
             rateLimiter,
-            approvedBaseModelRegistry,
             matchmakingService,
             jsonMapper);
 
@@ -74,13 +75,14 @@ class ModelSubmissionServiceTest {
         verify(modelSubmissionRepository).save(submissionCaptor.capture());
         ModelSubmission savedSubmission = submissionCaptor.getValue();
         assertThat(savedSubmission.getUser()).isSameAs(user);
-        assertThat(savedSubmission.getArchitectureVersion()).isEqualTo("dense-movement-v1");
-        assertThat(savedSubmission.getFeatureSchemaVersion()).isEqualTo("arena-features-v1");
-        assertThat(savedSubmission.getActionSchemaVersion()).isEqualTo("movement-v1");
+        assertThat(savedSubmission.getArchitectureVersion()).isEqualTo("deterministic-logic-v1");
+        assertThat(savedSubmission.getFeatureSchemaVersion()).isEqualTo("duel-logic-features-v1");
+        assertThat(savedSubmission.getActionSchemaVersion()).isEqualTo("melee-logic-actions-v1");
         assertThat(savedSubmission.getTrainingSessionId()).isEqualTo(trainingSessionId.toString());
         assertThat(savedSubmission.getTrainingDurationMs()).isGreaterThanOrEqualTo(0);
-        assertThat(savedSubmission.getTrainingSteps()).isEqualTo(3);
-        assertThat(savedSubmission.getTrainingMetrics()).contains("\"melee-supervised-training-metrics-v1\"");
+        assertThat(savedSubmission.getTrainingSteps()).isEqualTo(0);
+        assertThat(savedSubmission.getTrainingMetrics()).contains("\"deterministic-logic-check-v1\"");
+        assertThat(savedSubmission.getModelArtifacts()).contains("\"move_inward\"");
         assertThat(savedSubmission.getModelHash()).isEqualTo(response.getComputedModelHash());
         assertThat(savedSubmission.getStatus()).isEqualTo(ModelSubmissionStatus.VALIDATED);
 
@@ -89,7 +91,7 @@ class ModelSubmissionServiceTest {
         ValidationResult savedResult = resultCaptor.getValue();
         assertThat(savedResult.getModelSubmission()).isSameAs(savedSubmission);
         assertThat(savedResult.getStatus()).isEqualTo(ValidationStatus.ACCEPTED);
-        assertThat(savedResult.getValidatorVersion()).isEqualTo("model-submission-stub-v1");
+        assertThat(savedResult.getValidatorVersion()).isEqualTo("bot-brain-submission-v1");
         assertThat(savedResult.getDetails()).contains("\"computedModelHash\"");
     }
 
@@ -139,7 +141,7 @@ class ModelSubmissionServiceTest {
         ModelSubmission savedSubmission = submissionCaptor.getValue();
         assertThat(savedSubmission.getArchitectureVersion()).isEqualTo("missing-architecture");
         assertThat(savedSubmission.getFeatureSchemaVersion()).isEqualTo("missing-features");
-        assertThat(savedSubmission.getActionSchemaVersion()).isEqualTo("movement-v1");
+        assertThat(savedSubmission.getActionSchemaVersion()).isEqualTo("melee-logic-actions-v1");
         assertThat(savedSubmission.getTrainingSessionId()).hasSize(100);
         assertThat(savedSubmission.getStatus()).isEqualTo(ModelSubmissionStatus.REJECTED);
 
@@ -163,10 +165,9 @@ class ModelSubmissionServiceTest {
                 failingValidationService,
             modelSubmissionRepository,
             trainingSessionRepository,
-            validationResultRepository,
-            currentUserService,
+                validationResultRepository,
+                currentUserService,
                 rateLimiter,
-                approvedBaseModelRegistry,
                 matchmakingService,
             jsonMapper);
 
@@ -190,7 +191,7 @@ class ModelSubmissionServiceTest {
     }
 
     @Test
-    void rejectsExactDuplicateValidatedModelHash() throws Exception {
+    void acceptsDuplicateBrainHash() throws Exception {
         UUID submissionId = UUID.randomUUID();
         AppUser user = prototypeUser();
         Authentication authentication = authenticatedUser(user);
@@ -204,92 +205,14 @@ class ModelSubmissionServiceTest {
 
         var response = service.submit(validPayload(trainingSessionId), authentication);
 
-        assertThat(response.isAccepted()).isFalse();
-        assertThat(response.getErrors()).contains("modelHash exactly matches a previous validated submission");
-
-        ArgumentCaptor<ModelSubmission> submissionCaptor = ArgumentCaptor.forClass(ModelSubmission.class);
-        verify(modelSubmissionRepository).save(submissionCaptor.capture());
-        assertThat(submissionCaptor.getValue().getStatus()).isEqualTo(ModelSubmissionStatus.REJECTED);
-    }
-
-    @Test
-    void acceptsDuplicateHashWhenItIsTheApprovedBaseForThisMatch() throws Exception {
-        UUID submissionId = UUID.randomUUID();
-        UUID matchId = UUID.randomUUID();
-        AppUser user = prototypeUser();
-        Authentication authentication = authenticatedUser(user);
-        stubSavedSubmissionId(submissionId);
-        UUID trainingSessionId = UUID.randomUUID();
-        stubOwnedTrainingSession(trainingSessionId, user, matchId);
-        when(modelSubmissionRepository.existsByModelHashAndStatus(
-                org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.eq(ModelSubmissionStatus.VALIDATED)))
-                .thenReturn(true);
-        when(approvedBaseModelRegistry.isApprovedMatchBase(
-                any(ModelSubmissionPayloadDTO.class),
-                org.mockito.ArgumentMatchers.anyString()))
-                .thenReturn(true);
-
-        ModelSubmissionPayloadDTO payload = validPayload(trainingSessionId);
-        payload.setMatchId(matchId);
-        var response = service.submit(payload, authentication);
-
         assertThat(response.isAccepted()).isTrue();
-        assertThat(response.getWarnings()).contains("unchanged approved base model accepted for this match");
         verify(modelSubmissionRepository, never()).existsByModelHashAndStatus(
                 org.mockito.ArgumentMatchers.anyString(),
                 org.mockito.ArgumentMatchers.eq(ModelSubmissionStatus.VALIDATED));
-    }
 
-    @Test
-    void acceptsDuplicateHashForCurrentUntouchedApprovedBase() throws Exception {
-        UUID submissionId = UUID.randomUUID();
-        UUID matchId = UUID.randomUUID();
-        AppUser user = prototypeUser();
-        Authentication authentication = authenticatedUser(user);
-        UUID trainingSessionId = UUID.randomUUID();
-        stubSavedSubmissionId(submissionId);
-        stubOwnedTrainingSession(trainingSessionId, user, matchId);
-        when(modelSubmissionRepository.existsByModelHashAndStatus(
-                org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.eq(ModelSubmissionStatus.VALIDATED)))
-                .thenReturn(true);
-
-        ModelSubmissionValidationResponseDTO validation = new ModelSubmissionValidationResponseDTO();
-        validation.setAccepted(true);
-        validation.setStatus("ACCEPTED");
-        validation.setMessage("Model submission passed validation stub");
-        validation.setValidatorVersion("model-submission-stub-v1");
-        validation.setComputedModelHash("sha256:9e259e2ef0a9dbff85e4df95a2e273b57febc188932668c528b0b7b864fe52e2");
-        validation.setErrors(List.of());
-        validation.setWarnings(List.of());
-
-        ModelSubmissionValidationService validationService =
-                org.mockito.Mockito.mock(ModelSubmissionValidationService.class);
-        when(validationService.validate(any(ModelSubmissionPayloadDTO.class))).thenReturn(validation);
-        ModelSubmissionService serviceWithRealBaseRegistry = new ModelSubmissionService(
-                validationService,
-                modelSubmissionRepository,
-                trainingSessionRepository,
-                validationResultRepository,
-                currentUserService,
-                rateLimiter,
-                new ApprovedBaseModelRegistry(),
-                matchmakingService,
-                jsonMapper);
-
-        ModelSubmissionPayloadDTO payload = validPayload(trainingSessionId);
-        payload.setMatchId(matchId);
-        payload.setSelectedClass("melee");
-        payload.setBaseModelArtifactId("melee-base-v6");
-        payload.setArchitectureVersion("melee-heads-v7");
-        payload.setFeatureSchemaVersion("duel-intent-features-v6");
-        payload.setActionSchemaVersion("melee-dash-actions-v3");
-
-        var response = serviceWithRealBaseRegistry.submit(payload, authentication);
-
-        assertThat(response.isAccepted()).isTrue();
-        assertThat(response.getWarnings()).contains("unchanged approved base model accepted for this match");
+        ArgumentCaptor<ModelSubmission> submissionCaptor = ArgumentCaptor.forClass(ModelSubmission.class);
+        verify(modelSubmissionRepository).save(submissionCaptor.capture());
+        assertThat(submissionCaptor.getValue().getStatus()).isEqualTo(ModelSubmissionStatus.VALIDATED);
     }
 
     @Test
@@ -349,27 +272,28 @@ class ModelSubmissionServiceTest {
 
     private ModelSubmissionPayloadDTO validPayload(UUID trainingSessionId) throws Exception {
         ModelSubmissionPayloadDTO payload = new ModelSubmissionPayloadDTO();
-        payload.setArchitectureVersion("dense-movement-v1");
-        payload.setFeatureSchemaVersion("arena-features-v1");
-        payload.setActionSchemaVersion("movement-v1");
-        payload.setModelFormat("tfjs-layers-v1");
+        payload.setArchitectureVersion("deterministic-logic-v1");
+        payload.setFeatureSchemaVersion("duel-logic-features-v1");
+        payload.setActionSchemaVersion("melee-logic-actions-v1");
+        payload.setModelFormat("logic-blocks-v1");
         payload.setTrainingSessionId(trainingSessionId.toString());
         payload.setTrainingDurationMs(null);
-        payload.setTrainingSteps(3);
+        payload.setTrainingSteps(0);
         payload.setSelectedClass("melee");
-        payload.setBaseModelArtifactId("melee-base-v1");
+        payload.setBaseModelArtifactId("logic-brain-v1");
         payload.setTrainingMetrics(jsonMapper.readTree("""
-                {"version":"melee-supervised-training-metrics-v1","validationLoss":0.12}
+                {"version":"deterministic-logic-check-v1","trainingSamples":0,"epochsCompleted":0}
                 """));
 
-        JsonNode model = jsonMapper.readTree("""
+        JsonNode brain = jsonMapper.readTree("""
                 {
-                  "modelTopology": {"class_name":"Sequential","config":{"name":"sequential_1"}},
-                  "weightSpecs": [{"name":"hidden1/kernel","shape":[60,64],"dtype":"float32"}],
-                  "weightDataBase64": "AAECAw=="
+                  "version": "melee-strategy-v1",
+                  "blocks": [
+                    {"id":"block-1","action":"move_inward","conditions":[]}
+                  ]
                 }
                 """);
-        payload.setModel(model);
+        payload.setBrain(brain);
         payload.setClientBuildVersion("test");
         return payload;
     }

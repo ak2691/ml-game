@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildInputVector, INPUT_SIZE, INTENT_FEATURE_OFFSET } from "./Featurebuilder.js";
+import { INTENT_TARGET_TYPES, INTENT_TYPES, MOVEMENT_STYLE_TYPES } from "./IntentFeatures.js";
 
 function state({ rotation = 0, enemyX = 500, enemyY = 400 } = {}) {
     return {
@@ -46,9 +47,11 @@ test("appends the selected logic-block intent", () => {
     });
 
     assert.equal(vector.length, INPUT_SIZE);
-    assert.equal(vector[INTENT_FEATURE_OFFSET + 4], 1);
-    assert.equal(vector[INTENT_FEATURE_OFFSET + 10 + 2], 1);
-    assert.equal(vector[INTENT_FEATURE_OFFSET + 10 + 7 + 1], 1);
+    assert.equal(vector[INTENT_FEATURE_OFFSET + INTENT_TYPES.indexOf("seek_object")], 1);
+    const targetOffset = INTENT_FEATURE_OFFSET + INTENT_TYPES.length;
+    assert.equal(vector[targetOffset + INTENT_TARGET_TYPES.indexOf("object_1")], 1);
+    const movementOffset = targetOffset + INTENT_TARGET_TYPES.length;
+    assert.equal(vector[movementOffset + MOVEMENT_STYLE_TYPES.indexOf("direct_in")], 1);
     assert.equal(vector[INPUT_SIZE - 1], 1);
 });
 

@@ -1,10 +1,10 @@
 /**
- * Converts the arena state into a flat Float32Array for TensorFlow.js.
+ * Converts the arena state into the flat duel feature vector.
  *
  * Input shape:
  *   7 legacy player combat features + 6 legacy opponent features
  *   + 13 duel strategy features + 5 obstacle slots of 6 features
- *   + 29 active intent features = 85
+ *   + 37 active intent features = 93
  *
  * Player combat features:
  *   [0] rotation
@@ -12,8 +12,8 @@
  *   [2] swingCooldownRemaining
  *   [3] blockAvailable
  *   [4] blockActive
- *   [5] blockActiveRemaining
- *   [6] blockCooldownRemaining
+ *   [5] blockCharges
+ *   [6] blockRechargeRemaining
  *
  * Legacy opponent features:
  *   [0] relX
@@ -64,8 +64,8 @@ const MAX_SIZE = 200;
 const MAX_HP = 100;
 const MAX_VELOCITY = 250;
 const MAX_SWING_COOLDOWN_MS = 1000;
-const MAX_BLOCK_ACTIVE_MS = 1500;
-const MAX_BLOCK_COOLDOWN_MS = 1000;
+const MAX_BLOCK_CHARGES = 5;
+const MAX_BLOCK_RECHARGE_MS = 3000;
 const MAX_DASH_COOLDOWN_MS = 4500;
 
 export function buildInputVector(payload) {
@@ -79,8 +79,8 @@ export function buildInputVector(payload) {
     vector[2] = normalizeRemaining(playerModel.swingCooldownRemainingMs, MAX_SWING_COOLDOWN_MS);
     vector[3] = playerModel.blockAvailable ? 1 : 0;
     vector[4] = playerModel.blockActive ? 1 : 0;
-    vector[5] = normalizeRemaining(playerModel.blockActiveRemainingMs, MAX_BLOCK_ACTIVE_MS);
-    vector[6] = normalizeRemaining(playerModel.blockCooldownRemainingMs, MAX_BLOCK_COOLDOWN_MS);
+    vector[5] = clamp((playerModel.blockCharges ?? 0) / MAX_BLOCK_CHARGES, 0, 1);
+    vector[6] = normalizeRemaining(playerModel.blockCooldownRemainingMs, MAX_BLOCK_RECHARGE_MS);
     vector[13] = clamp((playerModel.hp ?? MAX_HP) / MAX_HP, 0, 1);
     vector[14] = normalizeEdgeDistance(playerModel, arenaWidth, arenaHeight);
     vector[15] = playerModel.dashAvailable ? 1 : 0;
