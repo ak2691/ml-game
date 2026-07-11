@@ -80,31 +80,62 @@ public class ModelSubmissionValidationService {
             "my_shield_down",
             "my_shield_charges_lt",
             "my_shield_charges_gt");
-    private static final Set<String> DASH_CONDITIONS = Set.of("my_dash_ready", "my_dash_cooldown");
+    private static final Set<String> DASH_CONDITIONS = Set.of(
+            "my_dash_ready",
+            "my_dash_cooldown",
+            "my_dash_charges_lt",
+            "my_dash_charges_gt");
     private static final Set<String> GUN_CONDITIONS = Set.of("my_fire_gun_ready", "my_fire_gun_cooldown");
     private static final Set<String> GRENADE_CONDITIONS = Set.of("my_grenade_ready", "my_grenade_cooldown");
+    private static final Set<String> FIREBALL_CONDITIONS = Set.of("my_fireball_ready", "my_fireball_cooldown");
+    private static final Set<String> STUN_CONDITIONS = Set.of("my_stun_ready", "my_stun_cooldown");
     private static final Set<String> NUMBER_VARIABLES = Set.of(
             "my.hp",
+            "my.x",
+            "my.y",
             "opponent.hp",
+            "opponent.x",
+            "opponent.y",
+            "my.overdriveMs",
+            "my.barrierMs",
+            "my.slowedMs",
+            "my.jammedMs",
+            "my.commandLockedMs",
+            "opponent.overdriveMs",
+            "opponent.barrierMs",
+            "opponent.slowedMs",
+            "opponent.jammedMs",
+            "opponent.commandLockedMs",
             "target.distance",
+            "opponent.objectDistance",
             "my.edgeDistance",
             "target.edgeDistance",
             "my.swingCooldownMs",
             "my.shieldCharges",
             "my.blockRechargeMs",
             "my.dashCooldownMs",
+            "my.dashCharges",
             "my.gunCooldownMs",
             "my.gunAmmo",
             "my.gunReloadMs",
             "my.grenadeCooldownMs",
+            "my.fireballCooldownMs",
+            "my.fireballCharges",
+            "my.fireballReloadMs",
+            "my.stunCooldownMs",
             "opponent.swingCooldownMs",
             "opponent.shieldCharges",
             "opponent.blockRechargeMs",
             "opponent.dashCooldownMs",
+            "opponent.dashCharges",
             "opponent.gunCooldownMs",
             "opponent.gunAmmo",
             "opponent.gunReloadMs",
-            "opponent.grenadeCooldownMs");
+            "opponent.grenadeCooldownMs",
+            "opponent.fireballCooldownMs",
+            "opponent.fireballCharges",
+            "opponent.fireballReloadMs",
+            "opponent.stunCooldownMs");
     private static final Set<String> BOOLEAN_VARIABLES = Set.of(
             "my.swingReady",
             "my.blockReady",
@@ -112,15 +143,25 @@ public class ModelSubmissionValidationService {
             "my.dashReady",
             "my.gunReady",
             "my.grenadeReady",
+            "my.fireballReady",
+            "my.stunReady",
             "opponent.swingReady",
             "opponent.blockReady",
             "opponent.shieldUp",
             "opponent.dashReady",
             "opponent.gunReady",
             "opponent.grenadeReady",
+            "opponent.fireballReady",
+            "opponent.stunReady",
+            "my.jammed",
+            "my.commandLocked",
+            "opponent.jammed",
+            "opponent.commandLocked",
             "target.exists",
             "target.isHealthPack",
             "target.isDamageZone",
+            "target.isProjectileWall",
+            "target.isBouncyWall",
             "my.insideDamageZone");
     private static final Set<String> NUMERIC_COMPARATORS = Set.of("lt", "lte", "eq", "neq", "gte", "gt");
     private static final Set<String> BOOLEAN_COMPARATORS = Set.of("eq", "neq");
@@ -308,6 +349,8 @@ public class ModelSubmissionValidationService {
         if (classSpec.canDash()) allowed.addAll(DASH_ACTIONS);
         if (classSpec.canFireGun()) allowed.add("fire_gun");
         if (classSpec.canThrowGrenade()) allowed.add("throw_grenade");
+        if (classSpec.canShootFireball()) allowed.add("shoot_fireball");
+        if (classSpec.canStun()) allowed.add("stun");
         if (!allowed.contains(action)) {
             errors.add(path + ".action is not allowed for " + classSpec.id());
         }
@@ -333,7 +376,9 @@ public class ModelSubmissionValidationService {
                 || (!classSpec.canBlock() && SHIELD_CONDITIONS.contains(type))
                 || (!classSpec.canDash() && DASH_CONDITIONS.contains(type))
                 || (!classSpec.canFireGun() && GUN_CONDITIONS.contains(type))
-                || (!classSpec.canThrowGrenade() && GRENADE_CONDITIONS.contains(type))) {
+                || (!classSpec.canThrowGrenade() && GRENADE_CONDITIONS.contains(type))
+                || (!classSpec.canShootFireball() && FIREBALL_CONDITIONS.contains(type))
+                || (!classSpec.canStun() && STUN_CONDITIONS.contains(type))) {
             errors.add(path + ".type is not allowed for " + classSpec.id());
         }
     }
@@ -408,7 +453,9 @@ public class ModelSubmissionValidationService {
                 || (!classSpec.canBlock() && (variable.contains("block") || variable.contains("shield")))
                 || (!classSpec.canDash() && variable.contains("dash"))
                 || (!classSpec.canFireGun() && variable.contains("gun"))
-                || (!classSpec.canThrowGrenade() && variable.contains("grenade"))) {
+                || (!classSpec.canThrowGrenade() && variable.contains("grenade"))
+                || (!classSpec.canShootFireball() && variable.contains("fireball"))
+                || (!classSpec.canStun() && variable.contains("stun"))) {
             errors.add(path + " is not allowed for " + classSpec.id());
         }
     }

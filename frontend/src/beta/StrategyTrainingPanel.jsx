@@ -22,6 +22,7 @@ import {
     COMBAT_CLASSES,
     conditionTypesForMatchup,
 } from "./classes/CombatClasses.js";
+import { objectTargetTypes as labelObjectTargetTypes } from "./objectLabels.js";
 
 const CONDITION_GROUP_ORDER = ["Basic", "My Bot", "Opponent", "Objects", "Target", "General"];
 const LOGIC_BLOCK_WIDTH = 360;
@@ -62,6 +63,7 @@ export default function StrategyTrainingPanel({
     playerRoundWins = 0,
     opponentRoundWins = 0,
     obstacleCount = 0,
+    obstacleObjects = [],
     isAutoPlaying = false,
     hasArenaCheckpoint = false,
     isBaseTraining = false,
@@ -83,6 +85,8 @@ export default function StrategyTrainingPanel({
     const [activeBlockId, setActiveBlockId] = useState(null);
     const [canvasZoom, setCanvasZoom] = useState(0.85);
     const [canvasPan, setCanvasPan] = useState({ x: 40, y: 36 });
+    const currentRound = Math.max(1, Number(matchContext?.roundNumber) || 1);
+    const [selectedLogicRound, setSelectedLogicRound] = useState(currentRound);
     const validation = validateMeleeStrategyConfiguration(configuration);
     const editingOpponent = activeBrain === "opponent" && opponentConfiguration && onOpponentChange;
     const playerBotLabel = matchContext?.player?.username ? `${matchContext.player.username}'s bot` : "Your bot";
@@ -102,6 +106,24 @@ export default function StrategyTrainingPanel({
         candidate === index ? { ...cluster, ...updates } : cluster
     )));
     const totalActiveBlocks = countLogicBlocks(activeConfiguration);
+    const roundBrains = editingOpponent ? [] : matchContext?.roundBrains ?? [];
+    const blockRoundById = useMemo(
+        () => blockIntroductionRounds(roundBrains, activeConfiguration, currentRound),
+        [activeConfiguration, currentRound, roundBrains],
+    );
+    const displayedConfiguration = useMemo(
+        () => configurationForRound(activeConfiguration, blockRoundById, selectedLogicRound),
+        [activeConfiguration, blockRoundById, selectedLogicRound],
+    );
+    const roundBlockLimit = Math.max(1, Number(matchContext?.roundBlockLimit) || 10);
+    const currentRoundBlockCount = [...blockRoundById.values()]
+        .filter((round) => round === currentRound).length;
+    const viewingCurrentRound = selectedLogicRound === currentRound;
+    const viewingPreviousRound = selectedLogicRound === currentRound - 1;
+    const previousRoundWon = Boolean(matchContext?.previousRoundWon);
+    const roundFieldsLocked = !viewingCurrentRound
+        && (!viewingPreviousRound || previousRoundWon);
+    const roundDeleteLocked = selectedLogicRound <= currentRound - 2;
     const totalRounds = Math.max(1, (matchContext?.winsRequired ?? 1) * 2 - 1);
     const visibleConditionTypes = useMemo(
         () => conditionTypesForMatchup(CONDITION_TYPES, activeClass, activeOpponentClass),
@@ -119,9 +141,13 @@ export default function StrategyTrainingPanel({
         ?? visibleStateVariables[0]
         ?? STATE_VARIABLES[0];
     const visibleTargetTypes = useMemo(
-        () => targetTypesForOpponentClass(activeOpponentClass),
-        [activeOpponentClass],
+        () => labelObjectTargetTypes(
+            targetTypesForOpponentClass(activeOpponentClass),
+            obstacleObjects,
+        ),
+        [activeOpponentClass, obstacleObjects],
     );
+    useEffect(() => setSelectedLogicRound(currentRound), [currentRound]);
     const nodeKey = (type, id) => `${activeBrain}:${type}:${id}`;
     const positionForNode = (key, index, type = "block") => nodePositions[key] ?? {
         x: 120 + (index % 3) * 460,
@@ -136,23 +162,48 @@ export default function StrategyTrainingPanel({
     }, [activeConfiguration, activeClass, activeOpponentClass, defaultCondition, editingOpponent, onChange, onOpponentChange, visibleConditionTypes]);
 
     const addLogicBlock = () => {
-        const block = { ...createLogicBlock(), conditions: [createExpressionCondition(defaultVariable.id)] };
+        if (!viewingCurrentRound || currentRoundBlockCount >= roundBlockLimit) return;
+        const block = {
+            ...createLogicBlock(defaultCondition.id),
+            conditions: [createExpressionCondition(defaultVariable.id)],
+        };
         setActiveBlockId(block.id);
         updateBlocks([...(activeConfiguration.blocks ?? []), block]);
     };
 
     const addCluster = () => {
-        const cluster = { ...createLogicCluster(), conditions: [createExpressionCondition(defaultVariable.id)] };
+        if (!viewingCurrentRound || currentRoundBlockCount >= roundBlockLimit) return;
+        const cluster = {
+            ...createLogicCluster(defaultCondition.id),
+            conditions: [createExpressionCondition(defaultVariable.id)],
+        };
         updateClusters([...(activeConfiguration.clusters ?? []), cluster]);
     };
 
     const addClusterBlock = (clusterIndex) => {
-        const block = { ...createLogicBlock(), conditions: [] };
+        if (!viewingCurrentRound || currentRoundBlockCount >= roundBlockLimit) return;
+        const block = {
+            ...createLogicBlock(defaultCondition.id),
+            conditions: [createExpressionCondition(defaultVariable.id)],
+        };
         setActiveBlockId(block.id);
         updateCluster(clusterIndex, {
             blocks: [...((activeConfiguration.clusters ?? [])[clusterIndex]?.blocks ?? []), block],
         });
     };
+    const updateDisplayedBlock = (index, updates) => {
+        const id = displayedConfiguration.blocks?.[index]?.id;
+        updateBlocks((activeConfiguration.blocks ?? []).map((block) => (
+            block.id === id ? { ...block, ...updates } : block
+        )));
+    };
+    const removeDisplayedBlock = (index) => {
+        const id = displayedConfiguration.blocks?.[index]?.id;
+        updateBlocks((activeConfiguration.blocks ?? []).filter((block) => block.id !== id));
+    };
+    const displayedClusterId = (index) => displayedConfiguration.clusters?.[index]?.id;
+    const activeClusterIndex = (displayIndex) => (activeConfiguration.clusters ?? [])
+        .findIndex((cluster) => cluster.id === displayedClusterId(displayIndex));
 
     const beginNodeDrag = (event, { key, index, type = "block", activeId = null }) => {
         if (isTraining || event.button !== 0) return;
@@ -365,7 +416,9 @@ export default function StrategyTrainingPanel({
                                 )}
                                 <button
                                     type="button"
-                                    disabled={isTraining || totalActiveBlocks >= MAX_LOGIC_BLOCKS}
+                                    disabled={isTraining || !viewingCurrentRound
+                                        || totalActiveBlocks >= MAX_LOGIC_BLOCKS
+                                        || currentRoundBlockCount >= roundBlockLimit}
                                     onClick={addLogicBlock}
                                     className="h-8 rounded border border-dashed border-cyan-800/70 px-3 font-mono text-[10px] tracking-widest text-cyan-300 disabled:opacity-35"
                                 >
@@ -373,7 +426,10 @@ export default function StrategyTrainingPanel({
                                 </button>
                                 <button
                                     type="button"
-                                    disabled={isTraining || (activeConfiguration.clusters ?? []).length >= MAX_CLUSTERS || totalActiveBlocks >= MAX_LOGIC_BLOCKS}
+                                    disabled={isTraining || !viewingCurrentRound
+                                        || (activeConfiguration.clusters ?? []).length >= MAX_CLUSTERS
+                                        || totalActiveBlocks >= MAX_LOGIC_BLOCKS
+                                        || currentRoundBlockCount >= roundBlockLimit}
                                     onClick={addCluster}
                                     className="h-8 rounded border border-dashed border-violet-800/70 px-3 font-mono text-[10px] tracking-widest text-violet-300 disabled:opacity-35"
                                 >
@@ -407,9 +463,35 @@ export default function StrategyTrainingPanel({
                                 </button>
                             </div>
                         </header>
+                        {isMatchTraining && !editingOpponent && (
+                            <div className="flex items-center gap-1 border-b border-border-lo bg-zinc-950 px-4 py-2">
+                                {Array.from({ length: currentRound }, (_, index) => index + 1).map((round) => (
+                                    <button
+                                        key={round}
+                                        type="button"
+                                        onClick={() => setSelectedLogicRound(round)}
+                                        className={`h-7 border px-3 font-mono text-[9px] tracking-widest ${
+                                            selectedLogicRound === round
+                                                ? "border-cyan-500 bg-cyan-950 text-cyan-100"
+                                                : "border-border-lo bg-zinc-900 text-ink-muted"
+                                        }`}
+                                    >
+                                        ROUND {round}
+                                    </button>
+                                ))}
+                                <span className="ml-auto font-mono text-[9px] tracking-widest text-ink-muted">
+                                    {viewingCurrentRound
+                                        ? `${currentRoundBlockCount}/${roundBlockLimit} NEW BLOCKS`
+                                        : roundFieldsLocked
+                                            ? roundDeleteLocked ? "LOCKED" : "DELETE ONLY"
+                                            : "MODIFY OR DELETE"}
+                                </span>
+                            </div>
+                        )}
                         <LogicBoard
-                            configuration={activeConfiguration}
-                            disabled={isTraining}
+                            configuration={displayedConfiguration}
+                            disabled={isTraining || roundDeleteLocked}
+                            canRemove={!isTraining && !roundDeleteLocked}
                             activeBlockId={activeBlockId}
                             totalBlocks={totalActiveBlocks}
                             zoom={canvasZoom}
@@ -419,18 +501,40 @@ export default function StrategyTrainingPanel({
                             positionForNode={positionForNode}
                             nodeKey={nodeKey}
                             onBeginNodeDrag={beginNodeDrag}
-                            onBlockChange={updateBlock}
-                            onBlockRemove={(blockIndex) => updateBlocks((activeConfiguration.blocks ?? []).filter((_, index) => index !== blockIndex))}
-                            onClusterChange={(clusterIndex, updates) => updateCluster(clusterIndex, updates)}
-                            onClusterRemove={(clusterIndex) => updateClusters((activeConfiguration.clusters ?? []).filter((_, index) => index !== clusterIndex))}
-                            onClusterAddBlock={addClusterBlock}
-                            onClusterBlockChange={(clusterIndex, blockIndex, updates) => updateCluster(clusterIndex, {
-                                blocks: (activeConfiguration.clusters ?? [])[clusterIndex].blocks.map((block, candidate) => (
-                                    candidate === blockIndex ? { ...block, ...updates } : block
+                            onBlockChange={roundFieldsLocked ? () => {} : updateDisplayedBlock}
+                            onBlockRemove={removeDisplayedBlock}
+                            onClusterChange={!viewingCurrentRound
+                                ? () => {}
+                                : (clusterIndex, updates) => updateCluster(activeClusterIndex(clusterIndex), updates)}
+                            onClusterRemove={(clusterIndex) => {
+                                const id = displayedClusterId(clusterIndex);
+                                if (viewingCurrentRound) {
+                                    updateClusters((activeConfiguration.clusters ?? []).filter((cluster) => cluster.id !== id));
+                                    return;
+                                }
+                                const displayedIds = new Set(
+                                    displayedConfiguration.clusters?.[clusterIndex]?.blocks?.map((block) => block.id) ?? [],
+                                );
+                                updateClusters((activeConfiguration.clusters ?? []).map((cluster) => (
+                                    cluster.id === id
+                                        ? { ...cluster, blocks: cluster.blocks.filter((block) => !displayedIds.has(block.id)) }
+                                        : cluster
+                                )));
+                            }}
+                            onClusterAddBlock={roundFieldsLocked
+                                ? () => {}
+                                : (clusterIndex) => addClusterBlock(activeClusterIndex(clusterIndex))}
+                            onClusterBlockChange={roundFieldsLocked ? () => {} : (clusterIndex, blockIndex, updates) => updateCluster(activeClusterIndex(clusterIndex), {
+                                blocks: (activeConfiguration.clusters ?? [])[activeClusterIndex(clusterIndex)].blocks.map((block) => (
+                                    block.id === displayedConfiguration.clusters?.[clusterIndex]?.blocks?.[blockIndex]?.id
+                                        ? { ...block, ...updates }
+                                        : block
                                 )),
                             })}
-                            onClusterBlockRemove={(clusterIndex, blockIndex) => updateCluster(clusterIndex, {
-                                blocks: (activeConfiguration.clusters ?? [])[clusterIndex].blocks.filter((_, index) => index !== blockIndex),
+                            onClusterBlockRemove={(clusterIndex, blockIndex) => updateCluster(activeClusterIndex(clusterIndex), {
+                                blocks: (activeConfiguration.clusters ?? [])[activeClusterIndex(clusterIndex)].blocks.filter((block) => (
+                                    block.id !== displayedConfiguration.clusters?.[clusterIndex]?.blocks?.[blockIndex]?.id
+                                )),
                             })}
                             onSelectBlock={setActiveBlockId}
                             selectedClass={activeClass}
@@ -450,6 +554,7 @@ export default function StrategyTrainingPanel({
 function LogicBoard({
     configuration,
     disabled,
+    canRemove = true,
     activeBlockId,
     totalBlocks,
     zoom,
@@ -545,6 +650,7 @@ function LogicBoard({
                             block={block}
                             index={blockIndex}
                             disabled={disabled}
+                            canRemove={canRemove}
                             onChange={(updates) => onBlockChange(blockIndex, updates)}
                             onRemove={() => onBlockRemove(blockIndex)}
                             className={`absolute shadow-xl ${activeBlockId === block.id ? "ring-1 ring-cyan-400" : ""}`}
@@ -580,6 +686,7 @@ function LogicBoard({
                             cluster={cluster}
                             index={clusterIndex}
                             disabled={disabled}
+                            canRemove={canRemove}
                             totalBlocks={totalBlocks}
                             activeBlockId={activeBlockId}
                             onChange={(updates) => onClusterChange(clusterIndex, updates)}
@@ -618,6 +725,7 @@ function ClusterNode({
     cluster,
     index,
     disabled,
+    canRemove,
     totalBlocks,
     activeBlockId,
     onChange,
@@ -669,7 +777,7 @@ function ClusterNode({
                         onChange={(event) => onChange({ priority: clampNumber(event.target.value, MIN_PRIORITY, MAX_PRIORITY, 1) })}
                         className="h-8 w-16 rounded border border-border-lo bg-zinc-900 px-2 font-mono text-[10px] text-ink-white"
                     />
-                    <button type="button" disabled={disabled} onClick={onRemove} className="text-red-300 disabled:opacity-35">REMOVE</button>
+                    <button type="button" disabled={!canRemove} onClick={onRemove} className="text-red-300 disabled:opacity-35">REMOVE</button>
                 </div>
             </div>
             <div className="mt-3 grid gap-3">
@@ -680,7 +788,8 @@ function ClusterNode({
                             <ConditionEditor
                                 key={`${conditionIndex}-${condition.type}`}
                                 condition={condition}
-                                prefix={conditionIndex ? "AND" : "IF"}
+                                prefix={conditionIndex ? (condition.join === "or" ? "OR" : "AND") : "IF"}
+                                canChangeJoin={conditionIndex > 0}
                                 onChange={(next) => updateConditions(cluster.conditions.map((value, candidate) => candidate === conditionIndex ? next : value))}
                                 onRemove={() => updateConditions(cluster.conditions.filter((_, candidate) => candidate !== conditionIndex))}
                                 removable={cluster.conditions.length > 1}
@@ -695,9 +804,10 @@ function ClusterNode({
                         <button
                             type="button"
                             disabled={disabled}
+                            canRemove={canRemove}
                             onClick={() => updateConditions([...cluster.conditions, createExpressionCondition(defaultVariable.id)])}
                             className="mt-2 font-mono text-[9px] tracking-widest text-cyan-300 disabled:opacity-35"
-                        >+ AND CONDITION</button>
+                        >+ CONDITION</button>
                     )}
                 </div>
                 <div className="flex items-center justify-between border-t border-border-lo pt-3 font-mono text-[10px] tracking-widest">
@@ -742,6 +852,7 @@ function LogicBlock({
     block,
     index,
     disabled,
+    canRemove = true,
     onChange,
     onRemove,
     className = "",
@@ -750,6 +861,7 @@ function LogicBlock({
     onBlockPointerDown = null,
     selectedClass = "melee",
     conditionTypes = CONDITION_TYPES,
+    defaultCondition = CONDITION_TYPES[0],
     stateVariables = STATE_VARIABLES,
     defaultVariable = STATE_VARIABLES[0],
     targetTypes = TARGET_TYPES,
@@ -776,7 +888,7 @@ function LogicBlock({
                 className="flex items-center justify-between font-mono text-[10px] tracking-widest"
             >
                 <strong className="text-cyan-200">IF BLOCK {index + 1}</strong>
-                <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={onRemove} className="text-red-300">REMOVE</button>
+                <button type="button" disabled={!canRemove} onPointerDown={(event) => event.stopPropagation()} onClick={onRemove} className="text-red-300 disabled:opacity-35">REMOVE</button>
             </div>
             <label className="mt-3 block font-mono text-[9px] tracking-widest text-ink-muted">PRIORITY</label>
             <input
@@ -792,7 +904,8 @@ function LogicBlock({
                     <ConditionEditor
                         key={`${conditionIndex}-${condition.type}`}
                         condition={condition}
-                        prefix={conditionIndex ? "AND" : "IF"}
+                        prefix={conditionIndex ? (condition.join === "or" ? "OR" : "AND") : "IF"}
+                        canChangeJoin={conditionIndex > 0}
                         onChange={(next) => updateConditions(conditions.map((value, index) => index === conditionIndex ? next : value))}
                         onRemove={() => updateConditions(conditions.filter((_, index) => index !== conditionIndex))}
                         removable={conditionsOptional || conditions.length > 1}
@@ -808,7 +921,7 @@ function LogicBlock({
                     type="button"
                     onClick={() => updateConditions([...conditions, createExpressionCondition(defaultVariable.id)])}
                     className="mt-2 font-mono text-[9px] tracking-widest text-cyan-300"
-                >+ AND CONDITION</button>
+                >+ CONDITION</button>
             )}
             <label className="mt-3 block font-mono text-[9px] tracking-widest text-ink-muted">THEN</label>
             <select
@@ -846,6 +959,7 @@ function LogicBlock({
 function ConditionEditor({
     condition,
     prefix,
+    canChangeJoin = false,
     onChange,
     onRemove,
     removable,
@@ -859,6 +973,7 @@ function ConditionEditor({
             <ExpressionConditionEditor
                 condition={condition}
                 prefix={prefix}
+                canChangeJoin={canChangeJoin}
                 onChange={onChange}
                 onRemove={onRemove}
                 removable={removable}
@@ -884,16 +999,29 @@ function ConditionEditor({
         ? condition.target
         : definition.defaultTarget ?? "opponent";
     const selectType = (type) => {
+        if (type === "expression") {
+            onChange({
+                ...createExpressionCondition(defaultVariable.id),
+                ...(condition.join === "or" ? { join: "or" } : {}),
+            });
+            return;
+        }
         const next = visibleConditionTypes.find((candidate) => candidate.id === type) ?? visibleConditionTypes[0];
         onChange({
             type,
+            ...(condition.join === "or" ? { join: "or" } : {}),
             ...(next.requiresValue ? { value: next.defaultValue } : {}),
             ...(next.supportsTarget ? { target: next.defaultTarget ?? "opponent" } : {}),
         });
     };
     return (
-        <div className="grid grid-cols-[28px_1fr_auto] items-center gap-1">
-            <span className="font-mono text-[9px] text-amber-200">{prefix}</span>
+        <div className="grid grid-cols-[42px_1fr_auto] items-center gap-1">
+            <ConditionJoinControl
+                prefix={prefix}
+                canChangeJoin={canChangeJoin}
+                condition={condition}
+                onChange={onChange}
+            />
             <div className="flex gap-1">
                 <select value={definition.id} onChange={(event) => selectType(event.target.value)} className="h-8 min-w-0 flex-1 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white">
                     {!visibleConditionTypes.some((candidate) => candidate.id === definition.id) && (
@@ -905,27 +1033,34 @@ function ConditionEditor({
                         </optgroup>
                     ))}
                 </select>
-                {definition.requiresValue && <input
-                    type="number"
-                    min={definition.min}
-                    max={definition.max}
-                    value={condition.value}
-                    onChange={(event) => onChange({ ...condition, value: event.target.value })}
-                    onKeyDown={(event) => {
-                        if (event.key === "Enter") {
-                            onChange({
-                                ...condition,
-                                value: clampNumber(
-                                    event.currentTarget.value,
-                                    definition.min,
-                                    definition.max,
-                                    definition.defaultValue,
-                                ),
-                            });
-                        }
-                    }}
-                    className="h-8 w-16 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
-                />}
+                {definition.requiresValue && (
+                    <div className="flex h-8 items-center gap-1">
+                        <input
+                            type="number"
+                            min={definition.min}
+                            max={definition.max}
+                            value={condition.value}
+                            onChange={(event) => onChange({ ...condition, value: event.target.value })}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                    onChange({
+                                        ...condition,
+                                        value: clampNumber(
+                                            event.currentTarget.value,
+                                            definition.min,
+                                            definition.max,
+                                            definition.defaultValue,
+                                        ),
+                                    });
+                                }
+                            }}
+                            className="h-8 w-16 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
+                        />
+                        {definition.suffix && (
+                            <span className="font-mono text-[9px] text-ink-muted">{definition.suffix}</span>
+                        )}
+                    </div>
+                )}
                 {definition.supportsTarget && (
                     <select
                         value={selectedTarget}
@@ -944,6 +1079,7 @@ function ConditionEditor({
 function ExpressionConditionEditor({
     condition,
     prefix,
+    canChangeJoin = false,
     onChange,
     onRemove,
     removable,
@@ -977,7 +1113,10 @@ function ExpressionConditionEditor({
 
     const changeLeft = (left) => {
         const nextLeft = variables.find((variable) => variable.id === left) ?? variables[0];
-        onChange(createExpressionCondition(nextLeft.id));
+        onChange({
+            ...createExpressionCondition(nextLeft.id),
+            ...(condition.join === "or" ? { join: "or" } : {}),
+        });
     };
     const changeRightType = (type) => {
         if (type === "variable") {
@@ -994,8 +1133,13 @@ function ExpressionConditionEditor({
     };
 
     return (
-        <div className="grid grid-cols-[28px_1fr_auto] items-center gap-1">
-            <span className="font-mono text-[9px] text-amber-200">{prefix}</span>
+        <div className="grid grid-cols-[42px_1fr_auto] items-center gap-1">
+            <ConditionJoinControl
+                prefix={prefix}
+                canChangeJoin={canChangeJoin}
+                condition={condition}
+                onChange={onChange}
+            />
             <div className="grid min-w-0 grid-cols-[1fr_auto_1fr] gap-1">
                 <select
                     value={leftDefinition.id}
@@ -1064,33 +1208,39 @@ function ExpressionConditionEditor({
                                 ))}
                             </select>
                         ) : (
-                            <input
-                                type="number"
-                                min={leftDefinition.min}
-                                max={leftDefinition.max}
-                                value={condition.right?.value ?? leftDefinition.defaultValue}
-                                onChange={(event) => onChange({
-                                    ...condition,
-                                    right: { type: "number", value: event.target.value },
-                                })}
-                                onKeyDown={(event) => {
-                                    if (event.key === "Enter") {
-                                        onChange({
-                                            ...condition,
-                                            right: {
-                                                type: "number",
-                                                value: clampNumber(
-                                                    event.currentTarget.value,
-                                                    leftDefinition.min,
-                                                    leftDefinition.max,
-                                                    leftDefinition.defaultValue,
-                                                ),
-                                            },
-                                        });
-                                    }
-                                }}
-                                className="h-8 min-w-0 flex-1 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
-                            />
+                            <div className="flex min-w-0 flex-1 items-center gap-1">
+                                <input
+                                    type="number"
+                                    min={leftDefinition.min}
+                                    max={leftDefinition.max}
+                                    step={leftDefinition.step ?? 1}
+                                    value={condition.right?.value ?? leftDefinition.defaultValue}
+                                    onChange={(event) => onChange({
+                                        ...condition,
+                                        right: { type: "number", value: event.target.value },
+                                    })}
+                                    onKeyDown={(event) => {
+                                        if (event.key === "Enter") {
+                                            onChange({
+                                                ...condition,
+                                                right: {
+                                                    type: "number",
+                                                    value: clampNumber(
+                                                        event.currentTarget.value,
+                                                        leftDefinition.min,
+                                                        leftDefinition.max,
+                                                        leftDefinition.defaultValue,
+                                                    ),
+                                                },
+                                            });
+                                        }
+                                    }}
+                                    className="h-8 min-w-0 flex-1 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
+                                />
+                                {leftDefinition.suffix && (
+                                    <span className="font-mono text-[9px] text-ink-muted">{leftDefinition.suffix}</span>
+                                )}
+                            </div>
                         )}
                     </div>
                 )}
@@ -1109,13 +1259,34 @@ function ExpressionConditionEditor({
     );
 }
 
+function ConditionJoinControl({ prefix, canChangeJoin, condition, onChange }) {
+    if (!canChangeJoin) {
+        return <span className="font-mono text-[9px] text-amber-200">{prefix}</span>;
+    }
+    return (
+        <select
+            value={condition.join === "or" ? "or" : "and"}
+            onChange={(event) => onChange({
+                ...condition,
+                ...(event.target.value === "or" ? { join: "or" } : { join: undefined }),
+            })}
+            className="h-8 rounded border border-border-lo bg-zinc-950 px-0.5 font-mono text-[8px] text-amber-200"
+        >
+            <option value="and">AND</option>
+            <option value="or">OR</option>
+        </select>
+    );
+}
+
 function sanitizeConfigurationConditions(configuration, conditionTypes, defaultCondition) {
     const allowedIds = new Set(conditionTypes.map((condition) => condition.id));
     const sanitizeConditions = (conditions) => {
         if (!Array.isArray(conditions)) return conditions;
         let changed = false;
         const nextConditions = conditions.map((condition) => {
-            if (condition?.type === "expression") return condition;
+            if (condition?.type === "expression") {
+                return condition;
+            }
             if (allowedIds.has(condition?.type)) return condition;
             changed = true;
             return createDefaultCondition(defaultCondition);
@@ -1227,7 +1398,49 @@ function countLogicBlocks(configuration) {
         + (configuration.clusters ?? []).reduce((total, cluster) => total + (cluster.blocks?.length ?? 0), 0);
 }
 
+function allLogicBlocks(configuration) {
+    return [
+        ...(configuration?.blocks ?? []),
+        ...(configuration?.clusters ?? []).flatMap((cluster) => cluster.blocks ?? []),
+    ];
+}
+
+function blockIntroductionRounds(roundBrains, configuration, currentRound) {
+    const roundsById = new Map();
+    [...roundBrains]
+        .sort((first, second) => first.roundNumber - second.roundNumber)
+        .forEach((round) => {
+            allLogicBlocks(round.brain).forEach((block) => {
+                if (block?.id && !roundsById.has(block.id)) {
+                    roundsById.set(block.id, round.roundNumber);
+                }
+            });
+        });
+    allLogicBlocks(configuration).forEach((block) => {
+        if (block?.id && !roundsById.has(block.id)) {
+            roundsById.set(block.id, currentRound);
+        }
+    });
+    return roundsById;
+}
+
+function configurationForRound(configuration, roundsById, roundNumber) {
+    return {
+        ...configuration,
+        blocks: (configuration?.blocks ?? []).filter((block) => roundsById.get(block.id) === roundNumber),
+        clusters: (configuration?.clusters ?? [])
+            .map((cluster) => ({
+                ...cluster,
+                blocks: (cluster.blocks ?? []).filter((block) => roundsById.get(block.id) === roundNumber),
+            }))
+            .filter((cluster) => cluster.blocks.length > 0),
+    };
+}
+
 function createDefaultCondition(definition) {
+    if (definition.id === "expression") {
+        return createExpressionCondition("target.distance");
+    }
     return {
         type: definition.id,
         ...(definition.requiresValue ? { value: definition.defaultValue } : {}),
@@ -1254,13 +1467,17 @@ function groupedStateVariables(stateVariables = STATE_VARIABLES) {
 }
 
 function targetTypesForOpponentClass(opponentClass) {
-    return opponentClass === "ranged"
-        ? TARGET_TYPES
-        : TARGET_TYPES.filter((target) => target.id !== "opponent_grenade");
+    return TARGET_TYPES
+        .filter((target) => target.id !== "opponent_grenade" || opponentClass === "ranged")
+        .filter((target) => target.id !== "opponent_fireball" || opponentClass === "mage");
 }
 
 function objectTargetTypes(targetTypes = TARGET_TYPES) {
-    return targetTypes.filter((target) => target.id.startsWith("object_") || target.id === "opponent_grenade");
+    return targetTypes.filter((target) => (
+        target.id.startsWith("object_")
+        || target.id === "opponent_grenade"
+        || target.id === "opponent_fireball"
+    ));
 }
 
 function expressionTargetGroup(leftDefinition, rightDefinition) {

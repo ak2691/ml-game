@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import Canvas from "./Canvas";
 import Toolbar from "./Toolbar";
 import StrategyTrainingPanel from "./StrategyTrainingPanel";
@@ -6,6 +7,7 @@ import "./BetaModel.css";
 import {
     createDefaultMeleeStrategyConfiguration,
     normalizeMeleeStrategyConfiguration,
+    resolveMeleeStrategyTarget,
     selectMeleeStrategyActionPlan,
 } from "../ml/MeleeStrategy.js";
 import {
@@ -22,8 +24,9 @@ import {
 import {
     BLOCK_MAX_CHARGES,
     BLOCK_RECHARGE_MS,
+    DASH_MAX_CHARGES,
+    DASH_RECHARGE_MS,
     MELEE_DAMAGE,
-    MELEE_HP,
     SWING_ACTIVE_MS,
     SWING_COOLDOWN_MS,
 } from "./classes/MeleeClass.jsx";
@@ -42,65 +45,87 @@ import {
     RANGED_RELOAD_MS,
 } from "./classes/RangedClass.jsx";
 import {
+    FIREBALL_ACTIVE_MS,
+    FIREBALL_BURN_DAMAGE,
+    FIREBALL_BURN_DURATION_MS,
+    FIREBALL_BURN_TICK_MS,
+    FIREBALL_CHARGES_MAX,
+    FIREBALL_COOLDOWN_MS,
+    FIREBALL_DAMAGE,
+    FIREBALL_RANGE,
+    FIREBALL_RELOAD_MS,
+    FIREBALL_SIZE,
+    FIREBALL_SPEED,
+    STUN_ACTIVE_MS,
+    STUN_COOLDOWN_MS,
+    STUN_DAMAGE,
+    STUN_DURATION_MS,
+    STUN_RANGE,
+} from "./classes/MageClass.jsx";
+import {
+    BOUNCY_WALL_MAX_USES,
+    BOUNCY_WALL_TYPE,
+    BARRIER_TYPE,
+    CENTER_OBJECTIVE_SIZE,
+    COMMAND_LOCK_TYPE,
+    INHIBITION_TYPE,
+    OVERDRIVE_TYPE,
+    PROJECTILE_WALL_LENGTH,
+    PROJECTILE_WALL_THICKNESS,
+    PROJECTILE_WALL_TYPE,
+    RADAR_JAMMER_TYPE,
+    snapWallRotation,
+} from "./ArenaObjects.js";
+import {
     actionIdsForCombatClass,
     combatClassConfig,
     combatClassHp,
     combatClassMoveSpeed,
 } from "./classes/CombatClasses.js";
+import {
+    AUTO_STEP_MS,
+    CANVAS_SIZE,
+    DISPLAY_ARENA_MAX_SIZE,
+    DAMAGE_ZONE_DAMAGE_MULTIPLIER,
+    DAMAGE_ZONE_ENTRY_DAMAGE,
+    DASH_DURATION_MS,
+    DASH_SPEED,
+    HEALTH_PACK_HEAL,
+    MAX_OBSTACLES,
+    MOVE_ACCELERATION_PER_TICK,
+    MOVE_BRAKE_ACCELERATION_PER_TICK,
+    ROTATION_STEP_DEG,
+    SESSION_KEY,
+} from "./modelPayloads/arenaConstants.js";
+import {
+    MAIN_SHAPE,
+    buildAutoPlayStartShapes,
+    buildInitialArenaShapes,
+    matchObstacleShapes,
+    buildObstacleShape,
+    buildOpponentShape,
+    cloneShape,
+    cloneShapes,
+    genId,
+    isObstacleType,
+    nextObstacleId,
+    resetArenaStartShapes,
+    resetFighterShape,
+} from "./modelPayloads/arenaShapes.js";
+import { buildStatePayload } from "./modelPayloads/strategyStatePayload.js";
 
-const CANVAS_SIZE = 800;
-const MOVE_ACCELERATION_PER_TICK = 4;
-const MOVE_BRAKE_ACCELERATION_PER_TICK = 8;
-const AUTO_STEP_MS = 100;
-const ROTATION_STEP_DEG = 18;
-const DASH_DURATION_MS = 1000;
-const DASH_COOLDOWN_MS = 4500;
-const DASH_SPEED = 20;
-const MAX_OBSTACLES = 5;
-const DUEL_SLOT_ONE_X = 240;
-const DUEL_SLOT_TWO_X = 560;
-const HEALTH_PACK_SIZE = 42;
-const HEALTH_PACK_HEAL = 50;
-const DAMAGE_ZONE_SIZE = 128;
-const DAMAGE_ZONE_ENTRY_DAMAGE = 25;
-const DAMAGE_ZONE_DAMAGE_MULTIPLIER = 1.5;
+const CENTER_OBJECTIVE_CAPTURE_MS = 5000;
+const BUFF_DURATION_MS = 5000;
+const CENTER_EFFECT_DURATION_MS = 5000;
+const KILLABLE_BUFF_HP = 50;
+const BARRIER_SHIELD_HP = 25;
+const INHIBITION_ATTACK_CHARGES = 3;
+const INHIBITION_SLOW_MS = 2000;
+const INHIBITION_SPEED_MULTIPLIER = 0.6;
 
-const MAIN_SHAPE = {
-    id: "main",
-    type: "circle",
-    x: CANVAS_SIZE / 2,
-    y: CANVAS_SIZE / 2,
-    size: 60,
-    rotation: 0,
-    combatClass: "melee",
-    hp: MELEE_HP,
-    swingCooldownMs: 0,
-    swingActiveMs: 0,
-    blockCooldownMs: 0,
-    blockActiveMs: 0,
-    blockCharges: BLOCK_MAX_CHARGES,
-    blockRechargeMs: 0,
-    gunCooldownMs: 0,
-    gunActiveMs: 0,
-    gunShotActive: false,
-    gunAmmo: 0,
-    gunReloadMs: 0,
-    grenadeCooldownMs: 0,
-    grenadeSerial: 1,
-    thrownGrenade: null,
-    dashCooldownMs: 0,
-    dashActiveMs: 0,
-    dashDirectionX: 0,
-    dashDirectionY: 0,
-    movementVelocityX: 0,
-    movementVelocityY: 0,
-    velocityX: 0,
-    velocityY: 0,
-};
-
-let _id = 1;
-const genId = () => `shape-${Date.now()}-${_id++}`;
-const SESSION_KEY = "arena-training-session-id";
+function targetObstacleShapes(shapes) {
+    return cloneShapes((Array.isArray(shapes) ? shapes : []).filter((shape) => isObstacleType(shape.type)));
+}
 
 function matchStrategyConfigurationKey(matchId, userId, combatClass) {
     return matchId && userId
@@ -173,229 +198,6 @@ function formatClock(totalSeconds) {
     return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function buildOpponentShape(opponent) {
-    return {
-        id: "opponent-model",
-        type: "opponentModel",
-        x: CANVAS_SIZE / 2 + 180,
-        y: CANVAS_SIZE / 2,
-        size: 64,
-        rotation: 180,
-        combatClass: "melee",
-        hp: MELEE_HP,
-        swingCooldownMs: 0,
-        swingActiveMs: 0,
-        blockCooldownMs: 0,
-        blockActiveMs: 0,
-        blockCharges: BLOCK_MAX_CHARGES,
-        blockRechargeMs: 0,
-        gunCooldownMs: 0,
-        gunActiveMs: 0,
-        gunShotActive: false,
-        gunAmmo: RANGED_AMMO_MAX,
-        gunReloadMs: 0,
-        grenadeCooldownMs: 0,
-        grenadeSerial: 1,
-        thrownGrenade: null,
-        dashCooldownMs: 0,
-        dashActiveMs: 0,
-        dashDirectionX: 0,
-        dashDirectionY: 0,
-        movementVelocityX: 0,
-        movementVelocityY: 0,
-        velocityX: 0,
-        velocityY: 0,
-        opponentUsername: opponent?.username,
-    };
-}
-
-function buildInitialArenaShapes(matchContext) {
-    if (matchContext?.matchId) return buildMatchSpawnShapes(matchContext);
-    const shapes = [{ ...MAIN_SHAPE }];
-    if (matchContext?.opponent) shapes.push(buildOpponentShape(matchContext.opponent));
-    return shapes;
-}
-
-function buildMatchSpawnShapes(matchContext) {
-    const playerClass = matchContext?.player?.selectedClass ?? "melee";
-    const opponentClass = matchContext?.opponent?.selectedClass ?? "melee";
-    const fighters = [
-        resetFighterShape({ ...MAIN_SHAPE, combatClass: playerClass, x: DUEL_SLOT_ONE_X, y: CANVAS_SIZE / 2, rotation: 0 }),
-        resetFighterShape({
-            ...buildOpponentShape(matchContext?.opponent),
-            combatClass: opponentClass,
-            x: DUEL_SLOT_TWO_X,
-            y: CANVAS_SIZE / 2,
-            rotation: 180,
-        }),
-    ];
-    const matchObstacles = matchObstacleShapes(matchContext?.obstacles, true);
-    return [
-        ...fighters,
-        ...(matchObstacles.length
-            ? matchObstacles
-            : createRandomArenaObstacles(createSeededRandom(obstacleSeed(matchContext)), true, fighters)),
-    ];
-}
-
-function matchObstacleShapes(obstacles, locked = false) {
-    if (!Array.isArray(obstacles)) return [];
-    return obstacles
-        .filter((obstacle) => isObstacleType(obstacle?.type))
-        .slice(0, MAX_OBSTACLES)
-        .map((obstacle, index) => ({
-            id: obstacle.id ?? `object_${index + 1}`,
-            type: obstacle.type,
-            x: Number.isFinite(Number(obstacle.x)) ? Number(obstacle.x) : CANVAS_SIZE / 2,
-            y: Number.isFinite(Number(obstacle.y)) ? Number(obstacle.y) : CANVAS_SIZE / 2,
-            size: Number.isFinite(Number(obstacle.size))
-                ? Number(obstacle.size)
-                : obstacle.type === "healthPack" ? HEALTH_PACK_SIZE : DAMAGE_ZONE_SIZE,
-            rotation: 0,
-            locked,
-        }));
-}
-
-function createRandomArenaObstacles(random = Math.random, locked = false, occupiedShapes = []) {
-    const count = 1 + Math.floor(random() * MAX_OBSTACLES);
-    const obstacles = [];
-    for (let index = 0; index < count; index += 1) {
-        const type = random() < 0.5 ? "healthPack" : "damageZone";
-        obstacles.push(buildObstacleShape(type, `object_${index + 1}`, random, locked, [...occupiedShapes, ...obstacles]));
-    }
-    return obstacles;
-}
-
-function buildObstacleShape(type, id = genId(), random = Math.random, locked = false, occupiedShapes = []) {
-    const size = type === "healthPack" ? HEALTH_PACK_SIZE : DAMAGE_ZONE_SIZE;
-    let candidate = null;
-    for (let attempt = 0; attempt < 80; attempt += 1) {
-        candidate = {
-            id,
-            type,
-            x: size / 2 + random() * (CANVAS_SIZE - size),
-            y: size / 2 + random() * (CANVAS_SIZE - size),
-            size,
-            rotation: 0,
-            locked,
-        };
-        if (!occupiedShapes.some((shape) => overlapsShape(shape, candidate, 8))) return candidate;
-    }
-    return candidate;
-}
-
-function isObstacleType(type) {
-    return type === "healthPack" || type === "damageZone";
-}
-
-function nextObstacleId(shapes) {
-    const used = new Set(shapes.map((shape) => shape.id));
-    for (let index = 1; index <= MAX_OBSTACLES; index += 1) {
-        const id = `object_${index}`;
-        if (!used.has(id)) return id;
-    }
-    return genId();
-}
-
-function createSeededRandom(seedValue) {
-    const seedText = String(seedValue ?? "machiner-obstacles");
-    let state = 2_166_136_261;
-    for (let index = 0; index < seedText.length; index += 1) {
-        state ^= seedText.charCodeAt(index);
-        state = Math.imul(state, 16_777_619);
-    }
-    return () => {
-        state += 0x6D2B79F5;
-        let value = state;
-        value = Math.imul(value ^ value >>> 15, value | 1);
-        value ^= value + Math.imul(value ^ value >>> 7, value | 61);
-        return ((value ^ value >>> 14) >>> 0) / 4_294_967_296;
-    };
-}
-
-function obstacleSeed(matchContext) {
-    return `${matchContext?.simulationSeed ?? matchContext?.matchId ?? 0}:obstacles`;
-}
-
-function cloneShape(shape) {
-    return {
-        ...shape,
-        damageZoneIds: shape.damageZoneIds ? [...shape.damageZoneIds] : undefined,
-    };
-}
-
-function cloneShapes(shapes) {
-    return shapes.map(cloneShape);
-}
-
-function resetFighterShape(shape) {
-    const combatClass = shape.combatClass ?? "melee";
-    return {
-        ...shape,
-        hp: combatClassHp(combatClass),
-        swingCooldownMs: 0,
-        swingActiveMs: 0,
-        blockCooldownMs: 0,
-        blockActiveMs: 0,
-        blockCharges: combatClass === "melee" ? BLOCK_MAX_CHARGES : 0,
-        blockRechargeMs: 0,
-        gunCooldownMs: 0,
-        gunActiveMs: 0,
-        gunShotActive: false,
-        gunAmmo: combatClass === "ranged" ? RANGED_AMMO_MAX : 0,
-        gunReloadMs: 0,
-        grenadeCooldownMs: 0,
-        grenadeSerial: 1,
-        thrownGrenade: null,
-        dashCooldownMs: 0,
-        dashActiveMs: 0,
-        dashDirectionX: 0,
-        dashDirectionY: 0,
-        movementVelocityX: 0,
-        movementVelocityY: 0,
-        velocityX: 0,
-        velocityY: 0,
-        damageZoneIds: [],
-        inDamageZone: false,
-    };
-}
-
-function buildAutoPlayStartShapes(currentShapes, matchContext, isMatchTraining) {
-    const fallbackShapes = isMatchTraining ? buildMatchSpawnShapes(matchContext) : [];
-    const fallbackMain = fallbackShapes.find((shape) => shape.id === "main");
-    const fallbackOpponent = fallbackShapes.find((shape) => shape.id === "opponent-model");
-
-    const nextShapes = cloneShapes(currentShapes);
-    if (!nextShapes.some((shape) => shape.id === "main")) {
-        nextShapes.unshift(resetFighterShape(fallbackMain ?? { ...MAIN_SHAPE }));
-    }
-    if (!nextShapes.some((shape) => shape.id === "opponent-model")) {
-        nextShapes.push(resetFighterShape(fallbackOpponent ?? buildOpponentShape(matchContext?.opponent)));
-    }
-
-    const fighters = nextShapes.filter((shape) => shape.id === "main" || shape.id === "opponent-model");
-    const obstacles = nextShapes.filter((shape) => isObstacleType(shape.type));
-    const fallbackObstacles = fallbackShapes.filter((shape) => isObstacleType(shape.type));
-    return [
-        ...nextShapes,
-        ...(!obstacles.length
-            ? fallbackObstacles.length
-                ? cloneShapes(fallbackObstacles)
-                : createRandomArenaObstacles(Math.random, false, fighters)
-            : []),
-    ];
-}
-
-function resetArenaStartShapes(shapes, selectedClass, opponentSelectedClass) {
-    return shapes.map((shape) => {
-        if (shape.id === "main") return resetFighterShape({ ...shape, combatClass: selectedClass });
-        if (shape.id === "opponent-model") {
-            return resetFighterShape({ ...shape, combatClass: opponentSelectedClass, locked: false });
-        }
-        return cloneShape(shape);
-    });
-}
-
 function clamp(value, min, max) {
     return Math.max(min, Math.min(max, value));
 }
@@ -409,22 +211,40 @@ function angleDelta(fromDeg, toDeg) {
 }
 
 function tickCombat(shape, elapsedMs) {
-    const blockRecharge = rechargeBlockCharges(shape, elapsedMs);
+    const overdriveActive = (shape.overdriveMs ?? 0) > 0;
+    const overdriveMs = Math.max(0, (shape.overdriveMs ?? 0) - elapsedMs);
+    const cooldownElapsedMs = overdriveActive ? elapsedMs * 2 : elapsedMs;
+    const blockRecharge = rechargeBlockCharges(shape, cooldownElapsedMs);
     return {
         ...shape,
-        swingCooldownMs: Math.max(0, (shape.swingCooldownMs ?? 0) - elapsedMs),
+        overdriveMs,
+        barrierImmunityMs: Math.max(0, (shape.barrierImmunityMs ?? 0) - elapsedMs),
+        slowedMs: Math.max(0, (shape.slowedMs ?? 0) - elapsedMs),
+        jammedMs: Math.max(0, (shape.jammedMs ?? 0) - elapsedMs),
+        commandLockedMs: Math.max(0, (shape.commandLockedMs ?? 0) - elapsedMs),
+        commandLockAction: (shape.commandLockedMs ?? 0) > elapsedMs ? shape.commandLockAction : null,
+        swingCooldownMs: Math.max(0, (shape.swingCooldownMs ?? 0) - cooldownElapsedMs),
         swingActiveMs: Math.max(0, (shape.swingActiveMs ?? 0) - elapsedMs),
         blockCooldownMs: blockRecharge.rechargeMs,
         blockActiveMs: 0,
         blockCharges: blockRecharge.charges,
         blockRechargeMs: blockRecharge.rechargeMs,
-        gunCooldownMs: Math.max(0, (shape.gunCooldownMs ?? 0) - elapsedMs),
+        gunCooldownMs: Math.max(0, (shape.gunCooldownMs ?? 0) - cooldownElapsedMs),
         gunActiveMs: Math.max(0, (shape.gunActiveMs ?? 0) - elapsedMs),
         gunShotActive: false,
-        ...tickGunReload(shape, elapsedMs),
-        grenadeCooldownMs: Math.max(0, (shape.grenadeCooldownMs ?? 0) - elapsedMs),
+        ...tickGunReload(shape, cooldownElapsedMs),
+        grenadeCooldownMs: Math.max(0, (shape.grenadeCooldownMs ?? 0) - cooldownElapsedMs),
         thrownGrenade: null,
-        dashCooldownMs: Math.max(0, (shape.dashCooldownMs ?? 0) - elapsedMs),
+        fireballCooldownMs: Math.max(0, (shape.fireballCooldownMs ?? 0) - cooldownElapsedMs),
+        fireballActiveMs: Math.max(0, (shape.fireballActiveMs ?? 0) - elapsedMs),
+        ...tickFireballReload(shape, cooldownElapsedMs),
+        thrownFireball: null,
+        stunCooldownMs: Math.max(0, (shape.stunCooldownMs ?? 0) - cooldownElapsedMs),
+        stunActiveMs: Math.max(0, (shape.stunActiveMs ?? 0) - elapsedMs),
+        stunnedMs: Math.max(0, (shape.stunnedMs ?? 0) - elapsedMs),
+        stunCastActive: false,
+        ...tickBurn(shape, elapsedMs),
+        ...tickDashRecharge(shape, cooldownElapsedMs),
         dashActiveMs: Math.max(0, (shape.dashActiveMs ?? 0) - elapsedMs),
     };
 }
@@ -437,6 +257,37 @@ function tickGunReload(shape, elapsedMs) {
         return { gunAmmo: RANGED_AMMO_MAX, gunReloadMs: 0 };
     }
     return { gunAmmo: ammo, gunReloadMs: reloadMs };
+}
+
+function tickFireballReload(shape, elapsedMs) {
+    if (shape.combatClass !== "mage") return { fireballCharges: 0, fireballReloadMs: 0 };
+    const charges = Math.max(0, Math.min(FIREBALL_CHARGES_MAX, Math.round(Number(shape.fireballCharges ?? FIREBALL_CHARGES_MAX))));
+    const reloadMs = Math.max(0, Number(shape.fireballReloadMs ?? 0) - elapsedMs);
+    if (charges <= 0 && reloadMs <= 0) {
+        return { fireballCharges: FIREBALL_CHARGES_MAX, fireballReloadMs: 0 };
+    }
+    return { fireballCharges: charges, fireballReloadMs: reloadMs };
+}
+
+function tickBurn(shape, elapsedMs) {
+    let remainingMs = Math.max(0, Number(shape.burnRemainingMs ?? 0) - elapsedMs);
+    let tickMs = Math.max(0, Number(shape.burnTickMs ?? 0) - elapsedMs);
+    let hp = shape.hp;
+    let shieldHp = shape.shieldHp;
+    while (remainingMs > 0 && tickMs <= 0) {
+        const damaged = applyDamageToShape({ ...shape, hp, shieldHp }, FIREBALL_BURN_DAMAGE * (shape.burnDamageMultiplier ?? 1));
+        hp = damaged.hp;
+        shieldHp = damaged.shieldHp;
+        tickMs += FIREBALL_BURN_TICK_MS;
+    }
+    if (remainingMs <= 0) tickMs = 0;
+    return {
+        hp,
+        shieldHp,
+        burnRemainingMs: remainingMs,
+        burnTickMs: tickMs,
+        burnDamageMultiplier: remainingMs > 0 ? shape.burnDamageMultiplier ?? 1 : 1,
+    };
 }
 
 function rechargeBlockCharges(shape, elapsedMs) {
@@ -453,25 +304,74 @@ function rechargeBlockCharges(shape, elapsedMs) {
     return { charges, rechargeMs };
 }
 
+function tickDashRecharge(shape, elapsedMs) {
+    if (shape.combatClass !== "melee") return { dashCharges: 0, dashRechargeMs: 0, dashChargeRechargeMs: [] };
+    let charges = Math.max(0, Math.min(DASH_MAX_CHARGES, Math.round(Number(shape.dashCharges ?? DASH_MAX_CHARGES))));
+    const timers = Array.isArray(shape.dashChargeRechargeMs) ? shape.dashChargeRechargeMs : [];
+    const nextTimers = [];
+    for (const timer of timers) {
+        const nextMs = Math.max(0, Number(timer) - elapsedMs);
+        if (nextMs <= 0 && charges < DASH_MAX_CHARGES) charges += 1;
+        else if (nextMs > 0) nextTimers.push(nextMs);
+    }
+    const dashRechargeMs = nextTimers.length ? Math.min(...nextTimers) : 0;
+    return { dashCharges: charges, dashRechargeMs, dashChargeRechargeMs: nextTimers };
+}
+
+function consumeDashCharge(shape) {
+    if (shape.combatClass !== "melee" || (shape.dashCharges ?? 0) <= 0) return shape;
+    const rechargeMs = (shape.overdriveMs ?? 0) > 0 ? DASH_RECHARGE_MS * 0.5 : DASH_RECHARGE_MS;
+    const nextTimers = [...(Array.isArray(shape.dashChargeRechargeMs) ? shape.dashChargeRechargeMs : []), rechargeMs];
+    return {
+        ...shape,
+        dashCharges: Math.max(0, (shape.dashCharges ?? DASH_MAX_CHARGES) - 1),
+        dashRechargeMs: Math.min(...nextTimers),
+        dashChargeRechargeMs: nextTimers,
+    };
+}
+
 function applyActionToShape(shape, action, elapsedMs) {
     const seconds = Math.max(elapsedMs / 1000, 0.001);
     const mag = Math.hypot(action.dx ?? 0, action.dy ?? 0);
     const dx = mag > 0.001 ? action.dx / mag : 0;
     const dy = mag > 0.001 ? action.dy / mag : 0;
     const dashAvailable = combatClassConfig(shape.combatClass).actionIds.includes("dash")
-        && (shape.dashCooldownMs ?? 0) <= 0;
-    const maxMoveSpeed = combatClassMoveSpeed(shape.combatClass);
+        && (shape.dashCharges ?? 0) > 0;
+    const overdriveActive = (shape.overdriveMs ?? 0) > 0;
+    const cooldownMultiplier = overdriveActive ? 0.5 : 1;
+    const attackCooldownMultiplier = overdriveActive ? 0.75 : 1;
+    const speedMultiplier = (shape.slowedMs ?? 0) > 0 ? INHIBITION_SPEED_MULTIPLIER : 1;
+    const maxMoveSpeed = combatClassMoveSpeed(shape.combatClass) * speedMultiplier;
     let next = { ...shape };
     const isContinuingDash = (shape.dashActiveMs ?? 0) > 0;
     next.rotation = normalizeAngle((shape.rotation ?? 0) + clamp(action.dRot ?? 0, -1, 1) * ROTATION_STEP_DEG);
+
+    if ((shape.stunnedMs ?? 0) > 0) {
+        const ticked = tickCombat({
+            ...next,
+            dashActiveMs: 0,
+            movementVelocityX: 0,
+            movementVelocityY: 0,
+            velocityX: 0,
+            velocityY: 0,
+        }, elapsedMs);
+        return {
+            ...ticked,
+            dashActiveMs: 0,
+            movementVelocityX: 0,
+            movementVelocityY: 0,
+            velocityX: 0,
+            velocityY: 0,
+        };
+    }
 
     if (isContinuingDash) {
         const dashX = shape.dashDirectionX ?? 0;
         const dashY = shape.dashDirectionY ?? 0;
         next = {
             ...next,
-            x: clamp(shape.x + dashX * DASH_SPEED, shape.size / 2, CANVAS_SIZE - shape.size / 2),
-            y: clamp(shape.y + dashY * DASH_SPEED, shape.size / 2, CANVAS_SIZE - shape.size / 2),
+            x: clamp(shape.x + dashX * DASH_SPEED * speedMultiplier, shape.size / 2, CANVAS_SIZE - shape.size / 2),
+            y: clamp(shape.y + dashY * DASH_SPEED * speedMultiplier, shape.size / 2, CANVAS_SIZE - shape.size / 2),
             movementVelocityX: dashX * maxMoveSpeed,
             movementVelocityY: dashY * maxMoveSpeed,
             velocityX: dashX * DASH_SPEED / seconds,
@@ -486,14 +386,14 @@ function applyActionToShape(shape, action, elapsedMs) {
             x: clamp(shape.x + dashX * DASH_SPEED, shape.size / 2, CANVAS_SIZE - shape.size / 2),
             y: clamp(shape.y + dashY * DASH_SPEED, shape.size / 2, CANVAS_SIZE - shape.size / 2),
             dashActiveMs: DASH_DURATION_MS,
-            dashCooldownMs: DASH_COOLDOWN_MS,
             dashDirectionX: dashX,
             dashDirectionY: dashY,
             movementVelocityX: dashX * maxMoveSpeed,
             movementVelocityY: dashY * maxMoveSpeed,
-            velocityX: dashX * DASH_SPEED / seconds,
-            velocityY: dashY * DASH_SPEED / seconds,
+            velocityX: dashX * DASH_SPEED * speedMultiplier / seconds,
+            velocityY: dashY * DASH_SPEED * speedMultiplier / seconds,
         };
+        next = consumeDashCharge(next);
     } else {
         const movementVelocity = nextMovementVelocity(shape, dx, dy, mag, maxMoveSpeed);
         next = {
@@ -514,7 +414,7 @@ function applyActionToShape(shape, action, elapsedMs) {
 
     const swingAvailable = !blockActive && (next.swingCooldownMs ?? 0) <= 0;
     if ((action.swing ?? 0) > 0.5 && swingAvailable) {
-        next.swingCooldownMs = SWING_COOLDOWN_MS;
+        next.swingCooldownMs = SWING_COOLDOWN_MS * attackCooldownMultiplier;
         next.swingActiveMs = SWING_ACTIVE_MS;
     }
 
@@ -527,17 +427,43 @@ function applyActionToShape(shape, action, elapsedMs) {
     if (firedGun) {
         const nextAmmo = Math.max(0, (next.gunAmmo ?? RANGED_AMMO_MAX) - 1);
         next.gunAmmo = nextAmmo;
-        next.gunReloadMs = nextAmmo <= 0 ? RANGED_RELOAD_MS : 0;
+        next.gunReloadMs = nextAmmo <= 0 ? RANGED_RELOAD_MS * cooldownMultiplier : 0;
         next.gunActiveMs = GUN_ACTIVE_MS;
-        next.gunCooldownMs = GUN_COOLDOWN_MS;
+        next.gunCooldownMs = GUN_COOLDOWN_MS * cooldownMultiplier;
     }
 
     const grenadeAvailable = !blockActive && next.combatClass === "ranged" && (next.grenadeCooldownMs ?? 0) <= 0;
     const threwGrenade = (action.grenade ?? 0) > 0.5 && grenadeAvailable;
     if (threwGrenade) {
-        next.grenadeCooldownMs = GRENADE_COOLDOWN_MS;
+        next.grenadeCooldownMs = GRENADE_COOLDOWN_MS * cooldownMultiplier;
         next.thrownGrenade = createGrenadeShape(next);
         next.grenadeSerial = (next.grenadeSerial ?? 1) + 1;
+    }
+
+    const fireballAvailable = !blockActive && next.combatClass === "mage"
+        && (next.fireballCharges ?? FIREBALL_CHARGES_MAX) > 0
+        && (next.fireballReloadMs ?? 0) <= 0
+        && (next.fireballCooldownMs ?? 0) <= 0
+        && (next.fireballActiveMs ?? 0) <= 0;
+    const shotFireball = (action.fireball ?? 0) > 0.5 && fireballAvailable;
+    if (shotFireball) {
+        const nextCharges = Math.max(0, (next.fireballCharges ?? FIREBALL_CHARGES_MAX) - 1);
+        next.fireballCharges = nextCharges;
+        next.fireballReloadMs = nextCharges <= 0 ? FIREBALL_RELOAD_MS * cooldownMultiplier : 0;
+        next.fireballActiveMs = FIREBALL_ACTIVE_MS;
+        next.fireballCooldownMs = FIREBALL_COOLDOWN_MS * cooldownMultiplier;
+        next.thrownFireball = createFireballShape(next);
+        next.fireballSerial = (next.fireballSerial ?? 1) + 1;
+    }
+
+    const stunAvailable = !blockActive && next.combatClass === "mage"
+        && (next.stunCooldownMs ?? 0) <= 0
+        && (next.stunActiveMs ?? 0) <= 0;
+    const castStun = (action.stun ?? 0) > 0.5 && stunAvailable;
+    if (castStun) {
+        next.stunActiveMs = STUN_ACTIVE_MS;
+        next.stunCooldownMs = STUN_COOLDOWN_MS * cooldownMultiplier;
+        next.stunCastActive = true;
     }
 
     const ticked = tickCombat(next, elapsedMs);
@@ -545,7 +471,10 @@ function applyActionToShape(shape, action, elapsedMs) {
         ...ticked,
         blockActiveMs: blockActive ? 1 : ticked.blockActiveMs,
         gunShotActive: firedGun,
+        stunCastActive: castStun,
+        stunActiveMs: castStun ? STUN_ACTIVE_MS : ticked.stunActiveMs,
         thrownGrenade: next.thrownGrenade ?? null,
+        thrownFireball: next.thrownFireball ?? null,
     };
 }
 
@@ -620,15 +549,34 @@ function isBlockingHit(defender, attacker) {
     return Math.abs(angleDelta(defender.rotation ?? 0, incomingAngle)) <= 95;
 }
 
-function resolveCombatDamage(first, second) {
-    let nextFirst = first;
-    let nextSecond = second;
+function resolveCombatDamage(first, second, obstacles = []) {
+    let nextObstacles = obstacles.map((obstacle) => ({ ...obstacle }));
+    let nextFirst = {
+        ...first,
+        gunBounceRay: first.gunShotActive ? null : first.gunBounceRay,
+        gunRayLength: first.gunShotActive
+            ? gunRangeBeforeProjectileWall(first, obstacles)
+            : first.gunRayLength ?? GUN_RANGE,
+    };
+    let nextSecond = {
+        ...second,
+        gunBounceRay: second.gunShotActive ? null : second.gunBounceRay,
+        gunRayLength: second.gunShotActive
+            ? gunRangeBeforeProjectileWall(second, obstacles)
+            : second.gunRayLength ?? GUN_RANGE,
+    };
+    [nextFirst, nextSecond, nextObstacles] = applyBouncedGunShots(
+        nextFirst,
+        nextSecond,
+        nextObstacles,
+    );
 
     if (isSwingHitting(first, second)) {
         if (isBlockingHit(second, first)) {
             nextSecond = consumeBlockCharges(nextSecond, 1);
         } else {
-            nextSecond = { ...nextSecond, hp: Math.max(0, (nextSecond.hp ?? MELEE_HP) - incomingMeleeDamage(nextSecond)) };
+            nextSecond = applyDamageToShape(nextSecond, incomingMeleeDamage(nextSecond));
+            [nextFirst, nextSecond] = applyInhibitionHit(nextFirst, nextSecond);
         }
     }
 
@@ -636,27 +584,232 @@ function resolveCombatDamage(first, second) {
         if (isBlockingHit(first, second)) {
             nextFirst = consumeBlockCharges(nextFirst, 1);
         } else {
-            nextFirst = { ...nextFirst, hp: Math.max(0, (nextFirst.hp ?? MELEE_HP) - incomingMeleeDamage(nextFirst)) };
+            nextFirst = applyDamageToShape(nextFirst, incomingMeleeDamage(nextFirst));
+            [nextSecond, nextFirst] = applyInhibitionHit(nextSecond, nextFirst);
         }
     }
 
-    if (isGunHitting(first, second)) {
+    if (isGunHitting(first, second) && !isGunBlockedByWall(first, second, obstacles)) {
         if (isBlockingHit(second, first)) {
             nextSecond = consumeBlockCharges(nextSecond, 1);
         } else {
-            nextSecond = { ...nextSecond, hp: Math.max(0, (nextSecond.hp ?? MELEE_HP) - incomingGunDamage(first, second)) };
+            nextSecond = applyDamageToShape(nextSecond, incomingGunDamage(first, second));
+            [nextFirst, nextSecond] = applyInhibitionHit(nextFirst, nextSecond);
         }
     }
 
-    if (isGunHitting(second, first)) {
+    if (isGunHitting(second, first) && !isGunBlockedByWall(second, first, obstacles)) {
         if (isBlockingHit(first, second)) {
             nextFirst = consumeBlockCharges(nextFirst, 1);
         } else {
-            nextFirst = { ...nextFirst, hp: Math.max(0, (nextFirst.hp ?? MELEE_HP) - incomingGunDamage(second, first)) };
+            nextFirst = applyDamageToShape(nextFirst, incomingGunDamage(second, first));
+            [nextSecond, nextFirst] = applyInhibitionHit(nextSecond, nextFirst);
         }
     }
 
-    return [nextFirst, nextSecond];
+    [nextFirst, nextObstacles] = applyKillableBuffDamage(nextFirst, nextObstacles);
+    [nextSecond, nextObstacles] = applyKillableBuffDamage(nextSecond, nextObstacles);
+
+    return [nextFirst, nextSecond, nextObstacles];
+}
+
+function applyKillableBuffDamage(attacker, obstacles) {
+    if (!attacker?.swingActiveMs && !attacker?.gunShotActive && !attacker?.fireballActiveMs) return [attacker, obstacles];
+    let nextAttacker = attacker;
+    let consumedHit = false;
+    const nextObstacles = [];
+    for (const obstacle of obstacles) {
+        if (!isBuffPickupType(obstacle.type) || consumedHit) {
+            nextObstacles.push(obstacle);
+            continue;
+        }
+        let damage = 0;
+        if ((attacker.swingActiveMs ?? 0) > 0 && isSwingHitting(attacker, obstacle)) {
+            damage = MELEE_DAMAGE;
+        } else if (attacker.gunShotActive && isGunHitting(attacker, obstacle) && !isGunBlockedByWall(attacker, obstacle, obstacles)) {
+            damage = incomingGunDamage(attacker, obstacle);
+        } else if ((attacker.fireballActiveMs ?? 0) > 0 && isGunHitting(attacker, obstacle)) {
+            damage = FIREBALL_DAMAGE;
+        }
+        if (damage <= 0) {
+            nextObstacles.push(obstacle);
+            continue;
+        }
+        consumedHit = true;
+        const hp = Math.max(0, Number(obstacle.hp ?? KILLABLE_BUFF_HP) - damage);
+        if (hp <= 0) {
+            nextAttacker = applyBuffPickup(nextAttacker, obstacle.type);
+        } else {
+            nextObstacles.push({ ...obstacle, hp });
+        }
+    }
+    return [nextAttacker, nextObstacles];
+}
+
+function applyDamageToShape(shape, damage) {
+    let remaining = Math.max(0, Number(damage) || 0);
+    let shieldHp = Math.max(0, Number(shape.shieldHp ?? 0));
+    if (shieldHp > 0 && remaining > 0) {
+        const absorbed = Math.min(shieldHp, remaining);
+        shieldHp -= absorbed;
+        remaining -= absorbed;
+    }
+    return {
+        ...shape,
+        shieldHp,
+        hp: remaining > 0 ? Math.max(0, (shape.hp ?? combatClassHp(shape.combatClass)) - remaining) : shape.hp,
+    };
+}
+
+function applyInhibitionHit(attacker, defender) {
+    if ((attacker.inhibitionCharges ?? 0) <= 0) return [attacker, defender];
+    return [
+        { ...attacker, inhibitionCharges: Math.max(0, (attacker.inhibitionCharges ?? 0) - 1) },
+        { ...defender, slowedMs: INHIBITION_SLOW_MS },
+    ];
+}
+
+function applyBouncedGunShots(first, second, obstacles) {
+    const fighters = [first, second];
+    let nextFighters = fighters;
+    let nextObstacles = obstacles;
+    fighters.forEach((initialAttacker) => {
+        const attacker = nextFighters.find((fighter) => fighter.id === initialAttacker.id) ?? initialAttacker;
+        if (!attacker.gunShotActive) return;
+        const reflection = traceBouncyGunShot(attacker, nextFighters, nextObstacles);
+        if (!reflection) return;
+        nextObstacles = nextObstacles
+            .map((obstacle) => obstacle.id === reflection.wall.id
+                ? { ...obstacle, usesRemaining: (obstacle.usesRemaining ?? BOUNCY_WALL_MAX_USES) - 1 }
+                : obstacle)
+            .filter((obstacle) => obstacle.type !== BOUNCY_WALL_TYPE || obstacle.usesRemaining > 0);
+        if (reflection.hitFighter) {
+            const defender = nextFighters.find((fighter) => fighter.id === reflection.hitFighter.id);
+            if (defender) {
+                const damaged = applyDamageToShape(defender, Math.round(incomingGunDamage(attacker, defender) * 1.5));
+                const [nextAttacker, nextDefender] = applyInhibitionHit(attacker, damaged);
+                nextFighters = nextFighters.map((fighter) => {
+                    if (fighter.id === nextAttacker.id) return nextAttacker;
+                    if (fighter.id === nextDefender.id) return nextDefender;
+                    return fighter;
+                });
+            }
+        }
+        const bounceAngle = Math.atan2(reflection.outY, reflection.outX) * 180 / Math.PI
+            - (attacker.rotation ?? 0);
+        nextFighters = nextFighters.map((fighter) => fighter.id === attacker.id ? {
+            ...fighter,
+            gunRayLength: reflection.distance,
+            gunBounceRay: {
+                distance: reflection.distance,
+                angle: bounceAngle,
+                length: reflection.outgoingLength,
+            },
+        } : fighter);
+    });
+    return [nextFighters[0], nextFighters[1], nextObstacles];
+}
+
+function traceBouncyGunShot(attacker, fighters, obstacles) {
+    const radians = (attacker.rotation ?? 0) * Math.PI / 180;
+    const directionX = Math.cos(radians);
+    const directionY = Math.sin(radians);
+    const wallHit = obstacles
+        .filter((wall) => wall.type === BOUNCY_WALL_TYPE)
+        .map((wall) => {
+            const [start, end] = wallEndpoints(wall);
+            return {
+                wall,
+                distance: raySegmentIntersectionDistance(
+                    attacker.x, attacker.y, directionX, directionY,
+                    start.x, start.y, end.x, end.y,
+                ),
+            };
+        })
+        .filter((candidate) => candidate.distance != null)
+        .sort((a, b) => a.distance - b.distance)[0];
+    if (!wallHit) return null;
+
+    const wallRadians = snapWallRotation(wallHit.wall.rotation) * Math.PI / 180;
+    let normalX = -Math.sin(wallRadians);
+    let normalY = Math.cos(wallRadians);
+    if (directionX * normalX + directionY * normalY > 0) {
+        normalX *= -1;
+        normalY *= -1;
+    }
+    const hitX = attacker.x + directionX * wallHit.distance;
+    const hitY = attacker.y + directionY * wallHit.distance;
+    const maxOutgoing = Math.max(0, GUN_RANGE - wallHit.distance);
+    const hitFighter = fighters
+        .map((fighter) => ({
+            fighter,
+            distance: rayCircleEntryDistance(
+                hitX + normalX * (PROJECTILE_WALL_THICKNESS / 2 + 0.1),
+                hitY + normalY * (PROJECTILE_WALL_THICKNESS / 2 + 0.1),
+                normalX,
+                normalY,
+                fighter.x,
+                fighter.y,
+                (fighter.size ?? 60) / 2,
+            ),
+        }))
+        .filter((candidate) => candidate.distance != null && candidate.distance <= maxOutgoing)
+        .sort((a, b) => a.distance - b.distance)[0];
+    return {
+        wall: wallHit.wall,
+        distance: wallHit.distance,
+        outX: normalX,
+        outY: normalY,
+        outgoingLength: hitFighter?.distance ?? maxOutgoing,
+        hitFighter: hitFighter?.fighter ?? null,
+    };
+}
+
+function rayCircleEntryDistance(originX, originY, directionX, directionY, centerX, centerY, radius) {
+    const offsetX = centerX - originX;
+    const offsetY = centerY - originY;
+    const projection = offsetX * directionX + offsetY * directionY;
+    const perpendicularSquared = offsetX * offsetX + offsetY * offsetY - projection * projection;
+    const radiusSquared = radius * radius;
+    if (perpendicularSquared > radiusSquared) return null;
+    const entry = projection - Math.sqrt(Math.max(0, radiusSquared - perpendicularSquared));
+    return entry >= 0 ? entry : null;
+}
+
+function gunRangeBeforeProjectileWall(attacker, obstacles) {
+    const radians = (attacker.rotation ?? 0) * Math.PI / 180;
+    const directionX = Math.cos(radians);
+    const directionY = Math.sin(radians);
+    return obstacles
+        .filter((wall) => wall.type === PROJECTILE_WALL_TYPE)
+        .reduce((nearest, wall) => {
+            const [start, end] = wallEndpoints(wall);
+            const distance = raySegmentIntersectionDistance(
+                attacker.x,
+                attacker.y,
+                directionX,
+                directionY,
+                start.x,
+                start.y,
+                end.x,
+                end.y,
+            );
+            return distance == null ? nearest : Math.min(nearest, distance);
+        }, GUN_RANGE);
+}
+
+function raySegmentIntersectionDistance(originX, originY, directionX, directionY, ax, ay, bx, by) {
+    const segmentX = bx - ax;
+    const segmentY = by - ay;
+    const denominator = cross(0, 0, directionX, directionY, segmentX, segmentY);
+    if (Math.abs(denominator) <= 0.000001) return null;
+    const offsetX = ax - originX;
+    const offsetY = ay - originY;
+    const distance = (offsetX * segmentY - offsetY * segmentX) / denominator;
+    const segmentT = (offsetX * directionY - offsetY * directionX) / denominator;
+    return distance >= 0 && distance <= GUN_RANGE && segmentT >= 0 && segmentT <= 1
+        ? distance
+        : null;
 }
 
 function consumeBlockCharges(fighter, charges) {
@@ -691,6 +844,26 @@ function isGunHitting(attacker, defender) {
     return forwardDistance >= 0
         && forwardDistance <= GUN_RANGE + defenderRadius
         && Math.abs(sideDistance) <= defenderRadius;
+}
+
+function isGunBlockedByWall(attacker, defender, obstacles) {
+    if (!attacker.gunShotActive) return false;
+    return obstacles.some((wall) => (
+        (wall.type === PROJECTILE_WALL_TYPE || wall.type === BOUNCY_WALL_TYPE)
+        && (() => {
+            const [start, end] = wallEndpoints(wall);
+            return segmentDistance(
+            attacker.x,
+            attacker.y,
+            defender.x,
+            defender.y,
+            start.x,
+            start.y,
+            end.x,
+            end.y,
+        ) <= PROJECTILE_WALL_THICKNESS / 2;
+        })()
+    ));
 }
 
 function incomingGunDamage(attacker, defender) {
@@ -731,18 +904,45 @@ function createGrenadeShape(shape) {
     };
 }
 
-function updateGrenades(grenades, fighters) {
+function createFireballShape(shape) {
+    const angle = (shape.rotation ?? 0) * Math.PI / 180;
+    const directionX = Math.cos(angle);
+    const directionY = Math.sin(angle);
+    const spawnDistance = (shape.size ?? 60) / 2 + FIREBALL_SIZE / 2 + 2;
+    return {
+        id: `fireball-${shape.id}-${shape.fireballSerial ?? 1}`,
+        type: "fireball",
+        ownerId: shape.id,
+        x: shape.x + directionX * spawnDistance,
+        y: shape.y + directionY * spawnDistance,
+        size: FIREBALL_SIZE,
+        rotation: shape.rotation ?? 0,
+        velocityX: directionX * FIREBALL_SPEED,
+        velocityY: directionY * FIREBALL_SPEED,
+        traveled: 0,
+        locked: true,
+    };
+}
+
+function updateGrenades(grenades, fighters, obstacles = []) {
     const remaining = [];
     const explosions = [];
+    let nextObstacles = obstacles;
     for (const grenade of grenades) {
         if (grenade.type === "grenadeExplosion") {
             const remainingMs = Math.max(0, (grenade.remainingMs ?? 0) - AUTO_STEP_MS);
             if (remainingMs > 0) remaining.push({ ...grenade, remainingMs });
             continue;
         }
-        const next = advanceGrenade(grenade);
+        let next = advanceGrenade(grenade);
+        if (projectileTouchesWall(grenade, next, nextObstacles)) continue;
+        const reflection = reflectMovingProjectile(grenade, next, nextObstacles);
+        if (reflection) {
+            next = reflection.projectile;
+            nextObstacles = reflection.obstacles;
+        }
         const touchedOpponent = fighters.some((fighter) => (
-            fighter.id !== next.ownerId && overlapsShape(fighter, next)
+            (fighter.id !== next.ownerId || next.reflected) && overlapsShape(fighter, next)
         ));
         const stoppedLongEnough = Math.hypot(next.velocityX ?? 0, next.velocityY ?? 0) <= 0.001
             && (next.stoppedMs ?? 0) >= GRENADE_STOP_FUSE_MS;
@@ -752,7 +952,7 @@ function updateGrenades(grenades, fighters) {
             remaining.push(next);
         }
     }
-    return { grenades: remaining, explosions };
+    return { grenades: remaining, explosions, obstacles: nextObstacles };
 }
 
 function advanceGrenade(grenade) {
@@ -794,28 +994,287 @@ function createGrenadeExplosionShape(grenade) {
         size: GRENADE_EXPLOSION_RADIUS * 2,
         rotation: 0,
         remainingMs: 200,
+        damageMultiplier: grenade.damageMultiplier ?? 1,
         locked: true,
     };
 }
 
 function applyGrenadeExplosionDamage(fighters, explosions) {
-    return fighters.map((fighter) => {
-        const damage = explosions.reduce((total, explosion) => total + grenadeDamageToFighter(explosion, fighter), 0);
-        const shieldCharges = explosions.reduce((total, explosion) => total + grenadeShieldChargesToFighter(explosion, fighter), 0);
-        if ((fighter.blockActiveMs ?? 0) > 0 && (fighter.blockCharges ?? 0) > 0 && shieldCharges > 0) {
-            return consumeBlockCharges(fighter, shieldCharges);
+    let nextFighters = fighters;
+    for (const explosion of explosions) {
+        nextFighters = nextFighters.map((fighter) => {
+            const damage = grenadeDamageToFighter(explosion, fighter);
+            const shieldCharges = grenadeShieldChargesToFighter(explosion, fighter);
+            if (damage <= 0 && shieldCharges <= 0) return fighter;
+            if ((fighter.blockActiveMs ?? 0) > 0 && (fighter.blockCharges ?? 0) > 0 && shieldCharges > 0) {
+                return consumeBlockCharges(fighter, shieldCharges);
+            }
+            return damage > 0 ? applyDamageToShape(fighter, damage) : fighter;
+        });
+        const attacker = nextFighters.find((fighter) => fighter.id === explosion.ownerId);
+        if (!attacker || (attacker.inhibitionCharges ?? 0) <= 0) continue;
+        const hitDefender = nextFighters.find((fighter) => (
+            fighter.id !== attacker.id
+            && grenadeDamageToFighter(explosion, fighter) > 0
+            && (fighter.barrierImmunityMs ?? 0) <= 0
+        ));
+        if (!hitDefender) continue;
+        const [nextAttacker, nextDefender] = applyInhibitionHit(attacker, hitDefender);
+        nextFighters = nextFighters.map((fighter) => {
+            if (fighter.id === nextAttacker.id) return nextAttacker;
+            if (fighter.id === nextDefender.id) return nextDefender;
+            return fighter;
+        });
+    }
+    return nextFighters;
+}
+
+function applyFireballHits(fighters, hits) {
+    let nextFighters = fighters;
+    for (const hit of hits) {
+        const defender = nextFighters.find((fighter) => fighter.id === hit.fighterId);
+        if (!defender) continue;
+        const damageMultiplier = hit.fireball.damageMultiplier ?? 1;
+        const damaged = applyDamageToShape(defender, FIREBALL_DAMAGE * damageMultiplier);
+        let nextDefender = {
+            ...damaged,
+            burnRemainingMs: FIREBALL_BURN_DURATION_MS,
+            burnTickMs: FIREBALL_BURN_TICK_MS,
+            burnDamageMultiplier: damageMultiplier,
+        };
+        const attacker = nextFighters.find((fighter) => fighter.id === hit.fireball.ownerId);
+        let nextAttacker = attacker;
+        if (attacker && attacker.id !== defender.id && (defender.barrierImmunityMs ?? 0) <= 0) {
+            [nextAttacker, nextDefender] = applyInhibitionHit(attacker, nextDefender);
         }
-        return damage > 0
-            ? { ...fighter, hp: Math.max(0, (fighter.hp ?? MELEE_HP) - damage) }
-            : fighter;
+        nextFighters = nextFighters.map((fighter) => {
+            if (nextAttacker && fighter.id === nextAttacker.id) return nextAttacker;
+            if (fighter.id === nextDefender.id) return nextDefender;
+            return fighter;
+        });
+    }
+    return nextFighters;
+}
+
+function applyStunHits(fighters) {
+    let nextFighters = fighters;
+    for (const defender of fighters) {
+        const attacker = nextFighters.find((candidate) => (
+            candidate.id !== defender.id
+            && stunHits(candidate, defender)
+            && !isBlockingHit(defender, candidate)
+        ));
+        if (!attacker) continue;
+        const currentDefender = nextFighters.find((fighter) => fighter.id === defender.id) ?? defender;
+        let nextDefender = applyDamageToShape(currentDefender, STUN_DAMAGE);
+        let nextAttacker = attacker;
+        if ((currentDefender.barrierImmunityMs ?? 0) <= 0) {
+            [nextAttacker, nextDefender] = applyInhibitionHit(attacker, nextDefender);
+            nextDefender = {
+                ...nextDefender,
+                stunnedMs: Math.max(currentDefender.stunnedMs ?? 0, STUN_DURATION_MS),
+                dashActiveMs: 0,
+                movementVelocityX: 0,
+                movementVelocityY: 0,
+                velocityX: 0,
+                velocityY: 0,
+            };
+        }
+        nextFighters = nextFighters.map((fighter) => {
+            if (fighter.id === nextAttacker.id) return nextAttacker;
+            if (fighter.id === nextDefender.id) return nextDefender;
+            return fighter;
+        });
+    }
+    return nextFighters.map((fighter) => {
+        const blockedStuns = nextFighters.filter((attacker) => (
+            attacker.id !== fighter.id
+            && stunHits(attacker, fighter)
+            && isBlockingHit(fighter, attacker)
+        )).length;
+        return blockedStuns > 0 ? consumeBlockCharges(fighter, blockedStuns) : fighter;
     });
+}
+
+function updateFireballs(fireballs, fighters, obstacles = []) {
+    const remaining = [];
+    const hits = [];
+    let nextObstacles = obstacles;
+    for (const fireball of fireballs) {
+        let next = advanceFireball(fireball);
+        if (projectileTouchesWall(fireball, next, nextObstacles)) continue;
+        const reflection = reflectMovingProjectile(fireball, next, nextObstacles);
+        if (reflection) {
+            next = reflection.projectile;
+            nextObstacles = reflection.obstacles;
+        }
+        const hitFighter = fighters.find((fighter) => (
+            (fighter.id !== next.ownerId || next.reflected) && overlapsShape(fighter, next)
+        ));
+        if (hitFighter) {
+            hits.push({ fireball: next, fighterId: hitFighter.id });
+        } else if ((next.traveled ?? 0) < FIREBALL_RANGE && isInsideArena(next)) {
+            remaining.push(next);
+        }
+    }
+    return { fireballs: remaining, hits, obstacles: nextObstacles };
+}
+
+function reflectMovingProjectile(previous, next, obstacles) {
+    const velocityX = next.velocityX ?? 0;
+    const velocityY = next.velocityY ?? 0;
+    const speed = Math.hypot(velocityX, velocityY);
+    if (speed <= 0.000001) return null;
+    const directionX = velocityX / speed;
+    const directionY = velocityY / speed;
+    const hit = obstacles
+        .filter((wall) => wall.type === BOUNCY_WALL_TYPE)
+        .map((wall) => {
+            const [start, end] = wallEndpoints(wall);
+            return {
+                wall,
+                distance: raySegmentIntersectionDistance(
+                    previous.x, previous.y, directionX, directionY,
+                    start.x, start.y, end.x, end.y,
+                ),
+            };
+        })
+        .filter((candidate) => candidate.distance != null && candidate.distance <= speed)
+        .sort((a, b) => a.distance - b.distance)[0];
+    if (!hit) return null;
+
+    const wallRadians = snapWallRotation(hit.wall.rotation) * Math.PI / 180;
+    let normalX = -Math.sin(wallRadians);
+    let normalY = Math.cos(wallRadians);
+    if (directionX * normalX + directionY * normalY > 0) {
+        normalX *= -1;
+        normalY *= -1;
+    }
+    const reflectedSpeed = speed * 1.25;
+    const clearance = (next.size ?? 0) / 2 + PROJECTILE_WALL_THICKNESS / 2 + 0.1;
+    const hitX = previous.x + directionX * hit.distance;
+    const hitY = previous.y + directionY * hit.distance;
+    const reflectedProjectile = {
+        ...next,
+        x: hitX + normalX * clearance,
+        y: hitY + normalY * clearance,
+        velocityX: normalX * reflectedSpeed,
+        velocityY: normalY * reflectedSpeed,
+        reflected: true,
+        damageMultiplier: (next.damageMultiplier ?? 1) * 1.5,
+    };
+    const nextObstacles = obstacles
+        .map((obstacle) => obstacle.id === hit.wall.id
+            ? { ...obstacle, usesRemaining: (obstacle.usesRemaining ?? BOUNCY_WALL_MAX_USES) - 1 }
+            : obstacle)
+        .filter((obstacle) => obstacle.type !== BOUNCY_WALL_TYPE || obstacle.usesRemaining > 0);
+    return { projectile: reflectedProjectile, obstacles: nextObstacles };
+}
+
+function projectileTouchesWall(previous, next, obstacles) {
+    const projectileRadius = (next.size ?? 0) / 2;
+    return obstacles.some((wall) => (
+        wall.type === PROJECTILE_WALL_TYPE
+        && (() => {
+            const [start, end] = wallEndpoints(wall);
+            return segmentDistance(
+            previous.x,
+            previous.y,
+            next.x,
+            next.y,
+            start.x,
+            start.y,
+            end.x,
+            end.y,
+        ) <= projectileRadius + PROJECTILE_WALL_THICKNESS / 2;
+        })()
+    ));
+}
+
+function wallEndpoints(wall) {
+    const radians = snapWallRotation(wall.rotation) * Math.PI / 180;
+    const halfLength = (wall.size ?? PROJECTILE_WALL_LENGTH) / 2;
+    const offsetX = Math.cos(radians) * halfLength;
+    const offsetY = Math.sin(radians) * halfLength;
+    return [
+        { x: wall.x - offsetX, y: wall.y - offsetY },
+        { x: wall.x + offsetX, y: wall.y + offsetY },
+    ];
+}
+
+function segmentDistance(ax, ay, bx, by, cx, cy, dx, dy) {
+    if (segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy)) return 0;
+    return Math.min(
+        pointToSegmentDistance(ax, ay, cx, cy, dx, dy),
+        pointToSegmentDistance(bx, by, cx, cy, dx, dy),
+        pointToSegmentDistance(cx, cy, ax, ay, bx, by),
+        pointToSegmentDistance(dx, dy, ax, ay, bx, by),
+    );
+}
+
+function pointToSegmentDistance(px, py, ax, ay, bx, by) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared <= 0.000001) return Math.hypot(px - ax, py - ay);
+    const t = clamp(((px - ax) * dx + (py - ay) * dy) / lengthSquared, 0, 1);
+    return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+function segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+    const abC = cross(ax, ay, bx, by, cx, cy);
+    const abD = cross(ax, ay, bx, by, dx, dy);
+    const cdA = cross(cx, cy, dx, dy, ax, ay);
+    const cdB = cross(cx, cy, dx, dy, bx, by);
+    if (Math.abs(abC) <= 0.000001 && pointOnSegment(cx, cy, ax, ay, bx, by)) return true;
+    if (Math.abs(abD) <= 0.000001 && pointOnSegment(dx, dy, ax, ay, bx, by)) return true;
+    if (Math.abs(cdA) <= 0.000001 && pointOnSegment(ax, ay, cx, cy, dx, dy)) return true;
+    if (Math.abs(cdB) <= 0.000001 && pointOnSegment(bx, by, cx, cy, dx, dy)) return true;
+    return (abC > 0) !== (abD > 0) && (cdA > 0) !== (cdB > 0);
+}
+
+function cross(ax, ay, bx, by, px, py) {
+    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+}
+
+function pointOnSegment(px, py, ax, ay, bx, by) {
+    return px >= Math.min(ax, bx) - 0.000001
+        && px <= Math.max(ax, bx) + 0.000001
+        && py >= Math.min(ay, by) - 0.000001
+        && py <= Math.max(ay, by) + 0.000001;
+}
+
+function advanceFireball(fireball) {
+    const velocityX = fireball.velocityX ?? 0;
+    const velocityY = fireball.velocityY ?? 0;
+    return {
+        ...fireball,
+        x: fireball.x + velocityX,
+        y: fireball.y + velocityY,
+        traveled: (fireball.traveled ?? 0) + Math.hypot(velocityX, velocityY),
+    };
+}
+
+function isInsideArena(shape) {
+    return shape.x >= -shape.size && shape.x <= CANVAS_SIZE + shape.size
+        && shape.y >= -shape.size && shape.y <= CANVAS_SIZE + shape.size;
+}
+
+function stunHits(attacker, defender) {
+    if (!attacker?.stunCastActive || attacker.combatClass !== "mage") return false;
+    const dx = defender.x - attacker.x;
+    const dy = defender.y - attacker.y;
+    const distance = Math.hypot(dx, dy);
+    if (distance > STUN_RANGE + (defender.size ?? 60) / 2) return false;
+    const bearing = Math.atan2(dy, dx) * 180 / Math.PI;
+    return Math.abs(angleDelta(attacker.rotation ?? 0, bearing)) <= 50;
 }
 
 function grenadeDamageToFighter(explosion, fighter) {
     const nearestBodyDistance = Math.max(0, Math.hypot(fighter.x - explosion.x, fighter.y - explosion.y) - (fighter.size ?? 60) / 2);
     if (nearestBodyDistance > GRENADE_EXPLOSION_RADIUS) return 0;
     const rawDamage = interpolateDamage(nearestBodyDistance, 0, GRENADE_EXPLOSION_RADIUS, 50, 25);
-    return clamp(Math.round(rawDamage / 5) * 5, 25, 50);
+    return clamp(Math.round(rawDamage / 5) * 5, 25, 50) * (explosion.damageMultiplier ?? 1);
 }
 
 function grenadeShieldChargesToFighter(explosion, fighter) {
@@ -838,13 +1297,83 @@ function overlapsShape(first, second, padding = 0) {
     return Math.hypot(first.x - second.x, first.y - second.y) <= ((first.size ?? 60) + (second.size ?? 0)) / 2 + padding;
 }
 
+function fighterCaptureSlot(fighter) {
+    if (Number(fighter?.slot) === 2) return "2";
+    if (Number(fighter?.slot) === 1) return "1";
+    return fighter?.id === "opponent-model" ? "2" : "1";
+}
+
+function isBuffPickupType(type) {
+    return type === OVERDRIVE_TYPE || type === BARRIER_TYPE || type === INHIBITION_TYPE;
+}
+
+function isCenterObjectiveType(type) {
+    return type === RADAR_JAMMER_TYPE || type === COMMAND_LOCK_TYPE;
+}
+
+function updateCenterObjectiveCapture(obstacle, fighters) {
+    const previous = obstacle.captureBySlot ?? {};
+    const captureBySlot = {};
+    for (const fighter of fighters) {
+        if (!fighter) continue;
+        const slot = fighterCaptureSlot(fighter);
+        captureBySlot[slot] = overlapsObstacle(fighter, obstacle)
+            ? Math.min(CENTER_OBJECTIVE_CAPTURE_MS, Number(previous[slot] ?? 0) + AUTO_STEP_MS)
+            : 0;
+    }
+    return { ...obstacle, captureBySlot };
+}
+
+function centerObjectiveCollectorIndex(obstacle, fighters) {
+    const captureBySlot = obstacle.captureBySlot ?? {};
+    if (Number(captureBySlot["1"] ?? 0) < CENTER_OBJECTIVE_CAPTURE_MS && Number(captureBySlot["2"] ?? 0) < CENTER_OBJECTIVE_CAPTURE_MS) {
+        return -1;
+    }
+    const winningSlot = Number(captureBySlot["1"] ?? 0) >= Number(captureBySlot["2"] ?? 0) ? "1" : "2";
+    return fighters.findIndex((fighter) => fighterCaptureSlot(fighter) === winningSlot);
+}
+
+function applyBuffPickup(fighter, type) {
+    if (type === OVERDRIVE_TYPE) {
+        return { ...fighter, overdriveMs: BUFF_DURATION_MS };
+    }
+    if (type === BARRIER_TYPE) {
+        return {
+            ...fighter,
+            shieldHp: Math.max(0, Number(fighter.shieldHp ?? 0)) + BARRIER_SHIELD_HP,
+            barrierImmunityMs: BUFF_DURATION_MS,
+        };
+    }
+    if (type === INHIBITION_TYPE) {
+        return { ...fighter, inhibitionCharges: INHIBITION_ATTACK_CHARGES };
+    }
+    return fighter;
+}
+
 function resolveObstacleEffects(fighters, obstacles) {
     let nextFighters = fighters.map((fighter) => ({ ...fighter }));
     const remainingObstacles = [];
 
     for (const obstacle of obstacles) {
-        if (obstacle.type !== "healthPack") {
+        if (obstacle.type !== "healthPack" && !isCenterObjectiveType(obstacle.type)) {
             remainingObstacles.push(obstacle);
+            continue;
+        }
+        if (isCenterObjectiveType(obstacle.type)) {
+            const capturedObstacle = updateCenterObjectiveCapture(obstacle, nextFighters);
+            const collectorIndex = centerObjectiveCollectorIndex(capturedObstacle, nextFighters);
+            if (collectorIndex === -1) {
+                remainingObstacles.push(capturedObstacle);
+                continue;
+            }
+            const targetIndex = nextFighters.findIndex((fighter, index) => index !== collectorIndex);
+            if (targetIndex >= 0) {
+                nextFighters[targetIndex] = applyCenterObjectiveEffect(
+                    nextFighters[targetIndex],
+                    capturedObstacle.type,
+                    nextFighters[targetIndex].lastPredictedAction,
+                );
+            }
             continue;
         }
         const collectorIndex = nextFighters.findIndex((fighter) => overlapsObstacle(fighter, obstacle));
@@ -868,9 +1397,9 @@ function resolveObstacleEffects(fighters, obstacles) {
             .filter((zone) => overlapsObstacle(fighter, zone))
             .map((zone) => zone.id);
         const entered = currentZoneIds.some((id) => !previousZoneIds.has(id));
+        const damaged = entered ? applyDamageToShape(fighter, DAMAGE_ZONE_ENTRY_DAMAGE) : fighter;
         return {
-            ...fighter,
-            hp: entered ? Math.max(0, (fighter.hp ?? MELEE_HP) - DAMAGE_ZONE_ENTRY_DAMAGE) : fighter.hp,
+            ...damaged,
             damageZoneIds: currentZoneIds,
             inDamageZone: currentZoneIds.length > 0,
         };
@@ -879,15 +1408,29 @@ function resolveObstacleEffects(fighters, obstacles) {
     return { fighters: nextFighters, obstacles: remainingObstacles };
 }
 
+function applyCenterObjectiveEffect(target, type, predictedAction) {
+    if (type === RADAR_JAMMER_TYPE) {
+        return { ...target, jammedMs: CENTER_EFFECT_DURATION_MS };
+    }
+    if (type === COMMAND_LOCK_TYPE) {
+        return {
+            ...target,
+            commandLockedMs: CENTER_EFFECT_DURATION_MS,
+            commandLockAction: predictedAction ?? target.commandLockAction ?? null,
+        };
+    }
+    return target;
+}
+
 function buildDeterministicLogicAction(configuration, stateSnapshot) {
     const plan = selectMeleeStrategyActionPlan(configuration, stateSnapshot);
     const movementBlock = plan.movement ?? plan.dashMovement ?? null;
-    const facingBlock = plan.rotation ?? plan.swing ?? plan.block ?? plan.grenade;
+    const facingBlock = plan.rotation ?? plan.swing ?? plan.block ?? plan.grenade ?? plan.fireball ?? plan.stun;
     const movementTarget = resolveActionTarget(stateSnapshot, movementBlock?.actionTarget);
     const facingTarget = resolveActionTarget(stateSnapshot, facingBlock?.actionTarget ?? movementBlock?.actionTarget);
     const movement = movementVectorForAction(movementBlock?.action ?? "move_stop", stateSnapshot.playerModel, movementTarget);
     const turnAction = facingBlock?.action ?? "move_stop";
-    const shouldTurn = turnAction === "rotate_toward_enemy" || turnAction === "swing" || turnAction === "block" || turnAction === "throw_grenade";
+    const shouldTurn = turnAction === "rotate_toward_enemy" || turnAction === "swing" || turnAction === "block" || turnAction === "throw_grenade" || turnAction === "shoot_fireball" || turnAction === "stun";
     return {
         dx: movement.dx,
         dy: movement.dy,
@@ -896,20 +1439,43 @@ function buildDeterministicLogicAction(configuration, stateSnapshot) {
         block: plan.block?.action === "block" ? 1 : 0,
         gun: plan.gun?.action === "fire_gun" ? 1 : 0,
         grenade: plan.grenade?.action === "throw_grenade" ? 1 : 0,
+        fireball: plan.fireball?.action === "shoot_fireball" ? 1 : 0,
+        stun: plan.stun?.action === "stun" ? 1 : 0,
         dash: plan.dash?.action?.startsWith("dash") ? 1 : 0,
+    };
+}
+
+function commandLockedAction(fighter, predicted) {
+    if (!fighter || (fighter.commandLockedMs ?? 0) <= 0 || !fighter.commandLockAction) return predicted;
+    const locked = fighter.commandLockAction;
+    const dashNow = (predicted.dash ?? 0) > 0.5;
+    return {
+        dx: dashNow ? predicted.dx : locked.dx,
+        dy: dashNow ? predicted.dy : locked.dy,
+        dRot: locked.dRot,
+        swing: locked.swing,
+        block: predicted.block,
+        gun: locked.gun,
+        grenade: predicted.grenade,
+        fireball: locked.fireball,
+        stun: predicted.stun,
+        dash: predicted.dash,
     };
 }
 
 function resolveActionTarget(stateSnapshot, actionTarget = "opponent") {
     const objects = Array.isArray(stateSnapshot?.objects) ? stateSnapshot.objects : [];
-    if (actionTarget && actionTarget !== "opponent") {
-        return objects.find((object) => object.id === actionTarget) ?? null;
-    }
-    return objects.find((object) => object.type === "opponentModel") ?? null;
+    const opponent = objects.find((object) => object.type === "opponentModel") ?? null;
+    return resolveMeleeStrategyTarget({
+        player: stateSnapshot?.playerModel,
+        opponent,
+        objects,
+        obstacles: objects,
+    }, actionTarget ?? "opponent");
 }
 
 function movementVectorForAction(action, player, target) {
-    if (!player || action === "move_stop" || action === "rotate_toward_enemy" || action === "swing" || action === "block" || action === "fire_gun" || action === "throw_grenade") {
+    if (!player || action === "move_stop" || action === "rotate_toward_enemy" || action === "swing" || action === "block" || action === "fire_gun" || action === "throw_grenade" || action === "shoot_fireball" || action === "stun") {
         return { dx: 0, dy: 0 };
     }
     if (action === "move_center") {
@@ -966,6 +1532,8 @@ function idleAction() {
         block: 0,
         gun: 0,
         grenade: 0,
+        fireball: 0,
+        stun: 0,
         dash: 0,
     };
 }
@@ -976,6 +1544,7 @@ export default function BetaModel({
     onFinishMatch = null,
     onSurrenderMatch = null
 }) {
+    const navigate = useNavigate();
     const matchId = matchContext?.matchId;
     const matchUserId = matchContext?.player?.userId;
     const isMatchTraining = Boolean(matchId && matchUserId);
@@ -993,9 +1562,13 @@ export default function BetaModel({
     const [isBaseTraining] = useState(false);
     const [baseCandidate] = useState(null);
     const [baseExportState] = useState("idle");
-    const [isEditingArena, setIsEditingArena] = useState(true);
+    const [isEditingArena, setIsEditingArena] = useState(() => !isMatchTraining);
     const [trainingConfiguration, setTrainingConfiguration] = useState(() => (
-        sanitizeStrategyConfigurationForClass(loadStoredStrategyConfiguration(strategyStorageKey), selectedClass)
+        sanitizeStrategyConfigurationForClass(
+            matchContext?.roundBrains?.at(-1)?.brain
+                ?? loadStoredStrategyConfiguration(strategyStorageKey),
+            selectedClass,
+        )
     ));
     const [opponentTrainingConfiguration, setOpponentTrainingConfiguration] = useState(() => (
         sanitizeStrategyConfigurationForClass(loadStoredStrategyConfiguration(opponentStrategyStorageKey), opponentSelectedClass)
@@ -1008,6 +1581,7 @@ export default function BetaModel({
         : localStorage.getItem(SESSION_KEY));
     const [submittedModelId, setSubmittedModelId] = useState(null);
     const [isFinishingMatch, setIsFinishingMatch] = useState(false);
+    const [targetObstacleObjects, setTargetObstacleObjects] = useState(() => targetObstacleShapes(buildInitialArenaShapes(matchContext)));
     const [trainingRemaining, setTrainingRemaining] = useState(() =>
         secondsRemaining(matchContext?.trainingEndsAtMs ?? matchContext?.trainingEndsAt));
 
@@ -1081,6 +1655,24 @@ export default function BetaModel({
         return () => window.clearTimeout(timeoutId);
     }, [matchContext?.opponent]);
 
+    useEffect(() => {
+        if (!isMatchTraining) return;
+        const matchObstacles = matchObstacleShapes(matchContext?.obstacles, true);
+        setTargetObstacleObjects(targetObstacleShapes(matchObstacles));
+        setShapes((prev) => [
+            ...prev.filter((shape) => !isObstacleType(shape.type)),
+            ...matchObstacles,
+        ]);
+    }, [isMatchTraining, matchContext?.obstacles]);
+
+    useEffect(() => {
+        if (isMatchTraining || isAutoPlaying || isStrategyTraining) return;
+        const catalogSource = hasArenaCheckpoint && arenaCheckpointShapesRef.current
+            ? arenaCheckpointShapesRef.current
+            : shapes;
+        setTargetObstacleObjects(targetObstacleShapes(catalogSource));
+    }, [hasArenaCheckpoint, isAutoPlaying, isMatchTraining, isStrategyTraining, shapes]);
+
     const fetchTrustedTrainingDuration = async (sessionId = trainingSessionId) => {
         if (!sessionId) return null;
 
@@ -1114,25 +1706,7 @@ export default function BetaModel({
         ));
         setShapes((prev) => prev.map((shape) => (
             shape.id === "main"
-                ? {
-                    ...shape,
-                    combatClass,
-                    hp: combatClassHp(combatClass),
-                    blockCooldownMs: 0,
-                    blockActiveMs: 0,
-                    blockCharges: combatClass === "melee" ? BLOCK_MAX_CHARGES : 0,
-                    blockRechargeMs: 0,
-                    gunCooldownMs: 0,
-                    gunActiveMs: 0,
-                    gunShotActive: false,
-                    gunAmmo: combatClass === "ranged" ? RANGED_AMMO_MAX : 0,
-                    gunReloadMs: 0,
-                    grenadeCooldownMs: 0,
-                    grenadeSerial: 1,
-                    thrownGrenade: null,
-                    movementVelocityX: 0,
-                    movementVelocityY: 0,
-                }
+                ? resetFighterShape({ ...shape, combatClass })
                 : shape
         )));
     };
@@ -1146,25 +1720,7 @@ export default function BetaModel({
         ));
         setShapes((prev) => prev.map((shape) => (
             shape.id === "opponent-model"
-                ? {
-                    ...shape,
-                    combatClass,
-                    hp: combatClassHp(combatClass),
-                    blockCooldownMs: 0,
-                    blockActiveMs: 0,
-                    blockCharges: combatClass === "melee" ? BLOCK_MAX_CHARGES : 0,
-                    blockRechargeMs: 0,
-                    gunCooldownMs: 0,
-                    gunActiveMs: 0,
-                    gunShotActive: false,
-                    gunAmmo: combatClass === "ranged" ? RANGED_AMMO_MAX : 0,
-                    gunReloadMs: 0,
-                    grenadeCooldownMs: 0,
-                    grenadeSerial: 1,
-                    thrownGrenade: null,
-                    movementVelocityX: 0,
-                    movementVelocityY: 0,
-                }
+                ? resetFighterShape({ ...shape, combatClass })
                 : shape
         )));
     };
@@ -1210,7 +1766,19 @@ export default function BetaModel({
                 grenadeCooldownMs: 0,
                 grenadeSerial: 1,
                 thrownGrenade: null,
-                dashCooldownMs: 0,
+                fireballCooldownMs: 0,
+                fireballActiveMs: 0,
+                fireballCharges: type === "opponentModel" && opponentSelectedClass === "mage" ? FIREBALL_CHARGES_MAX : 0,
+                fireballReloadMs: 0,
+                fireballSerial: 1,
+                thrownFireball: null,
+                stunCooldownMs: 0,
+                stunActiveMs: 0,
+                stunnedMs: 0,
+                stunCastActive: false,
+                dashCharges: type === "opponentModel" && opponentSelectedClass === "melee" ? DASH_MAX_CHARGES : 0,
+                dashRechargeMs: 0,
+                dashChargeRechargeMs: [],
                 dashActiveMs: 0,
                 dashDirectionX: 0,
                 dashDirectionY: 0,
@@ -1229,6 +1797,10 @@ export default function BetaModel({
             prev.map((s) => {
                 if (s.id !== id) return s;
                 if (s.locked) return s;
+                if ((s.type === PROJECTILE_WALL_TYPE || s.type === BOUNCY_WALL_TYPE)
+                    && updates.rotation !== undefined) {
+                    return { ...s, ...updates, rotation: snapWallRotation(updates.rotation) };
+                }
                 if (s.id === "main") {
                     const {
                         x,
@@ -1249,7 +1821,21 @@ export default function BetaModel({
                         grenadeCooldownMs,
                         grenadeSerial,
                         thrownGrenade,
-                        dashCooldownMs,
+                        fireballCooldownMs,
+                        fireballActiveMs,
+                        fireballCharges,
+                        fireballReloadMs,
+                        fireballSerial,
+                        thrownFireball,
+                        burnRemainingMs,
+                        burnTickMs,
+                        stunCooldownMs,
+                        stunActiveMs,
+                        stunnedMs,
+                        stunCastActive,
+                        dashCharges,
+                        dashRechargeMs,
+                        dashChargeRechargeMs,
                         dashActiveMs,
                         dashDirectionX,
                         dashDirectionY,
@@ -1265,7 +1851,14 @@ export default function BetaModel({
                         || gunCooldownMs !== undefined || gunActiveMs !== undefined || gunShotActive !== undefined
                         || gunAmmo !== undefined || gunReloadMs !== undefined
                         || grenadeCooldownMs !== undefined || grenadeSerial !== undefined || thrownGrenade !== undefined
-                        || dashCooldownMs !== undefined || dashActiveMs !== undefined
+                        || fireballCooldownMs !== undefined || fireballActiveMs !== undefined
+                        || fireballCharges !== undefined || fireballReloadMs !== undefined
+                        || fireballSerial !== undefined || thrownFireball !== undefined
+                        || burnRemainingMs !== undefined || burnTickMs !== undefined
+                        || stunCooldownMs !== undefined || stunActiveMs !== undefined
+                        || stunnedMs !== undefined || stunCastActive !== undefined
+                        || dashCharges !== undefined || dashRechargeMs !== undefined
+                        || dashChargeRechargeMs !== undefined || dashActiveMs !== undefined
                         || dashDirectionX !== undefined || dashDirectionY !== undefined
                         || movementVelocityX !== undefined || movementVelocityY !== undefined
                         || velocityX !== undefined || velocityY !== undefined)
@@ -1289,7 +1882,21 @@ export default function BetaModel({
                             grenadeCooldownMs: grenadeCooldownMs ?? s.grenadeCooldownMs,
                             grenadeSerial: grenadeSerial ?? s.grenadeSerial,
                             thrownGrenade: thrownGrenade ?? s.thrownGrenade,
-                            dashCooldownMs: dashCooldownMs ?? s.dashCooldownMs,
+                            fireballCooldownMs: fireballCooldownMs ?? s.fireballCooldownMs,
+                            fireballActiveMs: fireballActiveMs ?? s.fireballActiveMs,
+                            fireballCharges: fireballCharges ?? s.fireballCharges,
+                            fireballReloadMs: fireballReloadMs ?? s.fireballReloadMs,
+                            fireballSerial: fireballSerial ?? s.fireballSerial,
+                            thrownFireball: thrownFireball ?? s.thrownFireball,
+                            burnRemainingMs: burnRemainingMs ?? s.burnRemainingMs,
+                            burnTickMs: burnTickMs ?? s.burnTickMs,
+                            stunCooldownMs: stunCooldownMs ?? s.stunCooldownMs,
+                            stunActiveMs: stunActiveMs ?? s.stunActiveMs,
+                            stunnedMs: stunnedMs ?? s.stunnedMs,
+                            stunCastActive: stunCastActive ?? s.stunCastActive,
+                            dashCharges: dashCharges ?? s.dashCharges,
+                            dashRechargeMs: dashRechargeMs ?? s.dashRechargeMs,
+                            dashChargeRechargeMs: dashChargeRechargeMs ?? s.dashChargeRechargeMs,
                             dashActiveMs: dashActiveMs ?? s.dashActiveMs,
                             dashDirectionX: dashDirectionX ?? s.dashDirectionX,
                             dashDirectionY: dashDirectionY ?? s.dashDirectionY,
@@ -1328,82 +1935,14 @@ export default function BetaModel({
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [handleDeleteSelectedShape, isEditingArena, selectedId, shapes]);
 
-    const buildStatePayload = (currentShapes, actorId = "main") => {
-        const main = currentShapes.find((s) => s.id === actorId);
-        return {
-            selectedClass,
-            playerModel: {
-                x: Math.round(main.x),
-                y: Math.round(main.y),
-                rotation: Math.round(main.rotation ?? 0),
-                swingAvailable: (main.swingCooldownMs ?? 0) <= 0,
-                swingCooldownRemainingMs: Math.round(main.swingCooldownMs ?? 0),
-                blockAvailable: (main.blockCharges ?? 0) > 0,
-                blockActive: (main.blockActiveMs ?? 0) > 0,
-                blockActiveRemainingMs: (main.blockActiveMs ?? 0) > 0 ? 1 : 0,
-                blockCooldownRemainingMs: Math.max(0, BLOCK_RECHARGE_MS - Math.round(main.blockRechargeMs ?? main.blockCooldownMs ?? 0)),
-                blockCharges: main.blockCharges ?? 0,
-                combatClass: main.combatClass ?? selectedClass,
-                gunAvailable: (main.combatClass ?? selectedClass) === "ranged"
-                    && (main.gunAmmo ?? RANGED_AMMO_MAX) > 0
-                    && (main.gunReloadMs ?? 0) <= 0
-                    && (main.gunCooldownMs ?? 0) <= 0
-                    && (main.gunActiveMs ?? 0) <= 0,
-                gunActive: (main.gunActiveMs ?? 0) > 0,
-                gunCooldownRemainingMs: Math.round(main.gunCooldownMs ?? 0),
-                gunAmmo: main.gunAmmo ?? ((main.combatClass ?? selectedClass) === "ranged" ? RANGED_AMMO_MAX : 0),
-                gunReloadRemainingMs: Math.round(main.gunReloadMs ?? 0),
-                grenadeAvailable: (main.combatClass ?? selectedClass) === "ranged" && (main.grenadeCooldownMs ?? 0) <= 0,
-                grenadeCooldownRemainingMs: Math.round(main.grenadeCooldownMs ?? 0),
-                hp: main.hp ?? MELEE_HP,
-                size: main.size,
-                dashAvailable: combatClassConfig(main.combatClass ?? selectedClass).actionIds.includes("dash")
-                    && (main.dashCooldownMs ?? 0) <= 0 && (main.dashActiveMs ?? 0) <= 0,
-                dashActive: (main.dashActiveMs ?? 0) > 0,
-                dashCooldownRemainingMs: Math.round(main.dashCooldownMs ?? 0),
-            },
-            objects: currentShapes
-                .filter((s) => s.id !== actorId)
-                .map((s) => ({
-                    id: s.id,
-                    ownerId: s.ownerId,
-                    type: s.id === "main" && actorId !== "main" ? "opponentModel" : s.type,
-                    x: Math.round(s.x),
-                    y: Math.round(s.y),
-                    size: s.size,
-                    rotation: Math.round(s.rotation),
-                    combatClass: s.combatClass,
-                    hp: s.hp ?? MELEE_HP,
-                    swingActive: (s.swingActiveMs ?? 0) > 0,
-                    swingAvailable: (s.swingCooldownMs ?? 0) <= 0,
-                    swingCooldownRemainingMs: Math.round(s.swingCooldownMs ?? 0),
-                    blockActive: (s.blockActiveMs ?? 0) > 0,
-                    blockAvailable: (s.blockCharges ?? 0) > 0,
-                    blockCooldownRemainingMs: Math.max(0, BLOCK_RECHARGE_MS - Math.round(s.blockRechargeMs ?? s.blockCooldownMs ?? 0)),
-                    blockCharges: s.blockCharges ?? 0,
-                    gunActive: (s.gunActiveMs ?? 0) > 0,
-                    gunAvailable: s.combatClass === "ranged"
-                        && (s.gunAmmo ?? RANGED_AMMO_MAX) > 0
-                        && (s.gunReloadMs ?? 0) <= 0
-                        && (s.gunCooldownMs ?? 0) <= 0
-                        && (s.gunActiveMs ?? 0) <= 0,
-                    gunCooldownRemainingMs: Math.round(s.gunCooldownMs ?? 0),
-                    gunAmmo: s.gunAmmo ?? (s.combatClass === "ranged" ? RANGED_AMMO_MAX : 0),
-                    gunReloadRemainingMs: Math.round(s.gunReloadMs ?? 0),
-                    grenadeAvailable: s.combatClass === "ranged" && (s.grenadeCooldownMs ?? 0) <= 0,
-                    grenadeCooldownRemainingMs: Math.round(s.grenadeCooldownMs ?? 0),
-                    dashActive: (s.dashActiveMs ?? 0) > 0,
-                    dashAvailable: combatClassConfig(s.combatClass).actionIds.includes("dash")
-                        && (s.dashCooldownMs ?? 0) <= 0 && (s.dashActiveMs ?? 0) <= 0,
-                    dashCooldownRemainingMs: Math.round(s.dashCooldownMs ?? 0),
-                    velocityX: s.velocityX ?? 0,
-                    velocityY: s.velocityY ?? 0,
-                })),
-        };
-    };
-
     const runAutoPlay = () => {
         if (isAutoPlaying) return;
+        if (!isMatchTraining) {
+            const catalogSource = hasArenaCheckpoint && arenaCheckpointShapesRef.current
+                ? arenaCheckpointShapesRef.current
+                : shapes;
+            setTargetObstacleObjects(targetObstacleShapes(catalogSource));
+        }
         setIsEditingArena(false);
         setIsAutoPlaying(true);
         setSelectedId(null);
@@ -1411,39 +1950,57 @@ export default function BetaModel({
 
         autoIntervalRef.current = setInterval(() => {
             setShapes((prevShapes) => {
-                const stateSnapshot = buildStatePayload(prevShapes);
-                const playerAction = buildDeterministicLogicAction(trainingConfiguration, stateSnapshot);
+                const stateSnapshot = buildStatePayload(prevShapes, selectedClass);
                 const mainBefore = prevShapes.find((s) => s.id === "main");
                 const opponentBefore = prevShapes.find((s) => s.id === "opponent-model");
-                const opponentAction = opponentBefore && hasStrategyActions(opponentTrainingConfiguration)
-                    ? buildDeterministicLogicAction(opponentTrainingConfiguration, buildStatePayload(prevShapes, "opponent-model"))
+                const playerPredictedAction = buildDeterministicLogicAction(trainingConfiguration, stateSnapshot);
+                const opponentPredictedAction = opponentBefore && hasStrategyActions(opponentTrainingConfiguration)
+                    ? buildDeterministicLogicAction(opponentTrainingConfiguration, buildStatePayload(prevShapes, selectedClass, "opponent-model"))
                     : idleAction();
+                const playerAction = commandLockedAction(mainBefore, playerPredictedAction);
+                const opponentAction = commandLockedAction(opponentBefore, opponentPredictedAction);
 
-                let mainAfter = applyActionToShape(mainBefore, playerAction, AUTO_STEP_MS);
+                let mainAfter = applyActionToShape({ ...mainBefore, lastPredictedAction: playerPredictedAction }, playerAction, AUTO_STEP_MS);
                 let opponentAfter = opponentBefore
-                    ? applyActionToShape(opponentBefore, opponentAction, AUTO_STEP_MS)
+                    ? applyActionToShape({ ...opponentBefore, lastPredictedAction: opponentPredictedAction }, opponentAction, AUTO_STEP_MS)
                     : null;
                 let grenadeShapes = prevShapes.filter((shape) => shape.type === "grenade" || shape.type === "grenadeExplosion");
                 grenadeShapes.push(...[mainAfter.thrownGrenade, opponentAfter?.thrownGrenade].filter(Boolean));
+                let fireballShapes = prevShapes.filter((shape) => shape.type === "fireball");
+                fireballShapes.push(...[mainAfter.thrownFireball, opponentAfter?.thrownFireball].filter(Boolean));
                 mainAfter = { ...mainAfter, thrownGrenade: null };
+                mainAfter = { ...mainAfter, thrownFireball: null };
                 if (opponentAfter) opponentAfter = { ...opponentAfter, thrownGrenade: null };
+                if (opponentAfter) opponentAfter = { ...opponentAfter, thrownFireball: null };
 
                 let obstacleShapes = prevShapes.filter((shape) => isObstacleType(shape.type));
                 if (opponentAfter) {
                     const resolved = resolveObstacleEffects([mainAfter, opponentAfter], obstacleShapes);
                     [mainAfter, opponentAfter] = resolved.fighters;
                     obstacleShapes = resolved.obstacles;
-                    [mainAfter, opponentAfter] = resolveCombatDamage(mainAfter, opponentAfter);
-                    const grenadeUpdate = updateGrenades(grenadeShapes, [mainAfter, opponentAfter]);
+                    [mainAfter, opponentAfter, obstacleShapes] = resolveCombatDamage(mainAfter, opponentAfter, obstacleShapes);
+                    const grenadeUpdate = updateGrenades(grenadeShapes, [mainAfter, opponentAfter], obstacleShapes);
+                    obstacleShapes = grenadeUpdate.obstacles;
                     [mainAfter, opponentAfter] = applyGrenadeExplosionDamage([mainAfter, opponentAfter], grenadeUpdate.explosions);
                     grenadeShapes = [...grenadeUpdate.grenades, ...grenadeUpdate.explosions];
+                    const fireballUpdate = updateFireballs(fireballShapes, [mainAfter, opponentAfter], obstacleShapes);
+                    obstacleShapes = fireballUpdate.obstacles;
+                    [mainAfter, opponentAfter] = applyFireballHits([mainAfter, opponentAfter], fireballUpdate.hits);
+                    [mainAfter, opponentAfter] = applyStunHits([mainAfter, opponentAfter]);
+                    fireballShapes = fireballUpdate.fireballs;
                 } else {
                     const resolved = resolveObstacleEffects([mainAfter], obstacleShapes);
                     [mainAfter] = resolved.fighters;
                     obstacleShapes = resolved.obstacles;
-                    const grenadeUpdate = updateGrenades(grenadeShapes, [mainAfter]);
+                    const grenadeUpdate = updateGrenades(grenadeShapes, [mainAfter], obstacleShapes);
+                    obstacleShapes = grenadeUpdate.obstacles;
                     [mainAfter] = applyGrenadeExplosionDamage([mainAfter], grenadeUpdate.explosions);
                     grenadeShapes = [...grenadeUpdate.grenades, ...grenadeUpdate.explosions];
+                    const fireballUpdate = updateFireballs(fireballShapes, [mainAfter], obstacleShapes);
+                    obstacleShapes = fireballUpdate.obstacles;
+                    [mainAfter] = applyFireballHits([mainAfter], fireballUpdate.hits);
+                    [mainAfter] = applyStunHits([mainAfter]);
+                    fireballShapes = fireballUpdate.fireballs;
                 }
                 const obstacleById = new Map(obstacleShapes.map((shape) => [shape.id, shape]));
 
@@ -1451,11 +2008,11 @@ export default function BetaModel({
                     if (s.id === "main") return mainAfter;
                     if (s.id === "opponent-model" && opponentAfter) return opponentAfter;
                     if (isObstacleType(s.type)) return obstacleById.get(s.id) ?? null;
-                    if (s.type === "grenade" || s.type === "grenadeExplosion") return null;
+                    if (s.type === "grenade" || s.type === "grenadeExplosion" || s.type === "fireball") return null;
                     return tickCombat(s, AUTO_STEP_MS);
                 }).filter(Boolean);
 
-                return [...nextShapes, ...grenadeShapes];
+                return [...nextShapes, ...grenadeShapes, ...fireballShapes];
             });
         }, AUTO_STEP_MS);
     };
@@ -1472,6 +2029,7 @@ export default function BetaModel({
         setSelectedId(null);
         setShapes((prevShapes) => prevShapes
             .filter((shape) => shape.type !== "grenade" && shape.type !== "grenadeExplosion")
+            .filter((shape) => shape.type !== "fireball")
             .map((shape) => (shape.id === "main" || shape.id === "opponent-model")
                 ? resetFighterShape(shape)
                 : cloneShape(shape)));
@@ -1482,6 +2040,7 @@ export default function BetaModel({
     const handleSaveArenaCheckpoint = () => {
         if (isAutoPlaying || isStrategyTraining || isBaseTraining) return;
         arenaCheckpointShapesRef.current = cloneShapes(shapes);
+        setTargetObstacleObjects(targetObstacleShapes(arenaCheckpointShapesRef.current));
         setHasArenaCheckpoint(true);
         setSubmitStatus({ ok: true, message: "Training checkpoint saved." });
         setTimeout(() => setSubmitStatus(null), 2500);
@@ -1492,7 +2051,9 @@ export default function BetaModel({
         stopAutoPlay();
         setIsEditingArena(true);
         setSelectedId(null);
-        setShapes(cloneShapes(arenaCheckpointShapesRef.current));
+        const checkpointShapes = cloneShapes(arenaCheckpointShapesRef.current);
+        setTargetObstacleObjects(targetObstacleShapes(checkpointShapes));
+        setShapes(checkpointShapes);
         setSubmitStatus({ ok: true, message: "Restored training checkpoint." });
         setTimeout(() => setSubmitStatus(null), 2500);
     };
@@ -1504,7 +2065,11 @@ export default function BetaModel({
         stopAutoPlay();
         setIsEditingArena(true);
         setSelectedId(null);
-        setShapes(resetArenaStartShapes(cloneShapes(originalShapes), selectedClass, opponentSelectedClass));
+        const resetShapes = resetArenaStartShapes(cloneShapes(originalShapes), selectedClass, opponentSelectedClass);
+        arenaCheckpointShapesRef.current = null;
+        setHasArenaCheckpoint(false);
+        setTargetObstacleObjects(targetObstacleShapes(resetShapes));
+        setShapes(resetShapes);
         setSubmitStatus({ ok: true, message: "Arena reset to the original start." });
         setTimeout(() => setSubmitStatus(null), 2500);
     };
@@ -1701,10 +2266,15 @@ export default function BetaModel({
             )}
 
             <header className="flex items-center justify-between px-6 h-[52px] bg-arena-panel border-b border-border-lo flex-shrink-0">
-                <div className="flex items-center gap-3">
+                <button
+                    type="button"
+                    onClick={() => navigate("/home")}
+                    className="flex items-center gap-3 text-left hover:text-cyan-100"
+                    aria-label="Go to home"
+                >
                     <span className="text-xl text-cyan leading-none">M</span>
                     <span className="font-ui text-lg font-bold tracking-[0.15em] text-ink-white">MACHINER</span>
-                </div>
+                </button>
 
                 <div className="flex items-center gap-4">
                     {isMatchTraining && (
@@ -1748,21 +2318,22 @@ export default function BetaModel({
             </header>
 
             <div className="flex min-h-0 flex-1 overflow-hidden">
-                <Toolbar
-                    onAddShape={handleAddShape}
-                    onSelectMain={() => setSelectedId("main")}
-                    onDeleteSelected={handleDeleteSelectedShape}
-                    selectedId={selectedId}
-                    submitStatus={submitStatus}
-                    obstacleCount={shapes.filter((shape) => isObstacleType(shape.type)).length}
-                    obstaclesLocked={isMatchTraining}
-                    canDeleteSelected={canDeleteSelectedShape}
-                />
+                {!isMatchTraining && (
+                    <Toolbar
+                        onAddShape={handleAddShape}
+                        onSelectMain={() => setSelectedId("main")}
+                        onDeleteSelected={handleDeleteSelectedShape}
+                        selectedId={selectedId}
+                        submitStatus={submitStatus}
+                        obstacleCount={shapes.filter((shape) => isObstacleType(shape.type)).length}
+                        canDeleteSelected={canDeleteSelectedShape}
+                    />
+                )}
 
                 <main className="min-w-0 flex-1 flex items-center justify-center bg-arena-deep overflow-auto p-6">
                     <div
-                        className="relative"
-                        style={{ width: CANVAS_SIZE, height: CANVAS_SIZE }}
+                        className="relative w-full"
+                        style={{ maxWidth: DISPLAY_ARENA_MAX_SIZE }}
                     >
                         <Canvas
                             shapes={shapes}
@@ -1770,6 +2341,7 @@ export default function BetaModel({
                             onSelectShape={isEditingArena ? setSelectedId : () => { }}
                             onUpdateShape={isEditingArena ? handleUpdateShape : () => { }}
                             onDeselectAll={isEditingArena ? () => setSelectedId(null) : () => { }}
+                            editable={isEditingArena}
                         />
                     </div>
                 </main>
@@ -1793,7 +2365,8 @@ export default function BetaModel({
                     trainingRemaining={trainingRemaining}
                     playerRoundWins={playerRoundWins}
                     opponentRoundWins={opponentRoundWins}
-                    obstacleCount={shapes.filter((shape) => isObstacleType(shape.type)).length}
+                    obstacleCount={targetObstacleObjects.length}
+                    obstacleObjects={targetObstacleObjects}
                     isAutoPlaying={isAutoPlaying}
                     hasArenaCheckpoint={hasArenaCheckpoint}
                     isBaseTraining={isBaseTraining}

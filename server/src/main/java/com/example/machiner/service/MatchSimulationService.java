@@ -23,6 +23,10 @@ public class MatchSimulationService {
     private static final int ARENA_SIZE = 800;
     private static final int FIGHTER_SIZE = 60;
     private static final int SIMULATION_DURATION_MS = 30_000;
+    private static final double SLOT_ONE_X = ARENA_SIZE / 2.0;
+    private static final double SLOT_ONE_Y = 120.0;
+    private static final double SLOT_TWO_X = ARENA_SIZE / 2.0;
+    private static final double SLOT_TWO_Y = ARENA_SIZE - 120.0;
 
     private final JsonMapper jsonMapper;
     private final DuelSimulationService duelSimulationService;
@@ -70,7 +74,7 @@ public class MatchSimulationService {
 
     private List<ObstacleRequest> toObstacleRequests(List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
         if (obstacles == null || obstacles.isEmpty()) {
-            return null;
+            return List.of();
         }
         return obstacles.stream()
                 .map(obstacle -> new ObstacleRequest(
@@ -78,19 +82,19 @@ public class MatchSimulationService {
                         obstacle.type(),
                         obstacle.x(),
                         obstacle.y(),
-                        obstacle.size()))
+                        obstacle.size(),
+                        obstacle.rotation()))
                 .toList();
     }
 
     private DuelFighterRequest toFighterRequest(MatchPlayer player, ModelSubmission submission) {
-        double x = player.slot() == 1 ? 240.0 : 560.0;
         return new DuelFighterRequest(
                 player.userId(),
                 player.username(),
                 player.slot(),
-                x,
-                ARENA_SIZE / 2.0,
-                player.slot() == 1 ? 0.0 : 180.0,
+                player.slot() == 1 ? SLOT_ONE_X : SLOT_TWO_X,
+                player.slot() == 1 ? SLOT_ONE_Y : SLOT_TWO_Y,
+                player.slot() == 1 ? 90.0 : 270.0,
                 FIGHTER_SIZE,
                 hasText(submission != null ? submission.getSelectedClass() : null)
                         ? submission.getSelectedClass()
@@ -119,9 +123,9 @@ public class MatchSimulationService {
                         player.userId(),
                         player.username(),
                         player.slot(),
-                        player.slot() == 1 ? 240.0 : 560.0,
-                        ARENA_SIZE / 2.0,
-                        player.slot() == 1 ? 0 : 180,
+                        player.slot() == 1 ? SLOT_ONE_X : SLOT_TWO_X,
+                        player.slot() == 1 ? SLOT_ONE_Y : SLOT_TWO_Y,
+                        player.slot() == 1 ? 90 : 270,
                         100,
                         hasText(player.selectedClass()) ? player.selectedClass() : "melee",
                         false,

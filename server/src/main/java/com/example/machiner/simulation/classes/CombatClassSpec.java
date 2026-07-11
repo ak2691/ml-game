@@ -30,11 +30,27 @@ public interface CombatClassSpec {
         return false;
     }
 
+    default int dashMaxCharges() {
+        return 0;
+    }
+
+    default int dashRechargeMs() {
+        return 0;
+    }
+
     default boolean canFireGun() {
         return false;
     }
 
     default boolean canThrowGrenade() {
+        return false;
+    }
+
+    default boolean canShootFireball() {
+        return false;
+    }
+
+    default boolean canStun() {
         return false;
     }
 
@@ -80,5 +96,65 @@ public interface CombatClassSpec {
 
     default int grenadeDamage(double nearestBodyDistance) {
         return 0;
+    }
+
+    default int fireballCooldownMs() {
+        return 0;
+    }
+
+    default int fireballActiveMs() {
+        return 0;
+    }
+
+    default int fireballChargesMax() {
+        return 0;
+    }
+
+    default int fireballReloadMs() {
+        return 0;
+    }
+
+    default double fireballRange() {
+        return 0.0;
+    }
+
+    default int fireballDamage() {
+        return 0;
+    }
+
+    default int fireballBurnDamage() {
+        return 0;
+    }
+
+    default int fireballBurnDurationMs() {
+        return 0;
+    }
+
+    default int fireballBurnTickMs() {
+        return 0;
+    }
+
+    default int stunCooldownMs() {
+        return 0;
+    }
+
+    default int stunActiveMs() {
+        return 0;
+    }
+
+    default int stunDamage() {
+        return 0;
+    }
+
+    default int stunDurationMs() {
+        return 0;
+    }
+
+    default double stunRange() {
+        return 0.0;
+    }
+
+    default double stunArcDegrees() {
+        return 0.0;
     }
 }

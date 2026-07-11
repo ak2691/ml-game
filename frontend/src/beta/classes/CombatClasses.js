@@ -1,5 +1,6 @@
 import { MELEE_CLASS } from "./MeleeClass.jsx";
 import { RANGED_CLASS } from "./RangedClass.jsx";
+import { MAGE_CLASS } from "./MageClass.jsx";
 
 export const COMMON_ACTION_IDS = Object.freeze([
     "move_inward",
@@ -26,6 +27,7 @@ export const COMMON_ACTION_IDS = Object.freeze([
 export const COMBAT_CLASSES = Object.freeze({
     [MELEE_CLASS.id]: MELEE_CLASS,
     [RANGED_CLASS.id]: RANGED_CLASS,
+    [MAGE_CLASS.id]: MAGE_CLASS,
 });
 
 export function combatClassConfig(combatClass) {

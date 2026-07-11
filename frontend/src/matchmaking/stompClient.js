@@ -33,6 +33,7 @@ export function createMatchmakingClient({ onEvent, onStatus }) {
     let socket = null;
     let connected = false;
     let subscriptionId = 0;
+    const websocketHost = new URL(API_BASE_URL).host;
 
     const sendFrame = (command, headers = {}, body = "") => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -47,6 +48,7 @@ export function createMatchmakingClient({ onEvent, onStatus }) {
             socket.addEventListener("open", () => {
                 sendFrame("CONNECT", {
                     "accept-version": "1.2",
+                    host: websocketHost,
                     "heart-beat": "0,0",
                 });
             });
@@ -68,6 +70,7 @@ export function createMatchmakingClient({ onEvent, onStatus }) {
                     }
                     if (parsed.command === "ERROR") {
                         onStatus?.("ERROR");
+                        socket?.close();
                     }
                 }
             });
@@ -99,6 +102,14 @@ export function createMatchmakingClient({ onEvent, onStatus }) {
                 "SEND",
                 { destination: "/app/matchmaking.selectClass", "content-type": "application/json" },
                 JSON.stringify({ selectedClass })
+            );
+        },
+        placeObjects(objects) {
+            if (!connected) return;
+            sendFrame(
+                "SEND",
+                { destination: "/app/matchmaking.placeObjects", "content-type": "application/json" },
+                JSON.stringify({ objects })
             );
         },
         surrender() {

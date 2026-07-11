@@ -12,7 +12,7 @@ public class MeleeClassSpec implements CombatClassSpec {
 
     @Override
     public int maxHp() {
-        return 100;
+        return 125;
     }
 
     @Override
@@ -43,6 +43,16 @@ public class MeleeClassSpec implements CombatClassSpec {
     @Override
     public boolean canDash() {
         return true;
+    }
+
+    @Override
+    public int dashMaxCharges() {
+        return 2;
+    }
+
+    @Override
+    public int dashRechargeMs() {
+        return 4500;
     }
 
     @Override

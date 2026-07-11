@@ -1,4 +1,12 @@
-const MAX_OBSTACLES = 5;
+import {
+    BARRIER_TYPE,
+    COMMAND_LOCK_TYPE,
+    INHIBITION_TYPE,
+    OVERDRIVE_TYPE,
+    RADAR_JAMMER_TYPE,
+} from "./ArenaObjects.js";
+
+const MAX_OBSTACLES = 6;
 
 export default function Toolbar({
     onAddShape,
@@ -16,7 +24,13 @@ export default function Toolbar({
     ];
     const obstacles = [
         { type: "healthPack", label: "Health Pack", icon: "+" },
-        { type: "damageZone", label: "Damage Zone", icon: "!" },
+        { type: "projectileWall", label: "Projectile Wall", icon: "|" },
+        { type: "bouncyWall", label: "Bouncy Wall", icon: "/" },
+        { type: OVERDRIVE_TYPE, label: "Overdrive", icon: "OD" },
+        { type: BARRIER_TYPE, label: "Barrier", icon: "SH" },
+        { type: INHIBITION_TYPE, label: "Inhibition", icon: "IN" },
+        { type: RADAR_JAMMER_TYPE, label: "Radar Jammer", icon: "JX" },
+        { type: COMMAND_LOCK_TYPE, label: "Command Lock", icon: "LK" },
     ];
 
     const atLimit = obstacleCount >= MAX_OBSTACLES;

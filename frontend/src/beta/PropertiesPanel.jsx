@@ -10,6 +10,7 @@ export default function PropertiesPanel({ shape, onUpdate }) {
     }
 
     const isMain = shape.id === "main";
+    const isWall = shape.type === "projectileWall" || shape.type === "bouncyWall";
 
     return (
         <div className="w-48 flex-shrink-0 bg-arena-panel border-l border-border-lo p-4">
@@ -45,15 +46,17 @@ export default function PropertiesPanel({ shape, onUpdate }) {
                             onUpdate={(val) => onUpdate(shape.id, { size: val })}
                         />
                     </Row>
-                    <Row label="ROT">
-                        <SliderInput
-                            value={Math.round(shape.rotation)}
-                            min={0}
-                            max={360}
-                            onUpdate={(val) => onUpdate(shape.id, { rotation: val })}
-                            suffix="°"
-                        />
-                    </Row>
+                    {!isWall && (
+                        <Row label="ROT">
+                            <SliderInput
+                                value={Math.round(shape.rotation)}
+                                min={0}
+                                max={360}
+                                onUpdate={(val) => onUpdate(shape.id, { rotation: val })}
+                                suffix="°"
+                            />
+                        </Row>
+                    )}
                     <div className="h-px bg-border-lo my-3" />
                     <Row label="TYPE">
                         <span className="font-mono text-xs tracking-widest text-ink-mid">
@@ -77,13 +80,14 @@ function Row({ label, children }) {
     );
 }
 
-function SliderInput({ value, onUpdate, min, max, suffix = "" }) {
+function SliderInput({ value, onUpdate, min, max, step = 1, suffix = "" }) {
     return (
         <div className="flex items-center gap-2 flex-1 w-full">
             <input
                 type="range"
                 min={min}
                 max={max}
+                step={step}
                 value={value}
                 onChange={(e) => onUpdate(Number(e.target.value))}
                 // Removed appearance-none below so the slider thumb is actually visible!

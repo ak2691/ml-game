@@ -2,6 +2,8 @@ package com.example.machiner.controller;
 
 import com.example.machiner.DTO.MatchClassSelectionDTO;
 import com.example.machiner.DTO.MatchFinishDTO;
+import com.example.machiner.DTO.MatchObjectPlacementDTO;
+import com.example.machiner.DTO.MatchPlaybackDTO;
 import com.example.machiner.DTO.MatchmakingEventDTO;
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.repository.UserRepository;
@@ -9,6 +11,8 @@ import com.example.machiner.service.AuthException;
 import com.example.machiner.service.MatchmakingService;
 import com.example.machiner.service.MatchmakingService.OutboundMatchmakingEvent;
 import java.security.Principal;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -50,13 +54,27 @@ public class MatchmakingSocketController {
     @MessageMapping("/matchmaking.finish")
     public void finish(@Payload MatchFinishDTO payload, Principal principal) {
         AppUser user = requireUser(principal);
-        publish(matchmakingService.markFinished(user.getId(), payload == null ? null : payload.modelSubmissionId()));
+        List<OutboundMatchmakingEvent> events = matchmakingService.markFinished(user.getId(), payload == null ? null : payload.modelSubmissionId());
+        publish(events);
+        scheduleObjectPlacementTimeouts(events);
     }
 
     @MessageMapping("/matchmaking.selectClass")
     public void selectClass(@Payload MatchClassSelectionDTO payload, Principal principal) {
         AppUser user = requireUser(principal);
-        publish(matchmakingService.selectClass(user.getId(), payload == null ? null : payload.selectedClass()));
+        List<OutboundMatchmakingEvent> events = matchmakingService.selectClass(user.getId(), payload == null ? null : payload.selectedClass());
+        publish(events);
+        scheduleObjectPlacementTimeouts(events);
+    }
+
+    @MessageMapping("/matchmaking.placeObjects")
+    public void placeObjects(@Payload MatchObjectPlacementDTO payload, Principal principal) {
+        AppUser user = requireUser(principal);
+        List<OutboundMatchmakingEvent> events = matchmakingService.submitObjectPlacements(
+                user.getId(),
+                toPlaybackObjects(payload));
+        publish(events);
+        scheduleObjectPlacementTimeouts(events);
     }
 
     @MessageMapping("/matchmaking.surrender")
@@ -71,6 +89,22 @@ public class MatchmakingSocketController {
         }
         return userRepository.findByNormalizedEmail(principal.getName().trim().toLowerCase())
                 .orElseThrow(() -> new AuthException("authenticated user was not found"));
+    }
+
+    private List<MatchPlaybackDTO.ObstaclePlacementDTO> toPlaybackObjects(MatchObjectPlacementDTO payload) {
+        if (payload == null || payload.objects() == null) {
+            return List.of();
+        }
+        return payload.objects().stream()
+                .filter(object -> object != null)
+                .map(object -> new MatchPlaybackDTO.ObstaclePlacementDTO(
+                        object.id(),
+                        object.type(),
+                        object.x(),
+                        object.y(),
+                        object.size(),
+                        object.rotation()))
+                .toList();
     }
 
     private void publish(List<OutboundMatchmakingEvent> events) {
@@ -91,7 +125,25 @@ public class MatchmakingSocketController {
                 .map(MatchmakingEventDTO::matchId)
                 .distinct()
                 .forEach(matchId -> CompletableFuture.delayedExecutor(30, TimeUnit.SECONDS)
-                        .execute(() -> publish(matchmakingService.resolveClassSelectionTimeout(matchId))));
+                        .execute(() -> {
+                            List<OutboundMatchmakingEvent> timeoutEvents = matchmakingService.resolveClassSelectionTimeout(matchId);
+                            publish(timeoutEvents);
+                            scheduleObjectPlacementTimeouts(timeoutEvents);
+                        }));
+    }
+
+    private void scheduleObjectPlacementTimeouts(List<OutboundMatchmakingEvent> events) {
+        events.stream()
+                .map(OutboundMatchmakingEvent::event)
+                .filter(event -> "OBJECT_PLACEMENT".equals(event.status()))
+                .filter(event -> event.matchId() != null)
+                .forEach(event -> {
+                    long delayMillis = event.objectPlacementEndsAt() == null
+                            ? TimeUnit.SECONDS.toMillis(20)
+                            : Math.max(0, Duration.between(Instant.now(), event.objectPlacementEndsAt()).toMillis());
+                    CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS)
+                            .execute(() -> publish(matchmakingService.resolveObjectPlacementTimeout(event.matchId())));
+                });
     }
 
     private void publish(OutboundMatchmakingEvent event) {

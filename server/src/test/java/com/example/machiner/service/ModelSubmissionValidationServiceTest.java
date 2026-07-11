@@ -70,6 +70,54 @@ class ModelSubmissionValidationServiceTest {
     }
 
     @Test
+    void acceptsPositionAndBuffTimerExpressionConditions() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-blocks-v2",
+                  "blocks":[
+                    {
+                      "id":"block-1",
+                      "priority":1,
+                      "action":"move_center",
+                      "conditions":[
+                        {
+                          "type":"expression",
+                          "left":"my.x",
+                          "comparator":"lt",
+                          "right":{"type":"number","value":240}
+                        },
+                        {
+                          "type":"expression",
+                          "left":"opponent.y",
+                          "comparator":"gte",
+                          "right":{"type":"number","value":300}
+                        },
+                        {
+                          "type":"expression",
+                          "left":"my.overdriveMs",
+                          "comparator":"gt",
+                          "right":{"type":"number","value":2}
+                        },
+                        {
+                          "type":"expression",
+                          "left":"opponent.commandLockedMs",
+                          "comparator":"lte",
+                          "right":{"type":"number","value":1}
+                        }
+                      ]
+                    }
+                  ],
+                  "clusters":[]
+                }
+                """));
+
+        var result = service.validate(payload);
+
+        assertThat(result.isAccepted()).isTrue();
+    }
+
+    @Test
     void acceptsExpressionConditionsWithVariableComparisons() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setBrain(jsonMapper.readTree("""
@@ -89,6 +137,13 @@ class ModelSubmissionValidationServiceTest {
                         },
                         {
                           "type":"expression",
+                          "left":"my.x",
+                          "comparator":"gte",
+                          "right":{"type":"number","value":300}
+                        },
+                        {
+                          "type":"expression",
+                          "join":"or",
                           "left":"my.dashReady",
                           "comparator":"eq",
                           "right":{"type":"boolean","value":true}

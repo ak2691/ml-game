@@ -15,11 +15,16 @@ export const INTENT_TARGET_TYPES = Object.freeze([
     "none",
     "opponent",
     "opponent_grenade",
+    "opponent_fireball",
+    "object_center",
+    "object_buff_1",
+    "object_buff_2",
     "object_1",
     "object_2",
     "object_3",
     "object_4",
     "object_5",
+    "object_6",
 ]);
 
 export const MOVEMENT_STYLE_TYPES = Object.freeze([
@@ -96,7 +101,7 @@ const MOVEMENT_STYLE_BY_ACTION = Object.freeze({
 
 export function intentFromAction(actionId, actionTarget = "opponent") {
     const target = normalizeIntentTarget(actionTarget);
-    const objectTarget = target.startsWith("object_") || target === "opponent_grenade";
+    const objectTarget = target.startsWith("object_") || target === "opponent_grenade" || target === "opponent_fireball";
     const movementStyle = MOVEMENT_STYLE_BY_ACTION[actionId] ?? "stop";
     const dash = actionId?.startsWith("dash") ? 1 : 0;
 
@@ -112,7 +117,7 @@ export function intentFromAction(actionId, actionTarget = "opponent") {
     if (actionId === "move_stop") {
         return { ...DEFAULT_INTENT };
     }
-    if (actionId === "rotate_toward_enemy" || actionId === "swing" || actionId === "fire_gun" || actionId === "throw_grenade") {
+    if (actionId === "rotate_toward_enemy" || actionId === "swing" || actionId === "fire_gun" || actionId === "throw_grenade" || actionId === "shoot_fireball" || actionId === "stun") {
         return { intent: "attack_target", target, movementStyle: "stop", dash: 0 };
     }
     if (actionId === "block") {

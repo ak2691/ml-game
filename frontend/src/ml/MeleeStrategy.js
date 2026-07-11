@@ -1,4 +1,4 @@
-import { MAX_OBSTACLE_SLOTS, obstacleSlots } from "./Featurebuilder.js";
+import { MAX_OBSTACLE_SLOTS } from "./Featurebuilder.js";
 import { DEFAULT_INTENT, intentFromAction } from "./IntentFeatures.js";
 
 export const MELEE_STRATEGY_VERSION = "melee-logic-blocks-v2";
@@ -34,55 +34,75 @@ const TARGETLESS_DASH_ACTION_IDS = new Set([
 
 export const CONDITION_TYPES = Object.freeze([
     flagCondition("always", "Always", { group: "Basic" }),
-    thresholdCondition("enemy_distance_lt", "Target Distance <", 120, 0, 700, "px", { supportsTarget: true, group: "Target" }),
-    thresholdCondition("enemy_distance_gt", "Target Distance >", 120, 0, 700, "px", { supportsTarget: true, group: "Target" }),
-    thresholdCondition("my_edge_distance_lt", "My Distance From Edge <", 80, 0, 300, "px"),
-    thresholdCondition("my_edge_distance_gt", "My Distance From Edge >", 80, 0, 300, "px"),
-    thresholdCondition("target_edge_distance_lt", "Target Distance From Edge <", 80, 0, 300, "px", { supportsTarget: true, group: "Target" }),
-    thresholdCondition("target_edge_distance_gt", "Target Distance From Edge >", 80, 0, 300, "px", { supportsTarget: true, group: "Target" }),
-    flagCondition("enemy_attacking", "Opponent is Attacking", { group: "Opponent" }),
-    flagCondition("enemy_blocking", "Opponent is Blocking", { group: "Opponent" }),
-    flagCondition("enemy_rushing", "Opponent is Rushing", { group: "Opponent" }),
-    flagCondition("enemy_fleeing", "Opponent is Fleeing", { group: "Opponent" }),
-    thresholdCondition("my_hp_lt", "My HP <", 50, 1, 100, "HP", { group: "My Bot" }),
-    thresholdCondition("my_hp_gt", "My HP >", 50, 0, 99, "HP", { group: "My Bot" }),
-    thresholdCondition("enemy_hp_lt", "Opponent HP <", 50, 1, 100, "HP", { group: "Opponent" }),
-    thresholdCondition("enemy_hp_gt", "Opponent HP >", 50, 0, 99, "HP", { group: "Opponent" }),
+    flagCondition("my_jammed", "I am Jammed", { group: "My Bot" }),
+    flagCondition("my_command_locked", "I am Command Locked", { group: "My Bot" }),
+    flagCondition("opponent_jammed", "Opponent is Jammed", { group: "Opponent" }),
+    flagCondition("opponent_command_locked", "Opponent is Command Locked", { group: "Opponent" }),
     flagCondition("my_swing_ready", "My Swing is Ready", { group: "My Bot" }),
     flagCondition("my_swing_cooldown", "My Swing is on Cooldown", { group: "My Bot" }),
     flagCondition("my_block_ready", "My Block is Ready", { group: "My Bot" }),
     flagCondition("my_block_cooldown", "My Block is on Cooldown", { group: "My Bot" }),
     flagCondition("my_shield_up", "My Shield is Up", { group: "My Bot" }),
     flagCondition("my_shield_down", "My Shield is Down", { group: "My Bot" }),
-    thresholdCondition("my_shield_charges_lt", "My Shield Charges <", 3, 0, 5, "charges", { group: "My Bot" }),
-    thresholdCondition("my_shield_charges_gt", "My Shield Charges >", 2, 0, 5, "charges", { group: "My Bot" }),
     flagCondition("my_dash_ready", "My Dash is Ready", { group: "My Bot" }),
     flagCondition("my_dash_cooldown", "My Dash is on Cooldown", { group: "My Bot" }),
     flagCondition("my_fire_gun_ready", "My Fire Gun is Ready", { group: "My Bot" }),
     flagCondition("my_fire_gun_cooldown", "My Fire Gun is on Cooldown", { group: "My Bot" }),
     flagCondition("my_grenade_ready", "My Grenade is Ready", { group: "My Bot" }),
     flagCondition("my_grenade_cooldown", "My Grenade is on Cooldown", { group: "My Bot" }),
+    flagCondition("my_fireball_ready", "My Fireball is Ready", { group: "My Bot" }),
+    flagCondition("my_fireball_cooldown", "My Fireball is on Cooldown", { group: "My Bot" }),
+    flagCondition("my_stun_ready", "My Stun is Ready", { group: "My Bot" }),
+    flagCondition("my_stun_cooldown", "My Stun is on Cooldown", { group: "My Bot" }),
     flagCondition("opponent_swing_ready", "Opponent Swing is Ready", { group: "Opponent" }),
     flagCondition("opponent_swing_cooldown", "Opponent Swing is on Cooldown", { group: "Opponent" }),
     flagCondition("opponent_block_ready", "Opponent Block is Ready", { group: "Opponent" }),
     flagCondition("opponent_block_cooldown", "Opponent Block is on Cooldown", { group: "Opponent" }),
     flagCondition("opponent_shield_up", "Opponent Shield is Up", { group: "Opponent" }),
     flagCondition("opponent_shield_down", "Opponent Shield is Down", { group: "Opponent" }),
-    thresholdCondition("opponent_shield_charges_lt", "Opponent Shield Charges <", 3, 0, 5, "charges", { group: "Opponent" }),
-    thresholdCondition("opponent_shield_charges_gt", "Opponent Shield Charges >", 2, 0, 5, "charges", { group: "Opponent" }),
     flagCondition("opponent_dash_ready", "Opponent Dash is Ready", { group: "Opponent" }),
     flagCondition("opponent_dash_cooldown", "Opponent Dash is on Cooldown", { group: "Opponent" }),
     flagCondition("opponent_fire_gun_ready", "Opponent Fire Gun is Ready", { group: "Opponent" }),
     flagCondition("opponent_fire_gun_cooldown", "Opponent Fire Gun is on Cooldown", { group: "Opponent" }),
     flagCondition("opponent_grenade_ready", "Opponent Grenade is Ready", { group: "Opponent" }),
     flagCondition("opponent_grenade_cooldown", "Opponent Grenade is on Cooldown", { group: "Opponent" }),
+    flagCondition("opponent_fireball_ready", "Opponent Fireball is Ready", { group: "Opponent" }),
+    flagCondition("opponent_fireball_cooldown", "Opponent Fireball is on Cooldown", { group: "Opponent" }),
+    flagCondition("opponent_stun_ready", "Opponent Stun is Ready", { group: "Opponent" }),
+    flagCondition("opponent_stun_cooldown", "Opponent Stun is on Cooldown", { group: "Opponent" }),
     flagCondition("target_exists", "Target Object Exists", { supportsTarget: true, defaultTarget: "object_1", targetGroup: "objects", group: "Objects" }),
     flagCondition("target_missing", "Target Object Does Not Exist", { supportsTarget: true, defaultTarget: "object_1", targetGroup: "objects", group: "Objects" }),
     flagCondition("target_health_pack", "Target is Health Pack", { supportsTarget: true, defaultTarget: "object_1", group: "Objects" }),
     flagCondition("target_damage_zone", "Target is Damage Zone", { supportsTarget: true, defaultTarget: "object_1", group: "Objects" }),
+    flagCondition("target_projectile_wall", "Target is Projectile Wall", { supportsTarget: true, defaultTarget: "object_1", group: "Objects" }),
+    flagCondition("target_bouncy_wall", "Target is Bouncy Wall", { supportsTarget: true, defaultTarget: "object_1", group: "Objects" }),
     flagCondition("inside_damage_zone", "I am in a Damage Zone", { group: "Objects" }),
 ]);
 const LEGACY_CONDITION_TYPES = Object.freeze([
+    thresholdCondition("enemy_distance_lt", "Target Distance <", 120, 0, 700, "px", { supportsTarget: true, group: "Target" }),
+    thresholdCondition("enemy_distance_gt", "Target Distance >", 120, 0, 700, "px", { supportsTarget: true, group: "Target" }),
+    thresholdCondition("my_edge_distance_lt", "My Distance From Edge <", 80, 0, 300, "px"),
+    thresholdCondition("my_edge_distance_gt", "My Distance From Edge >", 80, 0, 300, "px"),
+    thresholdCondition("target_edge_distance_lt", "Target Distance From Edge <", 80, 0, 300, "px", { supportsTarget: true, group: "Target" }),
+    thresholdCondition("target_edge_distance_gt", "Target Distance From Edge >", 80, 0, 300, "px", { supportsTarget: true, group: "Target" }),
+    thresholdCondition("opponent_object_distance_lt", "Opponent Distance to Object <", 120, 0, 700, "px", { supportsTarget: true, defaultTarget: "object_1", targetGroup: "objects", group: "Objects" }),
+    thresholdCondition("opponent_object_distance_gt", "Opponent Distance to Object >", 120, 0, 700, "px", { supportsTarget: true, defaultTarget: "object_1", targetGroup: "objects", group: "Objects" }),
+    thresholdCondition("my_hp_lt", "My HP <", 50, 1, 100, "HP", { group: "My Bot" }),
+    thresholdCondition("my_hp_gt", "My HP >", 50, 0, 99, "HP", { group: "My Bot" }),
+    thresholdCondition("enemy_hp_lt", "Opponent HP <", 50, 1, 100, "HP", { group: "Opponent" }),
+    thresholdCondition("enemy_hp_gt", "Opponent HP >", 50, 0, 99, "HP", { group: "Opponent" }),
+    thresholdCondition("my_shield_charges_lt", "My Shield Charges <", 3, 0, 5, "charges", { group: "My Bot" }),
+    thresholdCondition("my_shield_charges_gt", "My Shield Charges >", 2, 0, 5, "charges", { group: "My Bot" }),
+    thresholdCondition("my_dash_charges_lt", "My Dash Charges <", 1, 0, 2, "charges", { group: "My Bot" }),
+    thresholdCondition("my_dash_charges_gt", "My Dash Charges >", 0, 0, 2, "charges", { group: "My Bot" }),
+    thresholdCondition("opponent_shield_charges_lt", "Opponent Shield Charges <", 3, 0, 5, "charges", { group: "Opponent" }),
+    thresholdCondition("opponent_shield_charges_gt", "Opponent Shield Charges >", 2, 0, 5, "charges", { group: "Opponent" }),
+    thresholdCondition("opponent_dash_charges_lt", "Opponent Dash Charges <", 1, 0, 2, "charges", { group: "Opponent" }),
+    thresholdCondition("opponent_dash_charges_gt", "Opponent Dash Charges >", 0, 0, 2, "charges", { group: "Opponent" }),
+    flagCondition("enemy_attacking", "Opponent is Attacking", { group: "Opponent" }),
+    flagCondition("enemy_blocking", "Opponent is Blocking", { group: "Opponent" }),
+    flagCondition("enemy_rushing", "Opponent is Rushing", { group: "Opponent" }),
+    flagCondition("enemy_fleeing", "Opponent is Fleeing", { group: "Opponent" }),
     thresholdCondition("my_cornered", "My Distance From Edge <", 80, 0, 300, "px"),
     thresholdCondition("enemy_cornered", "Target Distance From Edge <", 80, 0, 300, "px", { supportsTarget: true, group: "Target" }),
 ]);
@@ -112,6 +132,8 @@ export const ACTION_TYPES = Object.freeze([
     { id: "block", label: "Action: Raise Shield", head: "block" },
     { id: "fire_gun", label: "Action: Fire Gun", head: "gun" },
     { id: "throw_grenade", label: "Action: Throw Grenade", head: "grenade" },
+    { id: "shoot_fireball", label: "Action: Shoot Fireball", head: "fireball" },
+    { id: "stun", label: "Action: Stun", head: "stun" },
     { id: "no_dash", label: "Dash: Don't Dash", head: "dash" },
     { id: "dash", label: "Dash: Toward Target", head: "dash" },
     { id: "dash_outward", label: "Dash: Away from Target", head: "dash" },
@@ -136,6 +158,10 @@ const ACTION_BY_ID = new Map(ACTION_TYPES.map((action) => [action.id, action]));
 export const TARGET_TYPES = Object.freeze([
     { id: "opponent", label: "Opponent" },
     { id: "opponent_grenade", label: "Opponent's Grenade" },
+    { id: "opponent_fireball", label: "Closest Opponent Fireball" },
+    { id: "object_center", label: "Center Objective" },
+    { id: "object_buff_1", label: "Left Center Buff" },
+    { id: "object_buff_2", label: "Right Center Buff" },
     ...Array.from({ length: MAX_OBSTACLE_SLOTS }, (_, index) => ({
         id: `object_${index + 1}`,
         label: `Object ${index + 1}`,
@@ -154,41 +180,76 @@ export const CONDITION_COMPARATORS = Object.freeze([
 const COMPARATOR_BY_ID = new Map(CONDITION_COMPARATORS.map((comparator) => [comparator.id, comparator]));
 export const STATE_VARIABLES = Object.freeze([
     variableDefinition("my.hp", "My HP", "number", { group: "My Bot", min: 0, max: 100 }),
+    variableDefinition("my.x", "My X Position", "number", { group: "My Bot", min: 0, max: 800, suffix: "px" }),
+    variableDefinition("my.y", "My Y Position", "number", { group: "My Bot", min: 0, max: 800, suffix: "px" }),
     variableDefinition("opponent.hp", "Opponent HP", "number", { group: "Opponent", min: 0, max: 100 }),
+    variableDefinition("opponent.x", "Opponent X Position", "number", { group: "Opponent", min: 0, max: 800, suffix: "px" }),
+    variableDefinition("opponent.y", "Opponent Y Position", "number", { group: "Opponent", min: 0, max: 800, suffix: "px" }),
+    variableDefinition("my.overdriveMs", "My Overdrive Timer (seconds)", "number", { group: "My Bot", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("my.barrierMs", "My Barrier Timer (seconds)", "number", { group: "My Bot", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("my.slowedMs", "My Slow Timer (seconds)", "number", { group: "My Bot", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("my.jammedMs", "My Jammed Timer (seconds)", "number", { group: "My Bot", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("my.commandLockedMs", "My Command Lock Timer (seconds)", "number", { group: "My Bot", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("opponent.overdriveMs", "Opponent Overdrive Timer (seconds)", "number", { group: "Opponent", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("opponent.barrierMs", "Opponent Barrier Timer (seconds)", "number", { group: "Opponent", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("opponent.slowedMs", "Opponent Slow Timer (seconds)", "number", { group: "Opponent", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("opponent.jammedMs", "Opponent Jammed Timer (seconds)", "number", { group: "Opponent", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("opponent.commandLockedMs", "Opponent Command Lock Timer (seconds)", "number", { group: "Opponent", min: 0, max: 5, defaultValue: 1, suffix: "s", step: 0.1 }),
+    variableDefinition("my.jammed", "I am Jammed", "boolean", { group: "My Bot" }),
+    variableDefinition("my.commandLocked", "I am Command Locked", "boolean", { group: "My Bot" }),
+    variableDefinition("opponent.jammed", "Opponent Jammed", "boolean", { group: "Opponent" }),
+    variableDefinition("opponent.commandLocked", "Opponent Command Locked", "boolean", { group: "Opponent" }),
     variableDefinition("target.distance", "Target Distance", "number", { group: "Target", min: 0, max: 700, supportsTarget: true }),
+    variableDefinition("opponent.objectDistance", "Opponent Distance to Object", "number", { group: "Objects", min: 0, max: 700, supportsTarget: true, defaultTarget: "object_1", targetGroup: "objects" }),
     variableDefinition("my.edgeDistance", "My Distance From Edge", "number", { group: "My Bot", min: 0, max: 300 }),
     variableDefinition("target.edgeDistance", "Target Distance From Edge", "number", { group: "Target", min: 0, max: 300, supportsTarget: true }),
     variableDefinition("my.swingReady", "My Swing Ready", "boolean", { group: "My Bot", ownConditionId: "my_swing_ready" }),
-    variableDefinition("my.swingCooldownMs", "My Swing Cooldown", "number", { group: "My Bot", min: 0, max: 2000, ownConditionId: "my_swing_cooldown" }),
+    variableDefinition("my.swingCooldownMs", "My Swing Cooldown (seconds)", "number", { group: "My Bot", min: 0, max: 2, defaultValue: 0.5, suffix: "s", step: 0.1, ownConditionId: "my_swing_cooldown" }),
     variableDefinition("my.blockReady", "My Block Ready", "boolean", { group: "My Bot", ownConditionId: "my_block_ready" }),
     variableDefinition("my.shieldUp", "My Shield Up", "boolean", { group: "My Bot", ownConditionId: "my_shield_up" }),
-    variableDefinition("my.shieldCharges", "My Shield Charges", "number", { group: "My Bot", min: 0, max: 5, ownConditionId: "my_shield_charges_lt" }),
-    variableDefinition("my.blockRechargeMs", "My Block Recharge", "number", { group: "My Bot", min: 0, max: 3000, ownConditionId: "my_block_cooldown" }),
+    variableDefinition("my.shieldCharges", "My Shield Charges", "number", { group: "My Bot", min: 0, max: 5, ownConditionId: "my_block_ready" }),
+    variableDefinition("my.blockRechargeMs", "My Block Recharge (seconds)", "number", { group: "My Bot", min: 0, max: 3, defaultValue: 1, suffix: "s", step: 0.1, ownConditionId: "my_block_cooldown" }),
     variableDefinition("my.dashReady", "My Dash Ready", "boolean", { group: "My Bot", ownConditionId: "my_dash_ready" }),
-    variableDefinition("my.dashCooldownMs", "My Dash Cooldown", "number", { group: "My Bot", min: 0, max: 4500, ownConditionId: "my_dash_cooldown" }),
+    variableDefinition("my.dashCooldownMs", "My Dash Cooldown (seconds)", "number", { group: "My Bot", min: 0, max: 4.5, defaultValue: 1, suffix: "s", step: 0.1, ownConditionId: "my_dash_cooldown" }),
+    variableDefinition("my.dashCharges", "My Dash Charges", "number", { group: "My Bot", min: 0, max: 2, ownConditionId: "my_dash_ready" }),
     variableDefinition("my.gunReady", "My Gun Ready", "boolean", { group: "My Bot", ownConditionId: "my_fire_gun_ready" }),
-    variableDefinition("my.gunCooldownMs", "My Gun Cooldown", "number", { group: "My Bot", min: 0, max: 3000, ownConditionId: "my_fire_gun_cooldown" }),
+    variableDefinition("my.gunCooldownMs", "My Gun Cooldown (seconds)", "number", { group: "My Bot", min: 0, max: 3, defaultValue: 1, suffix: "s", step: 0.1, ownConditionId: "my_fire_gun_cooldown" }),
     variableDefinition("my.gunAmmo", "My Gun Ammo", "number", { group: "My Bot", min: 0, max: 10, ownConditionId: "my_fire_gun_ready" }),
-    variableDefinition("my.gunReloadMs", "My Gun Reload", "number", { group: "My Bot", min: 0, max: 3000, ownConditionId: "my_fire_gun_cooldown" }),
+    variableDefinition("my.gunReloadMs", "My Gun Reload (seconds)", "number", { group: "My Bot", min: 0, max: 3, defaultValue: 1, suffix: "s", step: 0.1, ownConditionId: "my_fire_gun_cooldown" }),
     variableDefinition("my.grenadeReady", "My Grenade Ready", "boolean", { group: "My Bot", ownConditionId: "my_grenade_ready" }),
-    variableDefinition("my.grenadeCooldownMs", "My Grenade Cooldown", "number", { group: "My Bot", min: 0, max: 12000, ownConditionId: "my_grenade_cooldown" }),
+    variableDefinition("my.grenadeCooldownMs", "My Grenade Cooldown (seconds)", "number", { group: "My Bot", min: 0, max: 12, defaultValue: 1, suffix: "s", step: 0.1, ownConditionId: "my_grenade_cooldown" }),
+    variableDefinition("my.fireballReady", "My Fireball Ready", "boolean", { group: "My Bot", ownConditionId: "my_fireball_ready" }),
+    variableDefinition("my.fireballCooldownMs", "My Fireball Cooldown (seconds)", "number", { group: "My Bot", min: 0, max: 1, defaultValue: 0.5, suffix: "s", step: 0.1, ownConditionId: "my_fireball_cooldown" }),
+    variableDefinition("my.fireballCharges", "My Fireball Charges", "number", { group: "My Bot", min: 0, max: 4, ownConditionId: "my_fireball_ready" }),
+    variableDefinition("my.fireballReloadMs", "My Fireball Reload (seconds)", "number", { group: "My Bot", min: 0, max: 1, defaultValue: 0.5, suffix: "s", step: 0.1, ownConditionId: "my_fireball_cooldown" }),
+    variableDefinition("my.stunReady", "My Stun Ready", "boolean", { group: "My Bot", ownConditionId: "my_stun_ready" }),
+    variableDefinition("my.stunCooldownMs", "My Stun Cooldown (seconds)", "number", { group: "My Bot", min: 0, max: 10, defaultValue: 1, suffix: "s", step: 0.1, ownConditionId: "my_stun_cooldown" }),
     variableDefinition("opponent.swingReady", "Opponent Swing Ready", "boolean", { group: "Opponent", opponentConditionId: "opponent_swing_ready" }),
-    variableDefinition("opponent.swingCooldownMs", "Opponent Swing Cooldown", "number", { group: "Opponent", min: 0, max: 2000, opponentConditionId: "opponent_swing_cooldown" }),
+    variableDefinition("opponent.swingCooldownMs", "Opponent Swing Cooldown (seconds)", "number", { group: "Opponent", min: 0, max: 2, defaultValue: 0.5, suffix: "s", step: 0.1, opponentConditionId: "opponent_swing_cooldown" }),
     variableDefinition("opponent.blockReady", "Opponent Block Ready", "boolean", { group: "Opponent", opponentConditionId: "opponent_block_ready" }),
     variableDefinition("opponent.shieldUp", "Opponent Shield Up", "boolean", { group: "Opponent", opponentConditionId: "opponent_shield_up" }),
-    variableDefinition("opponent.shieldCharges", "Opponent Shield Charges", "number", { group: "Opponent", min: 0, max: 5, opponentConditionId: "opponent_shield_charges_lt" }),
-    variableDefinition("opponent.blockRechargeMs", "Opponent Block Recharge", "number", { group: "Opponent", min: 0, max: 3000, opponentConditionId: "opponent_block_cooldown" }),
+    variableDefinition("opponent.shieldCharges", "Opponent Shield Charges", "number", { group: "Opponent", min: 0, max: 5, opponentConditionId: "opponent_block_ready" }),
+    variableDefinition("opponent.blockRechargeMs", "Opponent Block Recharge (seconds)", "number", { group: "Opponent", min: 0, max: 3, defaultValue: 1, suffix: "s", step: 0.1, opponentConditionId: "opponent_block_cooldown" }),
     variableDefinition("opponent.dashReady", "Opponent Dash Ready", "boolean", { group: "Opponent", opponentConditionId: "opponent_dash_ready" }),
-    variableDefinition("opponent.dashCooldownMs", "Opponent Dash Cooldown", "number", { group: "Opponent", min: 0, max: 4500, opponentConditionId: "opponent_dash_cooldown" }),
+    variableDefinition("opponent.dashCooldownMs", "Opponent Dash Cooldown (seconds)", "number", { group: "Opponent", min: 0, max: 4.5, defaultValue: 1, suffix: "s", step: 0.1, opponentConditionId: "opponent_dash_cooldown" }),
+    variableDefinition("opponent.dashCharges", "Opponent Dash Charges", "number", { group: "Opponent", min: 0, max: 2, opponentConditionId: "opponent_dash_ready" }),
     variableDefinition("opponent.gunReady", "Opponent Gun Ready", "boolean", { group: "Opponent", opponentConditionId: "opponent_fire_gun_ready" }),
-    variableDefinition("opponent.gunCooldownMs", "Opponent Gun Cooldown", "number", { group: "Opponent", min: 0, max: 3000, opponentConditionId: "opponent_fire_gun_cooldown" }),
+    variableDefinition("opponent.gunCooldownMs", "Opponent Gun Cooldown (seconds)", "number", { group: "Opponent", min: 0, max: 3, defaultValue: 1, suffix: "s", step: 0.1, opponentConditionId: "opponent_fire_gun_cooldown" }),
     variableDefinition("opponent.gunAmmo", "Opponent Gun Ammo", "number", { group: "Opponent", min: 0, max: 10, opponentConditionId: "opponent_fire_gun_ready" }),
-    variableDefinition("opponent.gunReloadMs", "Opponent Gun Reload", "number", { group: "Opponent", min: 0, max: 3000, opponentConditionId: "opponent_fire_gun_cooldown" }),
+    variableDefinition("opponent.gunReloadMs", "Opponent Gun Reload (seconds)", "number", { group: "Opponent", min: 0, max: 3, defaultValue: 1, suffix: "s", step: 0.1, opponentConditionId: "opponent_fire_gun_cooldown" }),
     variableDefinition("opponent.grenadeReady", "Opponent Grenade Ready", "boolean", { group: "Opponent", opponentConditionId: "opponent_grenade_ready" }),
-    variableDefinition("opponent.grenadeCooldownMs", "Opponent Grenade Cooldown", "number", { group: "Opponent", min: 0, max: 12000, opponentConditionId: "opponent_grenade_cooldown" }),
+    variableDefinition("opponent.grenadeCooldownMs", "Opponent Grenade Cooldown (seconds)", "number", { group: "Opponent", min: 0, max: 12, defaultValue: 1, suffix: "s", step: 0.1, opponentConditionId: "opponent_grenade_cooldown" }),
+    variableDefinition("opponent.fireballReady", "Opponent Fireball Ready", "boolean", { group: "Opponent", opponentConditionId: "opponent_fireball_ready" }),
+    variableDefinition("opponent.fireballCooldownMs", "Opponent Fireball Cooldown (seconds)", "number", { group: "Opponent", min: 0, max: 1, defaultValue: 0.5, suffix: "s", step: 0.1, opponentConditionId: "opponent_fireball_cooldown" }),
+    variableDefinition("opponent.fireballCharges", "Opponent Fireball Charges", "number", { group: "Opponent", min: 0, max: 4, opponentConditionId: "opponent_fireball_ready" }),
+    variableDefinition("opponent.fireballReloadMs", "Opponent Fireball Reload (seconds)", "number", { group: "Opponent", min: 0, max: 1, defaultValue: 0.5, suffix: "s", step: 0.1, opponentConditionId: "opponent_fireball_cooldown" }),
+    variableDefinition("opponent.stunReady", "Opponent Stun Ready", "boolean", { group: "Opponent", opponentConditionId: "opponent_stun_ready" }),
+    variableDefinition("opponent.stunCooldownMs", "Opponent Stun Cooldown (seconds)", "number", { group: "Opponent", min: 0, max: 10, defaultValue: 1, suffix: "s", step: 0.1, opponentConditionId: "opponent_stun_cooldown" }),
     variableDefinition("target.exists", "Target Exists", "boolean", { group: "Objects", supportsTarget: true, targetGroup: "objects" }),
     variableDefinition("target.isHealthPack", "Target is Health Pack", "boolean", { group: "Objects", supportsTarget: true, targetGroup: "objects" }),
     variableDefinition("target.isDamageZone", "Target is Damage Zone", "boolean", { group: "Objects", supportsTarget: true, targetGroup: "objects" }),
+    variableDefinition("target.isProjectileWall", "Target is Projectile Wall", "boolean", { group: "Objects", supportsTarget: true, targetGroup: "objects" }),
+    variableDefinition("target.isBouncyWall", "Target is Bouncy Wall", "boolean", { group: "Objects", supportsTarget: true, targetGroup: "objects" }),
     variableDefinition("my.insideDamageZone", "I am in a Damage Zone", "boolean", { group: "Objects" }),
 ]);
 const STATE_VARIABLE_BY_ID = new Map(STATE_VARIABLES.map((variable) => [variable.id, variable]));
@@ -284,55 +345,62 @@ export function validateMeleeStrategyConfiguration(configuration) {
         errors.push("Add at least one action logic block before submitting.");
     }
     entries.forEach(({ block, label }) => {
-        const ids = new Set(block.conditions.map((condition) => condition.type));
-        for (const [first, second] of [
-            ["enemy_rushing", "enemy_fleeing"],
-            ["my_swing_ready", "my_swing_cooldown"],
-            ["my_block_ready", "my_block_cooldown"],
-            ["my_shield_up", "my_shield_down"],
-            ["my_dash_ready", "my_dash_cooldown"],
-            ["my_fire_gun_ready", "my_fire_gun_cooldown"],
-            ["my_grenade_ready", "my_grenade_cooldown"],
-            ["opponent_swing_ready", "opponent_swing_cooldown"],
-            ["opponent_block_ready", "opponent_block_cooldown"],
-            ["opponent_shield_up", "opponent_shield_down"],
-            ["opponent_dash_ready", "opponent_dash_cooldown"],
-            ["opponent_fire_gun_ready", "opponent_fire_gun_cooldown"],
-            ["opponent_grenade_ready", "opponent_grenade_cooldown"],
-        ]) {
-            if (ids.has(first) && ids.has(second)) errors.push(`${label} contains contradictory conditions.`);
+        for (const conditions of andConditionGroups(block.conditions)) {
+            const ids = new Set(conditions.map((condition) => condition.type));
+            for (const [first, second] of [
+                ["enemy_rushing", "enemy_fleeing"],
+                ["my_swing_ready", "my_swing_cooldown"],
+                ["my_block_ready", "my_block_cooldown"],
+                ["my_shield_up", "my_shield_down"],
+                ["my_dash_ready", "my_dash_cooldown"],
+                ["my_fire_gun_ready", "my_fire_gun_cooldown"],
+                ["my_grenade_ready", "my_grenade_cooldown"],
+                ["my_fireball_ready", "my_fireball_cooldown"],
+                ["opponent_swing_ready", "opponent_swing_cooldown"],
+                ["opponent_block_ready", "opponent_block_cooldown"],
+                ["opponent_shield_up", "opponent_shield_down"],
+                ["opponent_dash_ready", "opponent_dash_cooldown"],
+                ["opponent_fire_gun_ready", "opponent_fire_gun_cooldown"],
+                ["opponent_grenade_ready", "opponent_grenade_cooldown"],
+                ["opponent_fireball_ready", "opponent_fireball_cooldown"],
+            ]) {
+                if (ids.has(first) && ids.has(second)) errors.push(`${label} contains contradictory conditions.`);
+            }
+            for (const target of TARGET_TYPES) {
+                const lower = conditions.find((condition) => (
+                    condition.type === "enemy_distance_gt" && (condition.target ?? "opponent") === target.id
+                ))?.value;
+                const upper = conditions.find((condition) => (
+                    condition.type === "enemy_distance_lt" && (condition.target ?? "opponent") === target.id
+                ))?.value;
+                if (lower != null && upper != null && lower >= upper) {
+                    errors.push(`${label} has an impossible ${target.label.toLowerCase()} distance range.`);
+                }
+                const typeConditions = new Set(conditions.filter((condition) => (
+                    (condition.type === "target_health_pack"
+                        || condition.type === "target_damage_zone"
+                        || condition.type === "target_projectile_wall"
+                        || condition.type === "target_bouncy_wall")
+                    && (condition.target ?? "object_1") === target.id
+                )).map((condition) => condition.type));
+                if (typeConditions.size > 1) {
+                    errors.push(`${label} requires ${target.label.toLowerCase()} to be multiple obstacle types.`);
+                }
+                const targetConditionTypes = new Set(conditions.filter((condition) => (
+                    condition.target === target.id
+                )).map((condition) => condition.type));
+                if (targetConditionTypes.has("target_exists") && targetConditionTypes.has("target_missing")) {
+                    errors.push(`${label} requires ${target.label.toLowerCase()} to both exist and not exist.`);
+                }
+                if (targetConditionTypes.has("target_missing") && [...targetConditionTypes].some((type) => (
+                    type !== "target_missing"
+                ))) {
+                    errors.push(`${label} requires ${target.label.toLowerCase()} to be missing while using it.`);
+                }
+            }
+            validateThresholdRange(errors, conditions, label, "my_hp_gt", "my_hp_lt", "my HP");
+            validateThresholdRange(errors, conditions, label, "enemy_hp_gt", "enemy_hp_lt", "opponent HP");
         }
-        for (const target of TARGET_TYPES) {
-            const lower = block.conditions.find((condition) => (
-                condition.type === "enemy_distance_gt" && (condition.target ?? "opponent") === target.id
-            ))?.value;
-            const upper = block.conditions.find((condition) => (
-                condition.type === "enemy_distance_lt" && (condition.target ?? "opponent") === target.id
-            ))?.value;
-            if (lower != null && upper != null && lower >= upper) {
-                errors.push(`${label} has an impossible ${target.label.toLowerCase()} distance range.`);
-            }
-            const typeConditions = new Set(block.conditions.filter((condition) => (
-                (condition.type === "target_health_pack" || condition.type === "target_damage_zone")
-                && (condition.target ?? "object_1") === target.id
-            )).map((condition) => condition.type));
-            if (typeConditions.size > 1) {
-                errors.push(`${label} requires ${target.label.toLowerCase()} to be multiple obstacle types.`);
-            }
-            const targetConditionTypes = new Set(block.conditions.filter((condition) => (
-                condition.target === target.id
-            )).map((condition) => condition.type));
-            if (targetConditionTypes.has("target_exists") && targetConditionTypes.has("target_missing")) {
-                errors.push(`${label} requires ${target.label.toLowerCase()} to both exist and not exist.`);
-            }
-            if (targetConditionTypes.has("target_missing") && [...targetConditionTypes].some((type) => (
-                type !== "target_missing"
-            ))) {
-                errors.push(`${label} requires ${target.label.toLowerCase()} to be missing while using it.`);
-            }
-        }
-        validateThresholdRange(errors, block, label, "my_hp_gt", "my_hp_lt", "my HP");
-        validateThresholdRange(errors, block, label, "enemy_hp_gt", "enemy_hp_lt", "opponent HP");
     });
     return { configuration: normalized, errors };
 }
@@ -352,12 +420,13 @@ export function shouldSuppressMeleeStrategyDash(configuration, payload) {
 }
 
 export function shouldAllowMeleeStrategyDash(configuration, payload) {
-    return Boolean(selectMeleeStrategyActionPlan(configuration, payload).dash?.action?.startsWith("dash"));
+    const plan = selectMeleeStrategyActionPlan(configuration, payload);
+    return Boolean(plan.dash?.action?.startsWith("dash") && stateFromPayload(payload).player.dashAvailable);
 }
 
 export function selectMeleeStrategyIntent(configuration, payload) {
     const plan = selectMeleeStrategyActionPlan(configuration, payload);
-    const primary = plan.primary ?? plan.movement ?? plan.dash ?? plan.rotation ?? plan.swing ?? plan.block ?? plan.gun ?? plan.grenade;
+    const primary = plan.primary ?? plan.movement ?? plan.dash ?? plan.rotation ?? plan.swing ?? plan.block ?? plan.gun ?? plan.grenade ?? plan.fireball ?? plan.stun;
     if (!primary) return DEFAULT_INTENT;
     const intent = activeIntentForBlock(primary);
     return {
@@ -373,9 +442,10 @@ export function selectMeleeStrategyActionPlan(configuration, payload) {
     const plan = { primary: selected.find((entry) => isTrainableBlock(entry.block))?.block ?? null };
     for (const { block } of selected) {
         const action = ACTION_BY_ID.get(block.action) ?? ACTION_TYPES[0];
-        if (block.action.startsWith("dash") && !plan.dashMovement) plan.dashMovement = block;
+        if (block.action.startsWith("dash") && state.player.dashAvailable && !plan.dashMovement) plan.dashMovement = block;
         if (block.action === "no_dash") plan.dash = block;
-        else if (!plan[action.head]) plan[action.head] = block;
+        else if (action.head === "dash" && state.player.dashAvailable && !plan.dash) plan.dash = block;
+        else if (action.head !== "dash" && !plan[action.head]) plan[action.head] = block;
     }
     return plan;
 }
@@ -384,12 +454,20 @@ export function evaluateCondition(condition, state) {
     if (condition?.type === "expression") {
         return evaluateExpressionCondition(condition, state);
     }
-    const target = targetEntity(state, condition.target ?? "opponent");
+    const target = resolveMeleeStrategyTarget(state, condition.target ?? "opponent");
     const distance = target ? distanceBetween(state.player, target) : Number.POSITIVE_INFINITY;
     switch (condition.type) {
         case "always": return true;
         case "enemy_distance_lt": return distance < condition.value;
         case "enemy_distance_gt": return distance > condition.value;
+        case "opponent_object_distance_lt":
+            return condition.target?.startsWith("object_") && target
+                ? distanceBetween(state.opponent, target) < condition.value
+                : false;
+        case "opponent_object_distance_gt":
+            return condition.target?.startsWith("object_") && target
+                ? distanceBetween(state.opponent, target) > condition.value
+                : false;
         case "my_edge_distance_lt":
         case "my_cornered": return edgeDistance(state.player) < condition.value;
         case "my_edge_distance_gt": return edgeDistance(state.player) > condition.value;
@@ -404,6 +482,10 @@ export function evaluateCondition(condition, state) {
         case "my_hp_gt": return state.player.hp > condition.value;
         case "enemy_hp_lt": return state.opponent ? state.opponent.hp < condition.value : false;
         case "enemy_hp_gt": return state.opponent ? state.opponent.hp > condition.value : false;
+        case "my_jammed": return (state.player.jammedMs ?? 0) > 0;
+        case "my_command_locked": return (state.player.commandLockedMs ?? 0) > 0;
+        case "opponent_jammed": return (state.opponent?.jammedMs ?? 0) > 0;
+        case "opponent_command_locked": return (state.opponent?.commandLockedMs ?? 0) > 0;
         case "my_swing_ready": return state.player.swingAvailable;
         case "my_swing_cooldown": return !state.player.swingAvailable;
         case "my_block_ready": return state.player.blockAvailable;
@@ -414,10 +496,16 @@ export function evaluateCondition(condition, state) {
         case "my_shield_charges_gt": return state.player.blockCharges > condition.value;
         case "my_dash_ready": return state.player.dashAvailable;
         case "my_dash_cooldown": return !state.player.dashAvailable;
+        case "my_dash_charges_lt": return state.player.dashCharges < condition.value;
+        case "my_dash_charges_gt": return state.player.dashCharges > condition.value;
         case "my_fire_gun_ready": return state.player.gunAvailable;
         case "my_fire_gun_cooldown": return !state.player.gunAvailable;
         case "my_grenade_ready": return state.player.grenadeAvailable;
         case "my_grenade_cooldown": return !state.player.grenadeAvailable;
+        case "my_fireball_ready": return state.player.fireballAvailable;
+        case "my_fireball_cooldown": return !state.player.fireballAvailable;
+        case "my_stun_ready": return state.player.stunAvailable;
+        case "my_stun_cooldown": return !state.player.stunAvailable;
         case "opponent_swing_ready": return Boolean(state.opponent?.swingAvailable);
         case "opponent_swing_cooldown": return Boolean(state.opponent) && !state.opponent.swingAvailable;
         case "opponent_block_ready": return Boolean(state.opponent?.blockAvailable);
@@ -428,14 +516,22 @@ export function evaluateCondition(condition, state) {
         case "opponent_shield_charges_gt": return Boolean(state.opponent) && state.opponent.blockCharges > condition.value;
         case "opponent_dash_ready": return Boolean(state.opponent?.dashAvailable);
         case "opponent_dash_cooldown": return Boolean(state.opponent) && !state.opponent.dashAvailable;
+        case "opponent_dash_charges_lt": return Boolean(state.opponent) && state.opponent.dashCharges < condition.value;
+        case "opponent_dash_charges_gt": return Boolean(state.opponent) && state.opponent.dashCharges > condition.value;
         case "opponent_fire_gun_ready": return Boolean(state.opponent?.gunAvailable);
         case "opponent_fire_gun_cooldown": return Boolean(state.opponent) && !state.opponent.gunAvailable;
         case "opponent_grenade_ready": return Boolean(state.opponent?.grenadeAvailable);
         case "opponent_grenade_cooldown": return Boolean(state.opponent) && !state.opponent.grenadeAvailable;
+        case "opponent_fireball_ready": return Boolean(state.opponent?.fireballAvailable);
+        case "opponent_fireball_cooldown": return Boolean(state.opponent) && !state.opponent.fireballAvailable;
+        case "opponent_stun_ready": return Boolean(state.opponent?.stunAvailable);
+        case "opponent_stun_cooldown": return Boolean(state.opponent) && !state.opponent.stunAvailable;
         case "target_exists": return Boolean(target) && condition.target !== "opponent";
         case "target_missing": return !target && condition.target !== "opponent";
         case "target_health_pack": return target?.type === "healthPack";
         case "target_damage_zone": return target?.type === "damageZone";
+        case "target_projectile_wall": return target?.type === "projectileWall";
+        case "target_bouncy_wall": return target?.type === "bouncyWall";
         case "inside_damage_zone": return state.obstacles.some((obstacle) => (
             obstacle.type === "damageZone" && distanceBetween(state.player, obstacle) <= (state.player.size + obstacle.size) / 2
         ));
@@ -482,8 +578,10 @@ function normalizedBlockEntries(normalized) {
 function selectPriorityCandidates(normalized, state) {
     const matching = normalizedBlockEntries(normalized)
         .filter((entry) => (
-            entry.clusterConditions.every((condition) => evaluateCondition(condition, state))
-            && entry.block.conditions.every((condition) => evaluateCondition(condition, state))
+            !entryUsesHiddenTarget(entry, state)
+            &&
+            evaluateConditionList(entry.clusterConditions, state)
+            && evaluateConditionList(entry.block.conditions, state)
         ))
         .sort(comparePriorityEntries);
     if (!matching.length) return [];
@@ -494,11 +592,62 @@ function selectPriorityCandidates(normalized, state) {
     ));
 }
 
+function entryUsesHiddenTarget(entry, state) {
+    if ((state?.player?.jammedMs ?? 0) <= 0) return false;
+    return blockUsesTarget(entry.block)
+        || entry.clusterConditions.some(conditionUsesTarget)
+        || entry.block.conditions.some(conditionUsesTarget);
+}
+
+function blockUsesTarget(block) {
+    const action = ACTION_BY_ID.get(block?.action);
+    return action ? actionSupportsTarget(action) : false;
+}
+
+function conditionUsesTarget(condition) {
+    if (!condition) return false;
+    if (condition.type === "expression") {
+        return variableUsesHiddenTarget(condition.left)
+            || (condition.right?.type === "variable" && variableUsesHiddenTarget(condition.right.value));
+    }
+    const definition = CONDITION_BY_ID.get(condition.type);
+    return Boolean(definition?.supportsTarget)
+        || condition.type?.startsWith?.("enemy_")
+        || condition.type?.startsWith?.("opponent_")
+        || condition.type?.startsWith?.("target_");
+}
+
+function variableUsesHiddenTarget(variableId) {
+    return String(variableId).startsWith("opponent.")
+        || String(variableId).startsWith("target.");
+}
+
+function evaluateConditionList(conditions, state) {
+    if (!conditions.length) return true;
+    return conditions.reduce((matches, condition, index) => {
+        const conditionMatches = evaluateCondition(condition, state);
+        return index > 0 && condition.join === "or"
+            ? matches || conditionMatches
+            : matches && conditionMatches;
+    }, true);
+}
+
 function comparePriorityEntries(first, second) {
     return first.clusterPriority - second.clusterPriority
         || first.block.priority - second.block.priority
         || first.clusterIndex - second.clusterIndex
         || first.blockIndex - second.blockIndex;
+}
+
+function andConditionGroups(conditions) {
+    return conditions.reduce((groups, condition, index) => {
+        if (index > 0 && condition.join === "or") {
+            groups.push([condition]);
+        } else {
+            groups[groups.length - 1].push(condition);
+        }
+        return groups;
+    }, [[]]).filter((group) => group.length > 0);
 }
 
 function stateFromPayload(payload) {
@@ -515,12 +664,24 @@ function stateFromPayload(payload) {
         blockCharges: Number.isFinite(Number(payload?.playerModel?.blockCharges)) ? Number(payload.playerModel.blockCharges) : 0,
         dashAvailable: Boolean(payload?.playerModel?.dashAvailable),
         dashCooldownRemainingMs: Number(payload?.playerModel?.dashCooldownRemainingMs) || 0,
+        dashCharges: Number.isFinite(Number(payload?.playerModel?.dashCharges)) ? Number(payload.playerModel.dashCharges) : 0,
         gunAvailable: Boolean(payload?.playerModel?.gunAvailable),
         gunCooldownRemainingMs: Number(payload?.playerModel?.gunCooldownRemainingMs) || 0,
         gunAmmo: Number.isFinite(Number(payload?.playerModel?.gunAmmo)) ? Number(payload.playerModel.gunAmmo) : 0,
         gunReloadRemainingMs: Number(payload?.playerModel?.gunReloadRemainingMs) || 0,
         grenadeAvailable: Boolean(payload?.playerModel?.grenadeAvailable),
         grenadeCooldownRemainingMs: Number(payload?.playerModel?.grenadeCooldownRemainingMs) || 0,
+        fireballAvailable: Boolean(payload?.playerModel?.fireballAvailable),
+        fireballCooldownRemainingMs: Number(payload?.playerModel?.fireballCooldownRemainingMs) || 0,
+        fireballCharges: Number.isFinite(Number(payload?.playerModel?.fireballCharges)) ? Number(payload.playerModel.fireballCharges) : 0,
+        fireballReloadRemainingMs: Number(payload?.playerModel?.fireballReloadRemainingMs) || 0,
+        stunAvailable: Boolean(payload?.playerModel?.stunAvailable),
+        stunCooldownRemainingMs: Number(payload?.playerModel?.stunCooldownRemainingMs) || 0,
+        overdriveMs: Number(payload?.playerModel?.overdriveMs) || 0,
+        barrierImmunityMs: Number(payload?.playerModel?.barrierImmunityMs) || 0,
+        slowedMs: Number(payload?.playerModel?.slowedMs) || 0,
+        jammedMs: Number(payload?.playerModel?.jammedMs) || 0,
+        commandLockedMs: Number(payload?.playerModel?.commandLockedMs) || 0,
     };
     const opponent = objects.find((object) => object?.type === "opponentModel") ?? null;
     return {
@@ -538,29 +699,55 @@ function stateFromPayload(payload) {
             blockCharges: Number.isFinite(Number(opponent.blockCharges)) ? Number(opponent.blockCharges) : 0,
             dashAvailable: Boolean(opponent.dashAvailable),
             dashCooldownRemainingMs: Number(opponent.dashCooldownRemainingMs) || 0,
+            dashCharges: Number.isFinite(Number(opponent.dashCharges)) ? Number(opponent.dashCharges) : 0,
             gunAvailable: Boolean(opponent.gunAvailable),
             gunCooldownRemainingMs: Number(opponent.gunCooldownRemainingMs) || 0,
             gunAmmo: Number.isFinite(Number(opponent.gunAmmo)) ? Number(opponent.gunAmmo) : 0,
             gunReloadRemainingMs: Number(opponent.gunReloadRemainingMs) || 0,
             grenadeAvailable: Boolean(opponent.grenadeAvailable),
             grenadeCooldownRemainingMs: Number(opponent.grenadeCooldownRemainingMs) || 0,
+            fireballAvailable: Boolean(opponent.fireballAvailable),
+            fireballCooldownRemainingMs: Number(opponent.fireballCooldownRemainingMs) || 0,
+            fireballCharges: Number.isFinite(Number(opponent.fireballCharges)) ? Number(opponent.fireballCharges) : 0,
+            fireballReloadRemainingMs: Number(opponent.fireballReloadRemainingMs) || 0,
+            stunAvailable: Boolean(opponent.stunAvailable),
+            stunCooldownRemainingMs: Number(opponent.stunCooldownRemainingMs) || 0,
+            overdriveMs: Number(opponent.overdriveMs) || 0,
+            barrierImmunityMs: Number(opponent.barrierImmunityMs) || 0,
+            slowedMs: Number(opponent.slowedMs) || 0,
+            jammedMs: Number(opponent.jammedMs) || 0,
+            commandLockedMs: Number(opponent.commandLockedMs) || 0,
             velocityX: opponent.velocityX ?? 0,
             velocityY: opponent.velocityY ?? 0,
         } : null,
         objects,
-        obstacles: obstacleSlots(objects),
+        obstacles: strategyObstacleTargets(objects),
     };
+}
+
+function strategyObstacleTargets(objects = []) {
+    return objects.filter((object) => (
+        object?.type === "healthPack"
+        || object?.type === "damageZone"
+        || object?.type === "projectileWall"
+        || object?.type === "bouncyWall"
+        || object?.type === "overdrive"
+        || object?.type === "barrier"
+        || object?.type === "inhibition"
+        || object?.type === "radarJammer"
+        || object?.type === "commandLock"
+    ));
 }
 
 function normalizeConditions(conditions) {
     const source = Array.isArray(conditions) ? conditions : [{ type: CONDITION_TYPES[0].id }];
-    return source.slice(0, MAX_CONDITIONS_PER_BLOCK).map((condition) => {
+    return source.slice(0, MAX_CONDITIONS_PER_BLOCK).map((condition, index) => {
         if (condition?.type === "expression" || condition?.left) {
-            return normalizeExpressionCondition(condition);
+            return withConditionJoin(normalizeExpressionCondition(condition), condition, index);
         }
         const conditionType = normalizeConditionType(condition?.type);
         const definition = CONDITION_BY_ID.get(conditionType) ?? CONDITION_TYPES[0];
-        return {
+        return withConditionJoin({
             type: definition.id,
             ...(definition.requiresValue ? {
                 value: clamp(Number(condition?.value) || definition.defaultValue, definition.min, definition.max),
@@ -568,8 +755,14 @@ function normalizeConditions(conditions) {
             ...(definition.supportsTarget ? {
                 target: normalizeTarget(condition?.target, definition.defaultTarget ?? "opponent", definition.targetGroup),
             } : {}),
-        };
+        }, condition, index);
     });
+}
+
+function withConditionJoin(normalized, source, index) {
+    return index > 0 && source?.join === "or"
+        ? { ...normalized, join: "or" }
+        : normalized;
 }
 
 function normalizeExpressionCondition(condition) {
@@ -664,13 +857,13 @@ export function actionSupportsTarget(action) {
 
 function normalizeTarget(target, fallback, targetGroup = null) {
     if (!TARGET_BY_ID.has(target)) return fallback;
-    if (targetGroup === "objects" && !String(target).startsWith("object_") && target !== "opponent_grenade") return fallback;
+    if (targetGroup === "objects" && !String(target).startsWith("object_") && target !== "opponent_grenade" && target !== "opponent_fireball") return fallback;
     return target;
 }
 
-function validateThresholdRange(errors, block, blockLabel, lowerType, upperType, label) {
-    const lower = block.conditions.find((condition) => condition.type === lowerType)?.value;
-    const upper = block.conditions.find((condition) => condition.type === upperType)?.value;
+function validateThresholdRange(errors, conditions, blockLabel, lowerType, upperType, label) {
+    const lower = conditions.find((condition) => condition.type === lowerType)?.value;
+    const upper = conditions.find((condition) => condition.type === upperType)?.value;
     if (lower != null && upper != null && lower >= upper) {
         errors.push(`${blockLabel} has an impossible ${label} range.`);
     }
@@ -687,49 +880,92 @@ function evaluateExpressionCondition(condition, state) {
 }
 
 function resolveStateVariable(state, condition, variableId) {
-    const target = targetEntity(state, condition.target ?? "opponent");
+    const target = resolveMeleeStrategyTarget(state, condition.target ?? "opponent");
     switch (variableId) {
         case "my.hp": return state.player.hp;
+        case "my.x": return state.player.x ?? 0;
+        case "my.y": return state.player.y ?? 0;
         case "opponent.hp": return state.opponent?.hp ?? 0;
+        case "opponent.x": return state.opponent?.x ?? 0;
+        case "opponent.y": return state.opponent?.y ?? 0;
+        case "my.overdriveMs": return millisecondsToSeconds(state.player.overdriveMs);
+        case "my.barrierMs": return millisecondsToSeconds(state.player.barrierImmunityMs);
+        case "my.slowedMs": return millisecondsToSeconds(state.player.slowedMs);
+        case "my.jammedMs": return millisecondsToSeconds(state.player.jammedMs);
+        case "my.commandLockedMs": return millisecondsToSeconds(state.player.commandLockedMs);
+        case "opponent.overdriveMs": return millisecondsToSeconds(state.opponent?.overdriveMs);
+        case "opponent.barrierMs": return millisecondsToSeconds(state.opponent?.barrierImmunityMs);
+        case "opponent.slowedMs": return millisecondsToSeconds(state.opponent?.slowedMs);
+        case "opponent.jammedMs": return millisecondsToSeconds(state.opponent?.jammedMs);
+        case "opponent.commandLockedMs": return millisecondsToSeconds(state.opponent?.commandLockedMs);
+        case "my.jammed": return (state.player.jammedMs ?? 0) > 0;
+        case "my.commandLocked": return (state.player.commandLockedMs ?? 0) > 0;
+        case "opponent.jammed": return (state.opponent?.jammedMs ?? 0) > 0;
+        case "opponent.commandLocked": return (state.opponent?.commandLockedMs ?? 0) > 0;
         case "target.distance": return target ? distanceBetween(state.player, target) : Number.POSITIVE_INFINITY;
+        case "opponent.objectDistance":
+            return condition.target?.startsWith("object_") && target && state.opponent
+                ? distanceBetween(state.opponent, target)
+                : Number.POSITIVE_INFINITY;
         case "my.edgeDistance": return edgeDistance(state.player);
         case "target.edgeDistance": return target ? edgeDistance(target) : 0;
         case "my.swingReady": return Boolean(state.player.swingAvailable);
-        case "my.swingCooldownMs": return state.player.swingCooldownRemainingMs ?? 0;
+        case "my.swingCooldownMs": return millisecondsToSeconds(state.player.swingCooldownRemainingMs);
         case "my.blockReady": return Boolean(state.player.blockAvailable);
         case "my.shieldUp": return Boolean(state.player.blockActive);
         case "my.shieldCharges": return state.player.blockCharges ?? 0;
-        case "my.blockRechargeMs": return state.player.blockCooldownRemainingMs ?? 0;
+        case "my.blockRechargeMs": return millisecondsToSeconds(state.player.blockCooldownRemainingMs);
         case "my.dashReady": return Boolean(state.player.dashAvailable);
-        case "my.dashCooldownMs": return state.player.dashCooldownRemainingMs ?? 0;
+        case "my.dashCooldownMs": return millisecondsToSeconds(state.player.dashCooldownRemainingMs);
+        case "my.dashCharges": return state.player.dashCharges ?? 0;
         case "my.gunReady": return Boolean(state.player.gunAvailable);
-        case "my.gunCooldownMs": return state.player.gunCooldownRemainingMs ?? 0;
+        case "my.gunCooldownMs": return millisecondsToSeconds(state.player.gunCooldownRemainingMs);
         case "my.gunAmmo": return state.player.gunAmmo ?? 0;
-        case "my.gunReloadMs": return state.player.gunReloadRemainingMs ?? 0;
+        case "my.gunReloadMs": return millisecondsToSeconds(state.player.gunReloadRemainingMs);
         case "my.grenadeReady": return Boolean(state.player.grenadeAvailable);
-        case "my.grenadeCooldownMs": return state.player.grenadeCooldownRemainingMs ?? 0;
+        case "my.grenadeCooldownMs": return millisecondsToSeconds(state.player.grenadeCooldownRemainingMs);
+        case "my.fireballReady": return Boolean(state.player.fireballAvailable);
+        case "my.fireballCooldownMs": return millisecondsToSeconds(state.player.fireballCooldownRemainingMs);
+        case "my.fireballCharges": return state.player.fireballCharges ?? 0;
+        case "my.fireballReloadMs": return millisecondsToSeconds(state.player.fireballReloadRemainingMs);
+        case "my.stunReady": return Boolean(state.player.stunAvailable);
+        case "my.stunCooldownMs": return millisecondsToSeconds(state.player.stunCooldownRemainingMs);
         case "opponent.swingReady": return Boolean(state.opponent?.swingAvailable);
-        case "opponent.swingCooldownMs": return state.opponent?.swingCooldownRemainingMs ?? 0;
+        case "opponent.swingCooldownMs": return millisecondsToSeconds(state.opponent?.swingCooldownRemainingMs);
         case "opponent.blockReady": return Boolean(state.opponent?.blockAvailable);
         case "opponent.shieldUp": return Boolean(state.opponent?.blockActive);
         case "opponent.shieldCharges": return state.opponent?.blockCharges ?? 0;
-        case "opponent.blockRechargeMs": return state.opponent?.blockCooldownRemainingMs ?? 0;
+        case "opponent.blockRechargeMs": return millisecondsToSeconds(state.opponent?.blockCooldownRemainingMs);
         case "opponent.dashReady": return Boolean(state.opponent?.dashAvailable);
-        case "opponent.dashCooldownMs": return state.opponent?.dashCooldownRemainingMs ?? 0;
+        case "opponent.dashCooldownMs": return millisecondsToSeconds(state.opponent?.dashCooldownRemainingMs);
+        case "opponent.dashCharges": return state.opponent?.dashCharges ?? 0;
         case "opponent.gunReady": return Boolean(state.opponent?.gunAvailable);
-        case "opponent.gunCooldownMs": return state.opponent?.gunCooldownRemainingMs ?? 0;
+        case "opponent.gunCooldownMs": return millisecondsToSeconds(state.opponent?.gunCooldownRemainingMs);
         case "opponent.gunAmmo": return state.opponent?.gunAmmo ?? 0;
-        case "opponent.gunReloadMs": return state.opponent?.gunReloadRemainingMs ?? 0;
+        case "opponent.gunReloadMs": return millisecondsToSeconds(state.opponent?.gunReloadRemainingMs);
         case "opponent.grenadeReady": return Boolean(state.opponent?.grenadeAvailable);
-        case "opponent.grenadeCooldownMs": return state.opponent?.grenadeCooldownRemainingMs ?? 0;
+        case "opponent.grenadeCooldownMs": return millisecondsToSeconds(state.opponent?.grenadeCooldownRemainingMs);
+        case "opponent.fireballReady": return Boolean(state.opponent?.fireballAvailable);
+        case "opponent.fireballCooldownMs": return millisecondsToSeconds(state.opponent?.fireballCooldownRemainingMs);
+        case "opponent.fireballCharges": return state.opponent?.fireballCharges ?? 0;
+        case "opponent.fireballReloadMs": return millisecondsToSeconds(state.opponent?.fireballReloadRemainingMs);
+        case "opponent.stunReady": return Boolean(state.opponent?.stunAvailable);
+        case "opponent.stunCooldownMs": return millisecondsToSeconds(state.opponent?.stunCooldownRemainingMs);
         case "target.exists": return Boolean(target) && condition.target !== "opponent";
         case "target.isHealthPack": return target?.type === "healthPack";
         case "target.isDamageZone": return target?.type === "damageZone";
+        case "target.isProjectileWall": return target?.type === "projectileWall";
+        case "target.isBouncyWall": return target?.type === "bouncyWall";
         case "my.insideDamageZone": return state.obstacles.some((obstacle) => (
             obstacle.type === "damageZone" && distanceBetween(state.player, obstacle) <= (state.player.size + obstacle.size) / 2
         ));
         default: return null;
     }
+}
+
+function millisecondsToSeconds(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number / 1000 : 0;
 }
 
 function compareValues(left, comparator, right, valueType) {
@@ -785,14 +1021,28 @@ function distanceBetween(first, second) {
 }
 function clamp(value, min, max) { return Math.max(min, Math.min(max, value)); }
 
-function targetEntity(state, target) {
-    if (target === "opponent") return state.opponent;
+export function resolveMeleeStrategyTarget(state, target) {
+    if ((state?.player?.jammedMs ?? 0) > 0) return null;
+    if (target === "opponent") return state?.opponent ?? null;
     if (target === "opponent_grenade") {
-        return state.objects.find((object) => (
+        return (state?.objects ?? []).find((object) => (
             object?.type === "grenade"
             && object.ownerId
-            && object.ownerId === state.opponent?.id
+            && object.ownerId === state?.opponent?.id
         )) ?? null;
     }
-    return state.obstacles.find((obstacle) => obstacle.id === target) ?? null;
+    if (target === "opponent_fireball") {
+        const fireballs = (state?.objects ?? []).filter((object) => (
+            object?.type === "fireball"
+            && object.ownerId
+            && object.ownerId === state?.opponent?.id
+        ));
+        return fireballs.sort((first, second) => (
+            distanceBetween(state?.player, first) - distanceBetween(state?.player, second)
+        ))[0] ?? null;
+    }
+    return [
+        ...(state?.obstacles ?? []),
+        ...(state?.objects ?? []),
+    ].find((obstacle) => obstacle?.id === target) ?? null;
 }

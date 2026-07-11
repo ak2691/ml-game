@@ -58,7 +58,7 @@ const CANVAS_SIZE = 800;
 const PLAYER_FEATURES = 7;
 const OPPONENT_FEATURES = 6;
 const STRATEGY_FEATURES = 13;
-export const MAX_OBSTACLE_SLOTS = 5;
+export const MAX_OBSTACLE_SLOTS = 6;
 const OBSTACLE_FEATURES = 6;
 const MAX_SIZE = 200;
 const MAX_HP = 100;
@@ -142,7 +142,17 @@ export function buildInputVector(payload) {
 
 export function obstacleSlots(objects = []) {
     return [...objects]
-        .filter((obj) => obj?.type === "healthPack" || obj?.type === "damageZone")
+        .filter((obj) => (
+            obj?.type === "healthPack"
+            || obj?.type === "damageZone"
+            || obj?.type === "projectileWall"
+            || obj?.type === "bouncyWall"
+            || obj?.type === "overdrive"
+            || obj?.type === "barrier"
+            || obj?.type === "inhibition"
+            || obj?.type === "radarJammer"
+            || obj?.type === "commandLock"
+        ))
         .sort((first, second) => String(first.id ?? "").localeCompare(String(second.id ?? "")))
         .slice(0, MAX_OBSTACLE_SLOTS);
 }

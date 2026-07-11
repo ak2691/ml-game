@@ -9,6 +9,7 @@ import com.example.machiner.service.MatchmakingService.MatchSession;
 import com.example.machiner.simulation.DuelSimulationService;
 import com.example.machiner.simulation.DuelSimulationService.DuelFighterRequest;
 import com.example.machiner.simulation.DuelSimulationService.DuelSimulationRequest;
+import com.example.machiner.simulation.DuelSimulationService.ObstacleRequest;
 import com.example.machiner.simulation.classes.CombatClassRegistry;
 import com.example.machiner.simulation.classes.MeleeClassSpec;
 import com.example.machiner.simulation.classes.RangedClassSpec;
@@ -36,9 +37,13 @@ class MatchSimulationServiceTest {
                 Instant.now(),
                 Instant.now(),
                 Instant.now(),
+                Instant.now(),
                 1,
                 1,
-                List.of(new MatchPlaybackDTO.ObstaclePlacementDTO("object_1", "healthPack", 300.0, 400.0, 42)));
+                List.of(
+                        new MatchPlaybackDTO.ObstaclePlacementDTO("object_center", "radarJammer", 400.0, 400.0, 92),
+                        new MatchPlaybackDTO.ObstaclePlacementDTO("object_1", "healthPack", 300.0, 120.0, 42, 0.0)),
+                Map.of());
         ModelSubmission firstSubmission = new ModelSubmission();
         firstSubmission.setModelArtifacts("""
                 {"version":"melee-logic-blocks-v2","blocks":[{"action":"move_inward","conditions":[]}],"clusters":[]}
@@ -51,9 +56,15 @@ class MatchSimulationServiceTest {
         assertThat(duelSimulationService.capturedRequest.matchId()).isEqualTo(session.matchId());
         assertThat(duelSimulationService.capturedRequest.seed()).isEqualTo(99L);
         assertThat(duelSimulationService.capturedRequest.arena().durationMs()).isEqualTo(30_000);
-        assertThat(duelSimulationService.capturedRequest.arena().obstacles()).hasSize(1);
-        assertThat(duelSimulationService.capturedRequest.arena().obstacles().getFirst().id()).isEqualTo("object_1");
+        assertThat(duelSimulationService.capturedRequest.arena().obstacles()).hasSize(2);
+        assertThat(duelSimulationService.capturedRequest.arena().obstacles())
+                .extracting(ObstacleRequest::id, ObstacleRequest::type, ObstacleRequest::x, ObstacleRequest::y)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("object_center", "radarJammer", 400.0, 400.0),
+                        org.assertj.core.groups.Tuple.tuple("object_1", "healthPack", 300.0, 120.0));
         assertThat(duelSimulationService.capturedRequest.fighters()).hasSize(2);
+        assertThat(duelSimulationService.capturedRequest.fighters().getFirst().x()).isEqualTo(400.0);
+        assertThat(duelSimulationService.capturedRequest.fighters().getFirst().y()).isEqualTo(120.0);
         assertThat(duelSimulationService.capturedRequest.fighters().getFirst().brain().get("blocks")).hasSize(1);
     }
 
@@ -70,9 +81,11 @@ class MatchSimulationServiceTest {
                 Instant.now(),
                 Instant.now(),
                 Instant.now(),
+                Instant.now(),
                 1,
                 2,
-                List.of());
+                List.of(),
+                Map.of());
 
         List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles = service.buildMatchObstacles(session);
 
@@ -108,7 +121,7 @@ class MatchSimulationServiceTest {
                 int arenaHeight,
                 List<DuelFighterRequest> fighterRequests) {
             generatedObstacles = List.of(
-                    new MatchPlaybackDTO.ObstaclePlacementDTO("object_1", "damageZone", 450.0, 410.0, 128));
+                    new MatchPlaybackDTO.ObstaclePlacementDTO("object_1", "healthPack", 450.0, 120.0, 42));
             return generatedObstacles;
         }
     }

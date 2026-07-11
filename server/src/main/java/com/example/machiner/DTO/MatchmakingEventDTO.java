@@ -3,6 +3,7 @@ package com.example.machiner.DTO;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import tools.jackson.databind.JsonNode;
 
 public record MatchmakingEventDTO(
         String type,
@@ -14,6 +15,7 @@ public record MatchmakingEventDTO(
         List<MatchmakingPlayerDTO> players,
         Instant serverNow,
         Instant classSelectionEndsAt,
+        Instant objectPlacementEndsAt,
         Instant countdownEndsAt,
         Instant trainingEndsAt,
         Instant playbackStartsAt,
@@ -23,5 +25,13 @@ public record MatchmakingEventDTO(
         Integer roundNumber,
         Integer winsRequired,
         String message,
-        List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
+        UUID objectPlacementUserId,
+        List<MatchPlaybackDTO.ObstaclePlacementDTO> objectPlacements,
+        List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles,
+        List<RoundBrainDTO> roundBrains,
+        Boolean previousRoundWon,
+        Integer roundBlockLimit) {
+
+    public record RoundBrainDTO(int roundNumber, JsonNode brain, boolean won) {
+    }
 }

@@ -22,7 +22,9 @@ import com.example.machiner.repository.ProfileRepository;
 import com.example.machiner.repository.UserRepository;
 import com.example.machiner.service.MatchmakingService.MatchSession;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
@@ -39,9 +41,12 @@ class MatchmakingServiceTest {
     private final ModelSubmissionRepository modelSubmissionRepository = mock(ModelSubmissionRepository.class);
     private final ProfileRepository profileRepository = mock(ProfileRepository.class);
     private final UserRepository userRepository = mock(UserRepository.class);
-    private final Clock clock = Clock.fixed(Instant.parse("2026-06-03T12:00:00Z"), ZoneOffset.UTC);
+    private final MutableClock clock = new MutableClock(Instant.parse("2026-06-03T12:00:00Z"), ZoneOffset.UTC);
     private final List<MatchPlaybackDTO.ObstaclePlacementDTO> matchObstacles = List.of(
-            new MatchPlaybackDTO.ObstaclePlacementDTO("object_1", "healthPack", 300.0, 400.0, 42));
+            new MatchPlaybackDTO.ObstaclePlacementDTO("object_center", "radarJammer", 400.0, 400.0, 92),
+            new MatchPlaybackDTO.ObstaclePlacementDTO("object_buff_1", "overdrive", 200.0, 400.0, 76, 0.0, 50),
+            new MatchPlaybackDTO.ObstaclePlacementDTO("object_buff_2", "barrier", 600.0, 400.0, 76, 0.0, 50));
+    private final List<MatchSession> simulatedSessions = new ArrayList<>();
     private final List<MatchParticipant> participants = new ArrayList<>();
 
     private Match savedMatch;
@@ -88,7 +93,9 @@ class MatchmakingServiceTest {
         when(simulationService.buildMatchObstacles(any(MatchSession.class))).thenReturn(matchObstacles);
         when(simulationService.buildDuelPlayback(any(MatchSession.class), any())).thenAnswer(invocation -> {
             MatchSession session = invocation.getArgument(0);
-            assertThat(session.obstacles()).isEqualTo(matchObstacles);
+            simulatedSessions.add(session);
+            assertThat(session.obstacles()).extracting(MatchPlaybackDTO.ObstaclePlacementDTO::id)
+                    .contains("object_center", "object_buff_1", "object_buff_2");
             MatchmakingService.MatchPlayer winner = session.players().stream()
                     .filter(player -> player.slot() == 2)
                     .findFirst()
@@ -146,13 +153,13 @@ class MatchmakingServiceTest {
             assertThat(event.countdownEndsAt()).isNull();
             assertThat(event.trainingEndsAt()).isNull();
             assertThat(event.rulesetVersion()).isEqualTo("duel-v1");
-            assertThat(event.obstacles()).isEqualTo(matchObstacles);
+            assertThat(event.obstacles()).isEmpty();
         });
         assertThat(participants).hasSize(2);
     }
 
     @Test
-    void bothPlayersSelectingClassStartsCountdown() {
+    void bothPlayersSelectingClassStartsObjectPlacementThenCountdown() {
         UUID firstUserId = UUID.randomUUID();
         UUID secondUserId = UUID.randomUUID();
         service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
@@ -172,12 +179,129 @@ class MatchmakingServiceTest {
                 service.selectClass(secondUserId, "melee");
         assertThat(secondSelection).hasSize(2);
         assertThat(secondSelection).allSatisfy(outbound -> {
-            assertThat(outbound.event().type()).isEqualTo("MATCH_COUNTDOWN_READY");
-            assertThat(outbound.event().status()).isEqualTo("COUNTDOWN");
-            assertThat(outbound.event().countdownEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:00:05Z"));
-            assertThat(outbound.event().trainingEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:10:05Z"));
+            assertThat(outbound.event().type()).isEqualTo("MATCH_OBJECT_PLACEMENT_READY");
+            assertThat(outbound.event().status()).isEqualTo("OBJECT_PLACEMENT");
+            assertThat(outbound.event().objectPlacementEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:00:20Z"));
+            assertThat(outbound.event().countdownEndsAt()).isNull();
             assertThat(outbound.event().players()).extracting("classSelected").containsOnly(true);
             assertThat(outbound.event().players()).extracting("selectedClass").containsExactlyInAnyOrder("ranged", "melee");
+        });
+
+        List<MatchmakingService.OutboundMatchmakingEvent> firstPlacement =
+                service.submitObjectPlacements(firstUserId, List.of(playerObject("top-object", "healthPack", 300, 120, 42)));
+        assertThat(firstPlacement).extracting(MatchmakingService.OutboundMatchmakingEvent::principalName)
+                .containsExactlyInAnyOrder("pilot-one@example.com", "pilot-two@example.com");
+        assertThat(firstPlacement).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("PLAYER_OBJECTS_PLACED");
+            assertThat(outbound.event().status()).isEqualTo("OBJECT_PLACEMENT");
+            assertThat(outbound.event().objectPlacementUserId()).isEqualTo(firstUserId);
+            assertThat(outbound.event().obstacles()).extracting(MatchPlaybackDTO.ObstaclePlacementDTO::id)
+                    .containsExactly("object_center", "object_buff_1", "object_buff_2");
+            assertThat(outbound.event().players()).filteredOn("username", "pilot-one")
+                    .extracting("objectPlacementSubmitted")
+                    .containsExactly(true);
+            assertThat(outbound.event().players()).filteredOn("username", "pilot-two")
+                    .extracting("objectPlacementSubmitted")
+                    .containsExactly(false);
+        });
+        assertThat(firstPlacement)
+                .filteredOn(outbound -> outbound.event().player().username().equals("pilot-two"))
+                .allSatisfy(outbound -> {
+                    assertThat(outbound.event().player().objectPlacementSubmitted()).isFalse();
+                    assertThat(outbound.event().opponent().objectPlacementSubmitted()).isTrue();
+                    assertThat(outbound.event().objectPlacements()).isEmpty();
+                });
+        assertThat(firstPlacement)
+                .filteredOn(outbound -> outbound.event().player().username().equals("pilot-one"))
+                .allSatisfy(outbound -> {
+                    assertThat(outbound.event().player().objectPlacementSubmitted()).isTrue();
+                    assertThat(outbound.event().objectPlacements()).hasSize(1);
+                    assertThat(outbound.event().objectPlacements().getFirst().type()).isEqualTo("healthPack");
+                });
+
+        List<MatchmakingService.OutboundMatchmakingEvent> secondPlacement =
+                service.submitObjectPlacements(secondUserId, List.of(playerObject("bottom-object", "bouncyWall", 300, 700, 120)));
+        assertThat(secondPlacement).hasSize(2);
+        assertThat(secondPlacement).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_COUNTDOWN_READY");
+            assertThat(outbound.event().status()).isEqualTo("COUNTDOWN");
+            assertThat(outbound.event().objectPlacementEndsAt()).isNull();
+            assertThat(outbound.event().countdownEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:00:05Z"));
+            assertThat(outbound.event().trainingEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:10:05Z"));
+            assertThat(outbound.event().obstacles()).hasSize(5);
+            assertThat(outbound.event().obstacles()).extracting(MatchPlaybackDTO.ObstaclePlacementDTO::id)
+                    .containsExactly("object_center", "object_buff_1", "object_buff_2", "object_1", "object_2");
+        });
+    }
+
+    @Test
+    void emptyObjectSubmissionIsAcknowledgedAndDoesNotCreatePlaceholderObjects() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
+
+        List<MatchmakingService.OutboundMatchmakingEvent> firstPlacement =
+                service.submitObjectPlacements(firstUserId, List.of());
+
+        assertThat(firstPlacement).hasSize(2);
+        assertThat(firstPlacement).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("PLAYER_OBJECTS_PLACED");
+            assertThat(outbound.event().objectPlacementUserId()).isEqualTo(firstUserId);
+            assertThat(outbound.event().players()).filteredOn("username", "pilot-one")
+                    .extracting("objectPlacementSubmitted")
+                    .containsExactly(true);
+            assertThat(outbound.event().players()).filteredOn("username", "pilot-two")
+                    .extracting("objectPlacementSubmitted")
+                    .containsExactly(false);
+            assertThat(outbound.event().objectPlacements()).isEmpty();
+        });
+
+        List<MatchmakingService.OutboundMatchmakingEvent> secondPlacement =
+                service.submitObjectPlacements(secondUserId,
+                        List.of(playerObject("bottom-object", "healthPack", 300, 700, 42)));
+
+        assertThat(secondPlacement).hasSize(2).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_COUNTDOWN_READY");
+            assertThat(outbound.event().obstacles()).extracting(MatchPlaybackDTO.ObstaclePlacementDTO::id)
+                    .containsExactly("object_center", "object_buff_1", "object_buff_2", "object_1");
+        });
+    }
+
+    @Test
+    void objectSubmissionIsCappedAtThreeAndClampedToThePlayersThird() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
+
+        List<MatchmakingService.OutboundMatchmakingEvent> firstPlacement =
+                service.submitObjectPlacements(firstUserId, List.of(
+                        playerObject("one", "healthPack", -100, -100, 42),
+                        playerObject("two", "projectileWall", 900, 900, 120),
+                        playerObject("three", "bouncyWall", 400, 400, 120),
+                        playerObject("ignored", "healthPack", 200, 200, 42)));
+
+        assertThat(firstPlacement).filteredOn(outbound -> outbound.principalName().equals("pilot-one@example.com"))
+                .singleElement()
+                .satisfies(outbound -> {
+                    assertThat(outbound.event().objectPlacements()).hasSize(3);
+                    assertThat(outbound.event().objectPlacements()).allSatisfy(object -> {
+                        assertThat(object.x()).isBetween(0.0, 800.0);
+                        assertThat(object.y()).isBetween(0.0, 800.0 / 3.0);
+                    });
+                });
+
+        List<MatchmakingService.OutboundMatchmakingEvent> secondPlacement =
+                service.submitObjectPlacements(secondUserId, List.of());
+        assertThat(secondPlacement).hasSize(2).allSatisfy(outbound -> {
+            assertThat(outbound.event().obstacles()).hasSize(6);
+            assertThat(outbound.event().obstacles()).extracting(MatchPlaybackDTO.ObstaclePlacementDTO::id)
+                    .containsExactly("object_center", "object_buff_1", "object_buff_2", "object_1", "object_2", "object_3");
         });
     }
 
@@ -194,6 +318,32 @@ class MatchmakingServiceTest {
     }
 
     @Test
+    void objectPlacementTimeoutStartsCountdownWithNoObjectsWhenNobodySubmits() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        List<MatchmakingService.OutboundMatchmakingEvent> matchEvents =
+                service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        UUID matchId = matchEvents.getFirst().event().matchId();
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
+
+        clock.advance(Duration.ofSeconds(21));
+        List<MatchmakingService.OutboundMatchmakingEvent> timeoutEvents =
+                service.resolveObjectPlacementTimeout(matchId);
+
+        assertThat(timeoutEvents).hasSize(2);
+        assertThat(timeoutEvents).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_COUNTDOWN_READY");
+            assertThat(outbound.event().status()).isEqualTo("COUNTDOWN");
+            assertThat(outbound.event().obstacles()).extracting(MatchPlaybackDTO.ObstaclePlacementDTO::id)
+                    .containsExactly("object_center", "object_buff_1", "object_buff_2");
+            assertThat(outbound.event().countdownEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:00:26Z"));
+            assertThat(outbound.event().trainingEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:10:26Z"));
+        });
+    }
+
+    @Test
     void firstRoundWinProducesPlaybackAndNextRoundEvents() {
         UUID firstUserId = UUID.randomUUID();
         UUID secondUserId = UUID.randomUUID();
@@ -205,6 +355,12 @@ class MatchmakingServiceTest {
         Long initialSeed = matchFoundEvents.getFirst().event().simulationSeed();
         service.selectClass(firstUserId, "melee");
         service.selectClass(secondUserId, "melee");
+        service.submitObjectPlacements(firstUserId, List.of(playerObject("top-object", "healthPack", 300, 120, 42)));
+        List<MatchmakingService.OutboundMatchmakingEvent> initialRoundEvents =
+                service.submitObjectPlacements(secondUserId,
+                        List.of(playerObject("bottom-object", "bouncyWall", 300, 700, 120)));
+        List<MatchPlaybackDTO.ObstaclePlacementDTO> canonicalRoundObjects =
+                initialRoundEvents.getFirst().event().obstacles();
         stubSubmission(firstUserId, firstSubmissionId);
         stubSubmission(secondUserId, secondSubmissionId);
 
@@ -247,7 +403,9 @@ class MatchmakingServiceTest {
                     assertThat(outbound.event().roundNumber()).isEqualTo(2);
                     assertThat(outbound.event().winsRequired()).isEqualTo(2);
                     assertThat(outbound.event().simulationSeed()).isEqualTo(initialSeed);
-                    assertThat(outbound.event().obstacles()).isEqualTo(matchObstacles);
+                    assertThat(outbound.event().obstacles()).isEqualTo(canonicalRoundObjects);
+                    assertThat(outbound.event().objectPlacementEndsAt()).isNull();
+                    assertThat(outbound.event().countdownEndsAt()).isNotNull();
                     assertThat(outbound.event().player().finished()).isFalse();
                     assertThat(outbound.event().players()).extracting("roundWins").containsExactlyInAnyOrder(0, 1);
                     assertThat(outbound.delayMillis()).isPositive();
@@ -263,6 +421,7 @@ class MatchmakingServiceTest {
         service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
         service.selectClass(firstUserId, "melee");
         service.selectClass(secondUserId, "melee");
+        submitDefaultObjects(firstUserId, secondUserId);
 
         UUID firstRoundFirstSubmission = UUID.randomUUID();
         UUID firstRoundSecondSubmission = UUID.randomUUID();
@@ -270,6 +429,8 @@ class MatchmakingServiceTest {
         stubSubmission(secondUserId, firstRoundSecondSubmission);
         service.markFinished(firstUserId, firstRoundFirstSubmission);
         service.markFinished(secondUserId, firstRoundSecondSubmission);
+        assertThat(service.submitObjectPlacements(firstUserId,
+                List.of(playerObject("ignored-second-round", "projectileWall", 180, 140, 120)))).isEmpty();
 
         UUID secondRoundFirstSubmission = UUID.randomUUID();
         UUID secondRoundSecondSubmission = UUID.randomUUID();
@@ -292,6 +453,51 @@ class MatchmakingServiceTest {
                 });
         assertThat(savedMatch.getStatus()).isEqualTo(MatchStatus.COMPLETED);
         assertThat(savedMatch.getWinnerUser().getId()).isEqualTo(secondUserId);
+    }
+
+    @Test
+    void laterRoundsReuseInitialObjectPlacementsAndSkipPlacement() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
+        submitDefaultObjects(firstUserId, secondUserId);
+
+        UUID firstRoundFirstSubmission = UUID.randomUUID();
+        UUID firstRoundSecondSubmission = UUID.randomUUID();
+        stubSubmission(firstUserId, firstRoundFirstSubmission);
+        stubSubmission(secondUserId, firstRoundSecondSubmission);
+        service.markFinished(firstUserId, firstRoundFirstSubmission);
+        service.markFinished(secondUserId, firstRoundSecondSubmission);
+
+        assertThat(service.submitObjectPlacements(firstUserId,
+                List.of(playerObject("top-second-round", "projectileWall", 180, 140, 120)))).isEmpty();
+        assertThat(service.submitObjectPlacements(secondUserId,
+                List.of(playerObject("bottom-second-round", "healthPack", 620, 690, 42)))).isEmpty();
+
+        UUID secondRoundFirstSubmission = UUID.randomUUID();
+        UUID secondRoundSecondSubmission = UUID.randomUUID();
+        stubSubmission(firstUserId, secondRoundFirstSubmission);
+        stubSubmission(secondUserId, secondRoundSecondSubmission);
+        service.markFinished(firstUserId, secondRoundFirstSubmission);
+        service.markFinished(secondUserId, secondRoundSecondSubmission);
+
+        assertThat(simulatedSessions).hasSize(2);
+        assertThat(simulatedSessions.get(1).obstacles())
+                .filteredOn(obstacle -> obstacle.id().equals("object_1") || obstacle.id().equals("object_2"))
+                .extracting(MatchPlaybackDTO.ObstaclePlacementDTO::type)
+                .containsExactly("healthPack", "bouncyWall");
+        assertThat(simulatedSessions.get(1).obstacles()).isEqualTo(simulatedSessions.get(0).obstacles());
+        assertThat(simulatedSessions.get(1).obstacles())
+                .filteredOn(obstacle -> obstacle.id().equals("object_1"))
+                .singleElement()
+                .satisfies(obstacle -> assertThat(obstacle.x()).isEqualTo(300.0));
+        assertThat(simulatedSessions.get(1).obstacles())
+                .filteredOn(obstacle -> obstacle.id().equals("object_2"))
+                .singleElement()
+                .satisfies(obstacle -> assertThat(obstacle.x()).isEqualTo(300.0));
     }
 
     @Test
@@ -342,6 +548,15 @@ class MatchmakingServiceTest {
                 .thenReturn(Optional.of(submission));
     }
 
+    private void submitDefaultObjects(UUID firstUserId, UUID secondUserId) {
+        service.submitObjectPlacements(firstUserId, List.of(playerObject("top-object", "healthPack", 300, 120, 42)));
+        service.submitObjectPlacements(secondUserId, List.of(playerObject("bottom-object", "bouncyWall", 300, 700, 120)));
+    }
+
+    private MatchPlaybackDTO.ObstaclePlacementDTO playerObject(String id, String type, double x, double y, int size) {
+        return new MatchPlaybackDTO.ObstaclePlacementDTO(id, type, x, y, size);
+    }
+
     private AppUser user(UUID userId) {
         AppUser user = new AppUser();
         user.setId(userId);
@@ -349,5 +564,34 @@ class MatchmakingServiceTest {
         user.setEmail(userId + "@example.com");
         user.setNormalizedEmail(userId + "@example.com");
         return user;
+    }
+
+    private static final class MutableClock extends Clock {
+        private Instant instant;
+        private final ZoneId zone;
+
+        private MutableClock(Instant instant, ZoneId zone) {
+            this.instant = instant;
+            this.zone = zone;
+        }
+
+        private void advance(Duration duration) {
+            instant = instant.plus(duration);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return zone;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            return new MutableClock(instant, zone);
+        }
+
+        @Override
+        public Instant instant() {
+            return instant;
+        }
     }
 }

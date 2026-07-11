@@ -77,6 +77,7 @@ test("encodes up to five obstacle slots after duel features", () => {
     payload.objects.push(
         { id: "object_1", type: "healthPack", x: 500, y: 400, size: 42 },
         { id: "object_2", type: "damageZone", x: 400, y: 300, size: 128 },
+        { id: "object_3", type: "projectileWall", x: 300, y: 400, size: 120 },
     );
 
     const vector = buildInputVector(payload);
@@ -89,6 +90,10 @@ test("encodes up to five obstacle slots after duel features", () => {
     assert.equal(vector[33], 0);
     assert.equal(vector[34], 1);
     assert.ok(Math.abs(vector[36] + 0.125) < 0.00001);
+    assert.equal(vector[38], 1);
+    assert.equal(vector[39], 0);
+    assert.equal(vector[40], 0);
+    assert.ok(Math.abs(vector[41] + 0.125) < 0.00001);
 });
 
 test("encodes HP, edge distance, enemy combat state, and radial velocity", () => {

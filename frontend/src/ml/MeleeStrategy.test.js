@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
     ACTION_TYPES,
+    CONDITION_TYPES,
     actionSupportsTarget,
     createDefaultMeleeStrategyConfiguration,
     createExpressionCondition,
@@ -9,6 +10,7 @@ import {
     createLogicBlock,
     normalizeMeleeStrategyConfiguration,
     radialVelocityTowardPlayer,
+    resolveMeleeStrategyTarget,
     selectMeleeStrategyActionPlan,
     selectMeleeStrategyBlock,
     selectMeleeStrategyIntent,
@@ -175,6 +177,39 @@ test("same-priority movement and dash blocks merge by action head", () => {
     assert.equal(selectMeleeStrategyIntent({ blocks: [moveBlock, dashBlock] }, payload()).dash, 1);
 });
 
+test("dash blocks do not keep moving while dash is on cooldown", () => {
+    const grenadeObject = {
+        id: "grenade-opponent-model-1",
+        type: "grenade",
+        ownerId: "opponent-model",
+        x: 500,
+        y: 400,
+        size: 12,
+    };
+    const dodgeGrenade = {
+        ...createLogicBlock("target_exists", "dash_tangent_right"),
+        conditions: [{ type: "target_exists", target: "opponent_grenade" }],
+        actionTarget: "opponent_grenade",
+    };
+    const readyPlan = selectMeleeStrategyActionPlan({ blocks: [dodgeGrenade] }, payload({
+        playerModel: { dashAvailable: true },
+        objects: [grenadeObject],
+    }));
+    const cooldownPlan = selectMeleeStrategyActionPlan({ blocks: [dodgeGrenade] }, payload({
+        playerModel: { dashAvailable: false },
+        objects: [grenadeObject],
+    }));
+
+    assert.equal(readyPlan.dash.id, dodgeGrenade.id);
+    assert.equal(readyPlan.dashMovement.id, dodgeGrenade.id);
+    assert.equal(cooldownPlan.dash, undefined);
+    assert.equal(cooldownPlan.dashMovement, undefined);
+    assert.equal(shouldAllowMeleeStrategyDash({ blocks: [dodgeGrenade] }, payload({
+        playerModel: { dashAvailable: false },
+        objects: [grenadeObject],
+    })), false);
+});
+
 test("cluster conditions and cluster priority gate nested logic blocks", () => {
     const fallback = createLogicBlock("enemy_distance_gt", "move_inward");
     const cluster = {
@@ -283,6 +318,48 @@ test("grenade conditionals select the ranged grenade action head", () => {
     })).intent, "attack_target");
 });
 
+test("fireball conditionals select the mage fireball action head", () => {
+    const shootWhenReady = createLogicBlock("my_fireball_ready", "shoot_fireball");
+    const plan = selectMeleeStrategyActionPlan({
+        blocks: [shootWhenReady],
+    }, payload({
+        playerModel: {
+            fireballAvailable: true,
+            fireballCharges: 4,
+        },
+    }));
+
+    assert.equal(plan.fireball.id, shootWhenReady.id);
+    assert.equal(selectMeleeStrategyIntent({
+        blocks: [shootWhenReady],
+    }, payload({
+        playerModel: {
+            fireballAvailable: true,
+            fireballCharges: 4,
+        },
+    })).intent, "attack_target");
+});
+
+test("stun conditionals select the mage stun action head", () => {
+    const stunWhenReady = createLogicBlock("my_stun_ready", "stun");
+    const plan = selectMeleeStrategyActionPlan({
+        blocks: [stunWhenReady],
+    }, payload({
+        playerModel: {
+            stunAvailable: true,
+        },
+    }));
+
+    assert.equal(plan.stun.id, stunWhenReady.id);
+    assert.equal(selectMeleeStrategyIntent({
+        blocks: [stunWhenReady],
+    }, payload({
+        playerModel: {
+            stunAvailable: true,
+        },
+    })).intent, "attack_target");
+});
+
 test("dash is allowed only when a matching dash block owns the action and no veto matches", () => {
     assert.equal(shouldAllowMeleeStrategyDash({
         blocks: [createLogicBlock("enemy_distance_gt", "move_inward")],
@@ -310,6 +387,193 @@ test("object target conditions select rules against specific object slots", () =
     }, payload({ objects: [{ id: "object_1", type: "healthPack", x: 300, y: 400, size: 42 }] }));
 
     assert.equal(selected.id, healthPackRule.id);
+    assert.equal(selectMeleeStrategyIntent({ blocks: [healthPackRule] }, payload({
+        objects: [{ id: "object_1", type: "healthPack", x: 300, y: 400, size: 42 }],
+    })).target, "object_1");
+    assert.equal(resolveMeleeStrategyTarget(payload({
+        objects: [{ id: "object_1", type: "healthPack", x: 300, y: 400, size: 42 }],
+    }), "object_1")?.type, "healthPack");
+});
+
+test("all arena object types can be movement targets", () => {
+    const targetableObjects = [
+        ["object_center", "radarJammer"],
+        ["object_center", "commandLock"],
+        ["object_buff_1", "overdrive"],
+        ["object_buff_2", "barrier"],
+        ["object_buff_1", "inhibition"],
+        ["object_1", "healthPack"],
+        ["object_1", "projectileWall"],
+        ["object_1", "bouncyWall"],
+    ];
+
+    for (const [targetId, type] of targetableObjects) {
+        const rule = {
+            ...createLogicBlock("target_exists", "move_inward"),
+            conditions: [{ type: "target_exists", target: targetId }],
+            actionTarget: targetId,
+        };
+        const state = payload({
+            playerModel: { x: 100, y: 400 },
+            objects: [{ id: targetId, type, x: 500, y: 400, size: 76 }],
+        });
+
+        assert.equal(selectMeleeStrategyBlock({ blocks: [rule] }, state)?.id, rule.id);
+        assert.equal(selectMeleeStrategyIntent({ blocks: [rule] }, state).target, targetId);
+        assert.equal(resolveMeleeStrategyTarget(state, targetId)?.type, type);
+    }
+});
+
+test("object compare conditions preserve health pack movement targets", () => {
+    const healthPackRule = {
+        ...createLogicBlock("always", "move_inward"),
+        conditions: [{
+            type: "expression",
+            left: "target.isHealthPack",
+            comparator: "eq",
+            right: { type: "boolean", value: true },
+            target: "object_1",
+        }],
+        actionTarget: "object_1",
+    };
+    const state = payload({
+        playerModel: { x: 100, y: 400 },
+        objects: [{ id: "object_1", type: "healthPack", x: 300, y: 400, size: 42 }],
+    });
+
+    assert.equal(selectMeleeStrategyBlock({ blocks: [healthPackRule] }, state)?.id, healthPackRule.id);
+    assert.equal(selectMeleeStrategyIntent({ blocks: [healthPackRule] }, state).target, "object_1");
+    assert.equal(resolveMeleeStrategyTarget(state, "object_1")?.type, "healthPack");
+});
+
+test("center objective targets remain valid movement targets", () => {
+    const jammerRule = {
+        ...createLogicBlock("target_exists", "move_inward"),
+        conditions: [{ type: "target_exists", target: "object_center" }],
+        actionTarget: "object_center",
+    };
+    const state = payload({
+        playerModel: { x: 100, y: 400 },
+        objects: [{ id: "object_center", type: "radarJammer", x: 400, y: 400, size: 92 }],
+    });
+
+    assert.equal(selectMeleeStrategyBlock({ blocks: [jammerRule] }, state).id, jammerRule.id);
+    assert.equal(selectMeleeStrategyIntent({ blocks: [jammerRule] }, state).target, "object_center");
+
+    const compareJammerRule = {
+        ...createLogicBlock("always", "move_inward"),
+        conditions: [{
+            type: "expression",
+            left: "target.exists",
+            comparator: "eq",
+            right: { type: "boolean", value: true },
+            target: "object_center",
+        }],
+        actionTarget: "object_center",
+    };
+    assert.equal(selectMeleeStrategyBlock({ blocks: [compareJammerRule] }, state).id, compareJammerRule.id);
+    assert.equal(selectMeleeStrategyIntent({ blocks: [compareJammerRule] }, state).target, "object_center");
+});
+
+test("projectile walls are targetable arena objects", () => {
+    const wallRule = {
+        ...createLogicBlock("target_projectile_wall", "move_inward"),
+        conditions: [{ type: "target_projectile_wall", target: "object_1" }],
+        actionTarget: "object_1",
+    };
+    const selected = selectMeleeStrategyBlock({
+        blocks: [wallRule],
+    }, payload({
+        objects: [{
+            id: "object_1",
+            type: "projectileWall",
+            x: 500,
+            y: 300,
+            size: 120,
+        }],
+    }));
+
+    assert.equal(selected?.id, wallRule.id);
+});
+
+test("bouncy walls are targetable arena objects", () => {
+    const wallRule = {
+        ...createLogicBlock("target_bouncy_wall", "move_inward"),
+        conditions: [{ type: "target_bouncy_wall", target: "object_1" }],
+        actionTarget: "object_1",
+    };
+    const selected = selectMeleeStrategyBlock({
+        blocks: [wallRule],
+    }, payload({
+        objects: [{
+            id: "object_1",
+            type: "bouncyWall",
+            x: 500,
+            y: 300,
+            size: 120,
+            rotation: 45,
+        }],
+    }));
+
+    assert.equal(selected?.id, wallRule.id);
+});
+
+test("wall compare conditions preserve projectile and bouncy wall movement targets", () => {
+    for (const [type, variable] of [
+        ["projectileWall", "target.isProjectileWall"],
+        ["bouncyWall", "target.isBouncyWall"],
+    ]) {
+        const wallRule = {
+            ...createLogicBlock("always", "move_inward"),
+            conditions: [{
+                type: "expression",
+                left: variable,
+                comparator: "eq",
+                right: { type: "boolean", value: true },
+                target: "object_1",
+            }],
+            actionTarget: "object_1",
+        };
+        const state = payload({
+            playerModel: { x: 100, y: 300 },
+            objects: [{
+                id: "object_1",
+                type,
+                x: 500,
+                y: 300,
+                size: 120,
+            }],
+        });
+
+        assert.equal(selectMeleeStrategyBlock({ blocks: [wallRule] }, state)?.id, wallRule.id);
+        assert.equal(selectMeleeStrategyIntent({ blocks: [wallRule] }, state).target, "object_1");
+        assert.equal(resolveMeleeStrategyTarget(state, "object_1")?.type, type);
+    }
+});
+
+test("opponent object distance conditions measure from the opponent", () => {
+    const nearObjectRule = {
+        ...createLogicBlock("opponent_object_distance_lt", "move_stop"),
+        conditions: [{
+            type: "opponent_object_distance_lt",
+            value: 75,
+            target: "object_1",
+        }],
+    };
+    const selected = selectMeleeStrategyBlock({
+        blocks: [nearObjectRule],
+    }, payload({
+        opponent: { x: 600, y: 400 },
+        objects: [{
+            id: "object_1",
+            type: "healthPack",
+            x: 650,
+            y: 400,
+            size: 40,
+        }],
+    }));
+
+    assert.equal(selected?.id, nearObjectRule.id);
 });
 
 test("opponent grenade can be used as a condition and movement target", () => {
@@ -332,6 +596,11 @@ test("opponent grenade can be used as a condition and movement target", () => {
 
     assert.equal(selected.id, dodgeGrenade.id);
     assert.equal(selectMeleeStrategyIntent({ blocks: [dodgeGrenade] }, payload({ objects: [grenadeObject] })).target, "opponent_grenade");
+    assert.equal(resolveMeleeStrategyTarget({
+        objects: payload({ objects: [grenadeObject] }).objects,
+        opponent: { id: "opponent-model" },
+        obstacles: [],
+    }, "opponent_grenade")?.id, grenadeObject.id);
 });
 
 test("opponent grenade expression variables resolve from target selectors", () => {
@@ -357,6 +626,39 @@ test("opponent grenade expression variables resolve from target selectors", () =
             size: 12,
         }],
     })).id, grenadeNear.id);
+});
+
+test("opponent fireball target resolves the closest opponent fireball", () => {
+    const farFireball = {
+        id: "fireball-opponent-model-1",
+        type: "fireball",
+        ownerId: "opponent-model",
+        x: 700,
+        y: 400,
+        size: 30,
+    };
+    const closeFireball = {
+        id: "fireball-opponent-model-2",
+        type: "fireball",
+        ownerId: "opponent-model",
+        x: 430,
+        y: 400,
+        size: 30,
+    };
+    const dodgeFireball = {
+        ...createLogicBlock("target_exists", "move_outward"),
+        conditions: [{ type: "target_exists", target: "opponent_fireball" }],
+        actionTarget: "opponent_fireball",
+    };
+    const statePayload = payload({ objects: [farFireball, closeFireball] });
+
+    assert.equal(selectMeleeStrategyBlock({ blocks: [dodgeFireball] }, statePayload).id, dodgeFireball.id);
+    assert.equal(resolveMeleeStrategyTarget({
+        objects: statePayload.objects,
+        opponent: { id: "opponent-model" },
+        player: statePayload.playerModel,
+        obstacles: [],
+    }, "opponent_fireball")?.id, closeFireball.id);
 });
 
 test("edge-distance conditionals replace cornered rules with less-than and greater-than options", () => {
@@ -414,6 +716,153 @@ test("expression conditions compare state variables and numeric literals", () =>
 
     assert.equal(selectMeleeStrategyBlock({ blocks: [lowHp] }, payload({ playerModel: { hp: 40 }, opponent: { hp: 60 } })).id, lowHp.id);
     assert.equal(selectMeleeStrategyBlock({ blocks: [farTarget] }, payload()).id, farTarget.id);
+});
+
+test("condition joins can use OR and expression variables expose x/y positions", () => {
+    const anySidePosition = {
+        ...createLogicBlock("always", "move_center"),
+        conditions: [
+            {
+                type: "expression",
+                left: "my.x",
+                comparator: "lt",
+                right: { type: "number", value: 100 },
+            },
+            {
+                type: "expression",
+                join: "or",
+                left: "opponent.y",
+                comparator: "eq",
+                right: { type: "number", value: 400 },
+            },
+        ],
+    };
+    const andPosition = {
+        ...createLogicBlock("always", "move_stop"),
+        conditions: anySidePosition.conditions.map((condition) => ({ ...condition, join: undefined })),
+    };
+
+    const normalized = normalizeMeleeStrategyConfiguration({ blocks: [anySidePosition] });
+    assert.equal(normalized.blocks[0].conditions[0].join, undefined);
+    assert.equal(normalized.blocks[0].conditions[1].join, "or");
+    assert.equal(selectMeleeStrategyBlock({ blocks: [anySidePosition] }, payload()).id, anySidePosition.id);
+    assert.equal(selectMeleeStrategyBlock({ blocks: [andPosition] }, payload()), null);
+
+    const readyOrCoolingDown = {
+        ...createLogicBlock("always", "move_stop"),
+        conditions: [
+            { type: "my_dash_ready" },
+            { type: "my_dash_cooldown", join: "or" },
+        ],
+    };
+    assert.deepEqual(validateMeleeStrategyConfiguration({ blocks: [readyOrCoolingDown] }).errors, []);
+});
+
+test("position expression variables can read player and opponent coordinates", () => {
+    const playerLeft = {
+        ...createLogicBlock("always", "move_east"),
+        conditions: [{ type: "expression", left: "my.x", comparator: "lt", right: { type: "number", value: 200 } }],
+    };
+    const playerLow = {
+        ...createLogicBlock("always", "move_north"),
+        conditions: [{ type: "expression", left: "my.y", comparator: "gt", right: { type: "number", value: 500 } }],
+    };
+    const opponentRight = {
+        ...createLogicBlock("always", "move_center"),
+        conditions: [{ type: "expression", left: "opponent.x", comparator: "gt", right: { type: "number", value: 650 } }],
+    };
+    const opponentHigh = {
+        ...createLogicBlock("always", "move_south"),
+        conditions: [{ type: "expression", left: "opponent.y", comparator: "lt", right: { type: "number", value: 250 } }],
+    };
+
+    assert.equal(selectMeleeStrategyBlock({ blocks: [playerLeft] }, payload({ playerModel: { x: 150 } })).id, playerLeft.id);
+    assert.equal(selectMeleeStrategyBlock({ blocks: [playerLow] }, payload({ playerModel: { y: 650 } })).id, playerLow.id);
+    assert.equal(selectMeleeStrategyBlock({ blocks: [opponentRight] }, payload({ opponent: { x: 700 } })).id, opponentRight.id);
+    assert.equal(selectMeleeStrategyBlock({ blocks: [opponentHigh] }, payload({ opponent: { y: 200 } })).id, opponentHigh.id);
+});
+
+test("buff and effect timer variables use comparator choices", () => {
+    const overdriveActive = {
+        ...createLogicBlock("always", "move_center"),
+        conditions: [{ type: "expression", left: "my.overdriveMs", comparator: "gt", right: { type: "number", value: 2 } }],
+    };
+    const opponentJammedAlmostDone = {
+        ...createLogicBlock("always", "move_inward"),
+        conditions: [{ type: "expression", left: "opponent.jammedMs", comparator: "lte", right: { type: "number", value: 1 } }],
+    };
+
+    assert.equal(selectMeleeStrategyBlock({
+        blocks: [overdriveActive],
+    }, payload({ playerModel: { overdriveMs: 3000 } })).id, overdriveActive.id);
+    assert.equal(selectMeleeStrategyBlock({
+        blocks: [opponentJammedAlmostDone],
+    }, payload({ opponent: { jammedMs: 900 } })).id, opponentJammedAlmostDone.id);
+});
+
+test("radar jammer suppresses blocks that use visible targets", () => {
+    const chaseTarget = {
+        ...createLogicBlock("always", "move_inward"),
+        actionTarget: "opponent",
+    };
+    const checkOwnJammed = {
+        ...createLogicBlock("always", "move_stop"),
+        conditions: [{ type: "expression", left: "my.jammed", comparator: "eq", right: { type: "boolean", value: true } }],
+    };
+
+    assert.equal(selectMeleeStrategyBlock({
+        blocks: [chaseTarget],
+    }, payload({ playerModel: { jammedMs: 3000 } })), null);
+    assert.equal(selectMeleeStrategyBlock({
+        blocks: [checkOwnJammed],
+    }, payload({ playerModel: { jammedMs: 3000 } })).id, checkOwnJammed.id);
+});
+
+test("cooldown expression variables use seconds and behavior shortcuts stay hidden", () => {
+    const visibleConditionIds = new Set(CONDITION_TYPES.map((condition) => condition.id));
+    assert.equal(visibleConditionIds.has("expression"), false);
+    assert.equal(visibleConditionIds.has("my_hp_lt"), false);
+    assert.equal(visibleConditionIds.has("my_hp_gt"), false);
+    assert.equal(visibleConditionIds.has("enemy_distance_lt"), false);
+    assert.equal(visibleConditionIds.has("enemy_distance_gt"), false);
+    assert.equal(visibleConditionIds.has("enemy_rushing"), false);
+    assert.equal(visibleConditionIds.has("enemy_fleeing"), false);
+    assert.equal(visibleConditionIds.has("enemy_attacking"), false);
+    assert.equal(visibleConditionIds.has("enemy_blocking"), false);
+
+    const dashStillCoolingDown = {
+        ...createLogicBlock("always", "move_stop"),
+        conditions: [{
+            type: "expression",
+            left: "my.dashCooldownMs",
+            comparator: "gt",
+            right: { type: "number", value: 0.5 },
+        }],
+    };
+
+    assert.equal(selectMeleeStrategyBlock({
+        blocks: [dashStillCoolingDown],
+    }, payload({ playerModel: { dashCooldownRemainingMs: 750 } })).id, dashStillCoolingDown.id);
+    assert.equal(selectMeleeStrategyBlock({
+        blocks: [dashStillCoolingDown],
+    }, payload({ playerModel: { dashCooldownRemainingMs: 250 } })), null);
+
+    const dashHasCharges = {
+        ...createLogicBlock("always", "dash"),
+        conditions: [{
+            type: "expression",
+            left: "my.dashCharges",
+            comparator: "gt",
+            right: { type: "number", value: 1 },
+        }],
+    };
+
+    assert.equal(selectMeleeStrategyBlock({
+        blocks: [dashHasCharges],
+    }, payload({ playerModel: { dashCharges: 2 } })).id, dashHasCharges.id);
+    assert.equal(selectMeleeStrategyBlock({
+        blocks: [dashHasCharges],
+    }, payload({ playerModel: { dashCharges: 1 } })), null);
 });
 
 test("expression conditions normalize and compare boolean variables", () => {

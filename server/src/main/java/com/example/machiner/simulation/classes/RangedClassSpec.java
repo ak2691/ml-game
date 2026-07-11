@@ -24,7 +24,7 @@ public class RangedClassSpec implements CombatClassSpec {
 
     @Override
     public int maxHp() {
-        return 100;
+        return 90;
     }
 
     @Override

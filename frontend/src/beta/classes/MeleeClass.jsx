@@ -1,9 +1,11 @@
-export const MELEE_HP = 100;
+export const MELEE_HP = 125;
 export const MELEE_DAMAGE = 20;
 export const SWING_COOLDOWN_MS = 1000;
 export const SWING_ACTIVE_MS = 200;
 export const BLOCK_MAX_CHARGES = 5;
 export const BLOCK_RECHARGE_MS = 3000;
+export const DASH_MAX_CHARGES = 2;
+export const DASH_RECHARGE_MS = 4500;
 export const MELEE_MOVE_SPEED = 12;
 
 export const MELEE_CLASS = Object.freeze({
@@ -43,6 +45,8 @@ export const MELEE_CLASS = Object.freeze({
         "my_shield_charges_gt",
         "my_dash_ready",
         "my_dash_cooldown",
+        "my_dash_charges_lt",
+        "my_dash_charges_gt",
     ]),
     opponentConditionIds: Object.freeze([
         "opponent_swing_ready",
@@ -55,5 +59,7 @@ export const MELEE_CLASS = Object.freeze({
         "opponent_shield_charges_gt",
         "opponent_dash_ready",
         "opponent_dash_cooldown",
+        "opponent_dash_charges_lt",
+        "opponent_dash_charges_gt",
     ]),
 });

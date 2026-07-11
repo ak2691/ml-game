@@ -1,4 +1,4 @@
-export const RANGED_HP = 100;
+export const RANGED_HP = 90;
 export const RANGED_AMMO_MAX = 10;
 export const RANGED_RELOAD_MS = 3_000;
 export const GUN_COOLDOWN_MS = Math.round(60_000 / 60);

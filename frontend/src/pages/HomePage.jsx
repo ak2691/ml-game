@@ -13,10 +13,15 @@ export default function HomePage() {
     return (
         <main className="min-h-screen bg-arena-deep text-ink-hi font-ui">
             <header className="flex h-[52px] items-center justify-between border-b border-border-lo bg-arena-panel px-6">
-                <div className="flex items-center gap-3">
+                <button
+                    type="button"
+                    onClick={() => navigate("/home")}
+                    className="flex items-center gap-3 text-left hover:text-cyan-100"
+                    aria-label="Go to home"
+                >
                     <span className="text-xl text-cyan leading-none">M</span>
                     <span className="text-lg font-bold tracking-[0.15em] text-ink-white">MACHINER</span>
-                </div>
+                </button>
                 <button
                     onClick={handleLogout}
                     className="rounded border border-border-lo bg-zinc-900 px-3 py-1 text-xs font-bold text-ink-muted hover:text-ink-white"

@@ -3,6 +3,7 @@ package com.example.machiner.service;
 import com.example.machiner.DTO.MatchPlaybackDTO;
 import com.example.machiner.DTO.MatchmakingEventDTO;
 import com.example.machiner.DTO.MatchmakingPlayerDTO;
+import com.example.machiner.DTO.MatchmakingEventDTO.RoundBrainDTO;
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.domain.Match;
 import com.example.machiner.domain.MatchParticipant;
@@ -26,15 +27,22 @@ import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
 
 @Service
 public class MatchmakingService {
 
     private static final int COUNTDOWN_SECONDS = 5;
     private static final int CLASS_SELECTION_SECONDS = 30;
+    private static final int OBJECT_PLACEMENT_SECONDS = 20;
     private static final int TRAINING_SECONDS = 600;
+    private static final int OBJECT_PLACEMENT_LIMIT = 3;
+    private static final int MAX_MATCH_OBJECTS = 6;
+    private static final int BUFF_PICKUP_SIZE = 76;
     private static final int RESULT_REVEAL_BUFFER_MS = 250;
     private static final int WINS_REQUIRED = 2;
+    private static final int ROUND_LOGIC_BLOCK_LIMIT = 10;
     private static final String COMPLETION_REASON_SIMULATION = "SIMULATION";
     private static final String COMPLETION_REASON_RESIGNATION = "RESIGNATION";
 
@@ -47,6 +55,8 @@ public class MatchmakingService {
     private final Clock clock;
     private final List<QueuedPlayer> queue = new ArrayList<>();
     private final Map<UUID, MatchSession> activeSessionsByUserId = new HashMap<>();
+    private final Map<UUID, List<RoundSubmissionRecord>> roundHistoryByMatchId = new HashMap<>();
+    private final JsonMapper jsonMapper = new JsonMapper();
 
     public MatchmakingService(
             MatchSimulationService matchSimulationService,
@@ -118,10 +128,12 @@ public class MatchmakingService {
                 classSelectionEndsAt,
                 null,
                 null,
+                null,
                 1,
                 WINS_REQUIRED,
-                List.of());
-        MatchSession session = pendingSession.withObstacles(matchSimulationService.buildMatchObstacles(pendingSession));
+                List.of(),
+                Map.of());
+        MatchSession session = pendingSession;
         createParticipants(match, session);
         activeSessionsByUserId.put(opponent.userId(), session);
         activeSessionsByUserId.put(player.userId(), session);
@@ -144,7 +156,7 @@ public class MatchmakingService {
 
         MatchSession selectedSession = session.withSelectedClass(userId, normalizeSelectedClass(selectedClass), true);
         if (selectedSession.players().stream().allMatch(MatchPlayer::classSelected)) {
-            return startCountdown(selectedSession, "MATCH_COUNTDOWN_READY", "Both classes locked.");
+            return startObjectPlacement(selectedSession, "MATCH_OBJECT_PLACEMENT_READY", "Both classes locked.");
         }
 
         for (MatchPlayer player : selectedSession.players()) {
@@ -173,7 +185,61 @@ public class MatchmakingService {
         if (session.classSelectionEndsAt() != null && Instant.now(clock).isBefore(session.classSelectionEndsAt())) {
             return List.of();
         }
-        return startCountdown(session.withDefaultClassSelections(), "MATCH_COUNTDOWN_READY", "Class selection ended.");
+        return startObjectPlacement(session.withDefaultClassSelections(), "MATCH_OBJECT_PLACEMENT_READY", "Class selection ended.");
+    }
+
+    @Transactional
+    public synchronized List<OutboundMatchmakingEvent> submitObjectPlacements(
+            UUID userId,
+            List<MatchPlaybackDTO.ObstaclePlacementDTO> objects) {
+        MatchSession session = activeSessionsByUserId.get(userId);
+        if (session == null || session.objectPlacementEndsAt() == null || session.countdownEndsAt() != null) {
+            return List.of();
+        }
+        MatchPlayer submittingPlayer = playerForUser(session, userId);
+        List<MatchPlaybackDTO.ObstaclePlacementDTO> normalizedObjects =
+                normalizeObjectPlacements(submittingPlayer, objects);
+        MatchSession placedSession = session.withObjectPlacements(
+                userId,
+                normalizedObjects);
+        boolean allSubmitted = placedSession.players().stream()
+                .allMatch(player -> placedSession.objectPlacementsByUserId().containsKey(player.userId()));
+        if (allSubmitted) {
+            return startCountdown(placedSession.withObstacles(combinedObjectPlacements(placedSession)),
+                    "MATCH_COUNTDOWN_READY",
+                    "Both object layouts locked.");
+        }
+        for (MatchPlayer player : placedSession.players()) {
+            activeSessionsByUserId.put(player.userId(), placedSession);
+        }
+        return placedSession.players().stream()
+                .map(player -> eventForPlayer(
+                        placedSession,
+                        player,
+                        "PLAYER_OBJECTS_PLACED",
+                        "OBJECT_PLACEMENT",
+                        null,
+                        submittingPlayer.username() + " placed objects.",
+                        submittingPlayer.userId(),
+                        player.userId().equals(submittingPlayer.userId()) ? normalizedObjects : List.of()))
+                .toList();
+    }
+
+    @Transactional
+    public synchronized List<OutboundMatchmakingEvent> resolveObjectPlacementTimeout(UUID matchId) {
+        MatchSession session = activeSessionsByUserId.values().stream()
+                .filter(candidate -> candidate.matchId().equals(matchId))
+                .findFirst()
+                .orElse(null);
+        if (session == null || session.objectPlacementEndsAt() == null || session.countdownEndsAt() != null) {
+            return List.of();
+        }
+        if (Instant.now(clock).isBefore(session.objectPlacementEndsAt())) {
+            return List.of();
+        }
+        return startCountdown(session.withObstacles(combinedObjectPlacements(session)),
+                "MATCH_COUNTDOWN_READY",
+                "Object placement ended.");
     }
 
     public synchronized void leaveQueue(UUID userId) {
@@ -240,6 +306,7 @@ public class MatchmakingService {
         }
 
         ModelSubmission submission = requireValidatedSubmission(userId, modelSubmissionId, session.matchId());
+        validateRoundBrainPolicy(session, userId, submission);
         MatchPlayer submittingPlayer = playerForUser(session, userId);
         String submissionClass = normalizeSelectedClass(submission.getSelectedClass());
         if (!submissionClass.equals(submittingPlayer.selectedClass())) {
@@ -268,6 +335,11 @@ public class MatchmakingService {
         Map<UUID, ModelSubmission> submissionsByUserId = loadFinishedSubmissions(updatedSession);
         MatchPlaybackDTO playback = matchSimulationService.buildDuelPlayback(updatedSession, submissionsByUserId);
         MatchSession scoredSession = updatedSession.withRoundResult(playback.winnerUserId());
+        roundHistoryByMatchId.computeIfAbsent(session.matchId(), ignored -> new ArrayList<>())
+                .add(new RoundSubmissionRecord(
+                        session.roundNumber(),
+                        playback.winnerUserId(),
+                        Map.copyOf(submissionsByUserId)));
         boolean seriesComplete = playback.winnerUserId() != null
                 && playerForUser(scoredSession, playback.winnerUserId()).roundWins() >= scoredSession.winsRequired();
         if (seriesComplete) {
@@ -308,9 +380,8 @@ public class MatchmakingService {
         if (!seriesComplete) {
             Instant nextCountdownEndsAt = resultRevealsAt.plusSeconds(COUNTDOWN_SECONDS);
             Instant nextTrainingEndsAt = nextCountdownEndsAt.plusSeconds(TRAINING_SECONDS);
-            MatchSession nextRoundSession = scoredSession.nextRound(
-                    nextCountdownEndsAt,
-                    nextTrainingEndsAt);
+            MatchSession nextRoundSession = scoredSession.nextRound();
+            nextRoundSession = nextRoundSession.withCountdown(nextCountdownEndsAt, nextTrainingEndsAt);
             for (MatchPlayer player : nextRoundSession.players()) {
                 activeSessionsByUserId.put(player.userId(), nextRoundSession);
                 events.add(eventForPlayer(
@@ -324,6 +395,9 @@ public class MatchmakingService {
                         playbackStartsAt,
                         resultRevealsAt));
             }
+        }
+        if (seriesComplete) {
+            roundHistoryByMatchId.remove(session.matchId());
         }
         return events;
     }
@@ -359,6 +433,26 @@ public class MatchmakingService {
         return Math.max(RESULT_REVEAL_BUFFER_MS, (long) finalElapsedMs + RESULT_REVEAL_BUFFER_MS);
     }
 
+    private List<OutboundMatchmakingEvent> startObjectPlacement(MatchSession session, String type, String message) {
+        Instant objectPlacementEndsAt = Instant.now(clock).plusSeconds(OBJECT_PLACEMENT_SECONDS);
+        MatchSession timedPlacementSession = session.withObjectPlacement(objectPlacementEndsAt);
+        MatchSession placementSession = timedPlacementSession.withObstacles(
+                matchSimulationService.buildMatchObstacles(timedPlacementSession));
+        for (MatchPlayer player : placementSession.players()) {
+            activeSessionsByUserId.put(player.userId(), placementSession);
+            updateParticipantSelectedClass(placementSession.matchId(), player);
+        }
+        return placementSession.players().stream()
+                .map(player -> eventForPlayer(
+                        placementSession,
+                        player,
+                        type,
+                        "OBJECT_PLACEMENT",
+                        null,
+                        message))
+                .toList();
+    }
+
     private List<OutboundMatchmakingEvent> startCountdown(MatchSession session, String type, String message) {
         Instant countdownEndsAt = Instant.now(clock).plusSeconds(COUNTDOWN_SECONDS);
         Instant trainingEndsAt = countdownEndsAt.plusSeconds(TRAINING_SECONDS);
@@ -378,6 +472,84 @@ public class MatchmakingService {
                 .toList();
     }
 
+    private List<MatchPlaybackDTO.ObstaclePlacementDTO> normalizeObjectPlacements(
+            MatchPlayer player,
+            List<MatchPlaybackDTO.ObstaclePlacementDTO> objects) {
+        if (objects == null) return List.of();
+        return objects.stream()
+                .filter(object -> object != null && isPlaceableObjectType(object.type()))
+                .limit(OBJECT_PLACEMENT_LIMIT)
+                .map(object -> normalizeObjectPlacement(player, object))
+                .toList();
+    }
+
+    private MatchPlaybackDTO.ObstaclePlacementDTO normalizeObjectPlacement(
+            MatchPlayer player,
+            MatchPlaybackDTO.ObstaclePlacementDTO object) {
+        String type = object.type();
+        int defaultSize = "healthPack".equals(type) ? 42 : isBuffPickupType(type) ? BUFF_PICKUP_SIZE : 120;
+        int size = (int) Math.max(16, Math.min(240, object.size() > 0 ? object.size() : defaultSize));
+        double radius = size / 2.0;
+        double minY = player.slot() == 1 ? radius : 800.0 * 2.0 / 3.0 + radius;
+        double maxY = player.slot() == 1 ? 800.0 / 3.0 - radius : 800.0 - radius;
+        return new MatchPlaybackDTO.ObstaclePlacementDTO(
+                object.id(),
+                type,
+                clamp(object.x(), radius, 800.0 - radius),
+                clamp(object.y(), minY, Math.max(minY, maxY)),
+                size,
+                isWallType(type) ? snapWallRotation(object.rotation()) : 0.0);
+    }
+
+    private List<MatchPlaybackDTO.ObstaclePlacementDTO> combinedObjectPlacements(MatchSession session) {
+        List<MatchPlaybackDTO.ObstaclePlacementDTO> matchObjects = session.obstacles() == null
+                ? List.of()
+                : session.obstacles();
+        List<MatchPlaybackDTO.ObstaclePlacementDTO> orderedObjects = session.players().stream()
+                .flatMap(player -> session.objectPlacementsByUserId()
+                        .getOrDefault(player.userId(), List.of())
+                        .stream())
+                .limit(MAX_MATCH_OBJECTS)
+                .toList();
+        List<MatchPlaybackDTO.ObstaclePlacementDTO> labeledObjects = new ArrayList<>(
+                matchObjects != null ? matchObjects : List.of());
+        for (int index = 0; index < orderedObjects.size(); index += 1) {
+            MatchPlaybackDTO.ObstaclePlacementDTO object = orderedObjects.get(index);
+            labeledObjects.add(new MatchPlaybackDTO.ObstaclePlacementDTO(
+                    "object_" + (index + 1),
+                    object.type(),
+                    object.x(),
+                    object.y(),
+                    object.size(),
+                    object.rotation(),
+                    object.hp()));
+        }
+        return labeledObjects;
+    }
+
+    private boolean isPlaceableObjectType(String type) {
+        return "healthPack".equals(type)
+                || "projectileWall".equals(type)
+                || "bouncyWall".equals(type);
+    }
+
+    private boolean isWallType(String type) {
+        return "projectileWall".equals(type) || "bouncyWall".equals(type);
+    }
+
+    private boolean isBuffPickupType(String type) {
+        return "overdrive".equals(type) || "barrier".equals(type) || "inhibition".equals(type);
+    }
+
+    private double snapWallRotation(double rotation) {
+        return ((Math.round(rotation / 45.0) * 45.0) % 360.0 + 360.0) % 360.0;
+    }
+
+    private double clamp(double value, double min, double max) {
+        if (!Double.isFinite(value)) return min;
+        return Math.max(min, Math.min(max, value));
+    }
+
     private OutboundMatchmakingEvent waitingEvent(UUID userId, String username, String principalName) {
         return new OutboundMatchmakingEvent(
                 principalName,
@@ -395,16 +567,24 @@ public class MatchmakingService {
                         null,
                         null,
                         null,
+                        null,
                         MatchSimulationService.DUEL_RULESET_VERSION,
                         null,
                         null,
                         null,
                         null,
-                        null));
+                        null,
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        null,
+                        ROUND_LOGIC_BLOCK_LIMIT));
     }
 
     private String normalizeSelectedClass(String selectedClass) {
-        return "ranged".equals(selectedClass) ? "ranged" : "melee";
+        if ("ranged".equals(selectedClass)) return "ranged";
+        if ("mage".equals(selectedClass)) return "mage";
+        return "melee";
     }
 
     private Match createMatch(QueuedPlayer firstPlayer, QueuedPlayer secondPlayer) {
@@ -543,8 +723,124 @@ public class MatchmakingService {
         profileRepository.save(profile);
     }
 
+    private void validateRoundBrainPolicy(MatchSession session, UUID userId, ModelSubmission submission) {
+        JsonNode currentBrain = readSubmissionBrain(submission);
+        Map<String, String> currentBlocks = blockFingerprints(currentBrain);
+        List<RoundSubmissionRecord> history = roundHistoryByMatchId.getOrDefault(session.matchId(), List.of());
+        if (history.isEmpty()) {
+            if (currentBlocks.size() > ROUND_LOGIC_BLOCK_LIMIT) {
+                throw new AuthException("round 1 exceeds the per-round logic block limit");
+            }
+            return;
+        }
+
+        Map<Integer, Map<String, String>> blocksByRound = new HashMap<>();
+        Map<String, Integer> introducedRoundById = new HashMap<>();
+        for (RoundSubmissionRecord round : history) {
+            ModelSubmission historicalSubmission = round.submissionsByUser().get(userId);
+            if (historicalSubmission == null) continue;
+            Map<String, String> blocks = blockFingerprints(readSubmissionBrain(historicalSubmission));
+            blocksByRound.put(round.roundNumber(), blocks);
+            blocks.keySet().forEach(id -> introducedRoundById.putIfAbsent(id, round.roundNumber()));
+        }
+
+        RoundSubmissionRecord previousRound = history.get(history.size() - 1);
+        Map<String, String> previousBlocks = blocksByRound.getOrDefault(previousRound.roundNumber(), Map.of());
+        boolean previousWinner = userId.equals(previousRound.winnerUserId());
+
+        long newBlockCount = currentBlocks.keySet().stream()
+                .filter(id -> !introducedRoundById.containsKey(id))
+                .count();
+        if (newBlockCount > ROUND_LOGIC_BLOCK_LIMIT) {
+            throw new AuthException("current round exceeds the per-round logic block limit");
+        }
+
+        for (Map.Entry<String, Integer> introduced : introducedRoundById.entrySet()) {
+            String id = introduced.getKey();
+            boolean currentlyPresent = currentBlocks.containsKey(id);
+            boolean presentLastRound = previousBlocks.containsKey(id);
+            if (!presentLastRound && currentlyPresent) {
+                throw new AuthException("a deleted prior-round logic block cannot be reintroduced");
+            }
+            if (introduced.getValue() <= session.roundNumber() - 2) {
+                if (presentLastRound
+                        && (!currentlyPresent || !currentBlocks.get(id).equals(previousBlocks.get(id)))) {
+                    throw new AuthException("logic blocks from two or more rounds ago are locked");
+                }
+            } else if (previousWinner && presentLastRound && currentlyPresent
+                    && !currentBlocks.get(id).equals(previousBlocks.get(id))) {
+                throw new AuthException("the previous round winner may only delete prior-round logic blocks");
+            }
+        }
+    }
+
+    private List<RoundBrainDTO> roundBrainsForPlayer(UUID matchId, UUID userId) {
+        return roundHistoryByMatchId.getOrDefault(matchId, List.of()).stream()
+                .map(round -> {
+                    ModelSubmission submission = round.submissionsByUser().get(userId);
+                    if (submission == null) return null;
+                    return new RoundBrainDTO(
+                            round.roundNumber(),
+                            readSubmissionBrain(submission),
+                            userId.equals(round.winnerUserId()));
+                })
+                .filter(round -> round != null)
+                .toList();
+    }
+
+    private Boolean previousRoundWon(UUID matchId, UUID userId) {
+        List<RoundSubmissionRecord> history = roundHistoryByMatchId.getOrDefault(matchId, List.of());
+        if (history.isEmpty()) return null;
+        return userId.equals(history.get(history.size() - 1).winnerUserId());
+    }
+
+    private JsonNode readSubmissionBrain(ModelSubmission submission) {
+        try {
+            return jsonMapper.readTree(submission.getModelArtifacts());
+        } catch (Exception exception) {
+            throw new AuthException("submitted brain could not be read");
+        }
+    }
+
+    private Map<String, String> blockFingerprints(JsonNode brain) {
+        Map<String, String> fingerprints = new HashMap<>();
+        JsonNode blocks = brain != null ? brain.get("blocks") : null;
+        if (blocks != null && blocks.isArray()) {
+            blocks.forEach(block -> addBlockFingerprint(fingerprints, block, "root"));
+        }
+        JsonNode clusters = brain != null ? brain.get("clusters") : null;
+        if (clusters != null && clusters.isArray()) {
+            clusters.forEach(cluster -> {
+                String context = "cluster:"
+                        + fieldText(cluster, "id") + ":"
+                        + fieldText(cluster, "priority") + ":"
+                        + String.valueOf(cluster.get("conditions"));
+                JsonNode clusterBlocks = cluster.get("blocks");
+                if (clusterBlocks != null && clusterBlocks.isArray()) {
+                    clusterBlocks.forEach(block -> addBlockFingerprint(fingerprints, block, context));
+                }
+            });
+        }
+        return fingerprints;
+    }
+
+    private void addBlockFingerprint(Map<String, String> fingerprints, JsonNode block, String context) {
+        String id = fieldText(block, "id");
+        if (id.isBlank() || fingerprints.putIfAbsent(id, context + ":" + block) != null) {
+            throw new AuthException("logic block IDs must be present and unique across rounds");
+        }
+    }
+
+    private static String fieldText(JsonNode node, String field) {
+        JsonNode value = node != null ? node.get(field) : null;
+        return value != null ? value.asText() : "";
+    }
+
     private OutboundMatchmakingEvent eventForPlayer(MatchSession session, MatchPlayer player, String type) {
-        return eventForPlayer(session, player, type, session.countdownEndsAt() == null ? "CLASS_SELECT" : "COUNTDOWN", null, null);
+        String status = session.countdownEndsAt() != null
+                ? "COUNTDOWN"
+                : session.objectPlacementEndsAt() != null ? "OBJECT_PLACEMENT" : "CLASS_SELECT";
+        return eventForPlayer(session, player, type, status, null, null);
     }
 
     private OutboundMatchmakingEvent eventForPlayer(
@@ -554,7 +850,28 @@ public class MatchmakingService {
             String status,
             MatchPlaybackDTO playback,
             String message) {
-        return eventForPlayer(session, player, type, status, playback, message, 0);
+        return eventForPlayer(session, player, type, status, playback, message, null, List.of());
+    }
+
+    private OutboundMatchmakingEvent eventForPlayer(
+            MatchSession session,
+            MatchPlayer player,
+            String type,
+            String status,
+            MatchPlaybackDTO playback,
+            String message,
+            UUID objectPlacementUserId,
+            List<MatchPlaybackDTO.ObstaclePlacementDTO> objectPlacements) {
+        return eventForPlayer(
+                session,
+                player,
+                type,
+                status,
+                playback,
+                message,
+                objectPlacementUserId,
+                objectPlacements,
+                0);
     }
 
     private OutboundMatchmakingEvent eventForPlayer(
@@ -565,7 +882,7 @@ public class MatchmakingService {
             MatchPlaybackDTO playback,
             String message,
             long delayMillis) {
-        return eventForPlayer(session, player, type, status, playback, message, delayMillis, null, null);
+        return eventForPlayer(session, player, type, status, playback, message, null, List.of(), delayMillis);
     }
 
     private OutboundMatchmakingEvent eventForPlayer(
@@ -575,6 +892,56 @@ public class MatchmakingService {
             String status,
             MatchPlaybackDTO playback,
             String message,
+            UUID objectPlacementUserId,
+            List<MatchPlaybackDTO.ObstaclePlacementDTO> objectPlacements,
+            long delayMillis) {
+        return eventForPlayer(
+                session,
+                player,
+                type,
+                status,
+                playback,
+                message,
+                objectPlacementUserId,
+                objectPlacements,
+                delayMillis,
+                null,
+                null);
+    }
+
+    private OutboundMatchmakingEvent eventForPlayer(
+            MatchSession session,
+            MatchPlayer player,
+            String type,
+            String status,
+            MatchPlaybackDTO playback,
+            String message,
+            long delayMillis,
+            Instant playbackStartsAt,
+            Instant resultRevealsAt) {
+        return eventForPlayer(
+                session,
+                player,
+                type,
+                status,
+                playback,
+                message,
+                null,
+                List.of(),
+                delayMillis,
+                playbackStartsAt,
+                resultRevealsAt);
+    }
+
+    private OutboundMatchmakingEvent eventForPlayer(
+            MatchSession session,
+            MatchPlayer player,
+            String type,
+            String status,
+            MatchPlaybackDTO playback,
+            String message,
+            UUID objectPlacementUserId,
+            List<MatchPlaybackDTO.ObstaclePlacementDTO> objectPlacements,
             long delayMillis,
             Instant playbackStartsAt,
             Instant resultRevealsAt) {
@@ -589,11 +956,15 @@ public class MatchmakingService {
                         session.matchId(),
                         session.simulationSeed(),
                         status,
-                        player.toDto(),
-                        opponent == null ? null : opponent.toDto(),
-                        session.players().stream().map(MatchPlayer::toDto).toList(),
+                        player.toDto(session.objectPlacementsByUserId().containsKey(player.userId())),
+                        opponent == null ? null : opponent.toDto(session.objectPlacementsByUserId().containsKey(opponent.userId())),
+                        session.players().stream()
+                                .map(matchPlayer -> matchPlayer.toDto(
+                                        session.objectPlacementsByUserId().containsKey(matchPlayer.userId())))
+                                .toList(),
                         Instant.now(clock),
                         session.classSelectionEndsAt(),
+                        session.objectPlacementEndsAt(),
                         session.countdownEndsAt(),
                         session.trainingEndsAt(),
                         playbackStartsAt,
@@ -603,7 +974,12 @@ public class MatchmakingService {
                         session.roundNumber(),
                         session.winsRequired(),
                         message,
-                        session.obstacles()),
+                        objectPlacementUserId,
+                        objectPlacements != null ? List.copyOf(objectPlacements) : List.of(),
+                        session.obstacles(),
+                        roundBrainsForPlayer(session.matchId(), player.userId()),
+                        previousRoundWon(session.matchId(), player.userId()),
+                        ROUND_LOGIC_BLOCK_LIMIT),
                 delayMillis);
     }
 
@@ -617,6 +993,12 @@ public class MatchmakingService {
     private record QueuedPlayer(UUID userId, String username, String principalName) {
     }
 
+    private record RoundSubmissionRecord(
+            int roundNumber,
+            UUID winnerUserId,
+            Map<UUID, ModelSubmission> submissionsByUser) {
+    }
+
     public record MatchPlayer(
             UUID userId,
             String username,
@@ -628,7 +1010,19 @@ public class MatchmakingService {
             String selectedClass,
             boolean classSelected) {
         MatchmakingPlayerDTO toDto() {
-            return new MatchmakingPlayerDTO(userId, username, slot, finished, roundWins, selectedClass, classSelected);
+            return toDto(false);
+        }
+
+        MatchmakingPlayerDTO toDto(boolean objectPlacementSubmitted) {
+            return new MatchmakingPlayerDTO(
+                    userId,
+                    username,
+                    slot,
+                    finished,
+                    roundWins,
+                    selectedClass,
+                    classSelected,
+                    objectPlacementSubmitted);
         }
     }
 
@@ -637,22 +1031,26 @@ public class MatchmakingService {
             long simulationSeed,
             List<MatchPlayer> players,
             Instant classSelectionEndsAt,
+            Instant objectPlacementEndsAt,
             Instant countdownEndsAt,
             Instant trainingEndsAt,
             int roundNumber,
             int winsRequired,
-            List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
+            List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles,
+            Map<UUID, List<MatchPlaybackDTO.ObstaclePlacementDTO>> objectPlacementsByUserId) {
         MatchSession withObstacles(List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
             return new MatchSession(
                     matchId,
                     simulationSeed,
                     players,
                     classSelectionEndsAt,
+                    objectPlacementEndsAt,
                     countdownEndsAt,
                     trainingEndsAt,
                     roundNumber,
                     winsRequired,
-                    obstacles != null ? List.copyOf(obstacles) : List.of());
+                    obstacles != null ? List.copyOf(obstacles) : List.of(),
+                    objectPlacementsByUserId);
         }
 
         MatchSession withFinishedPlayer(UUID userId, UUID modelSubmissionId) {
@@ -671,14 +1069,16 @@ public class MatchmakingService {
                                             player.roundWins(),
                                             player.selectedClass(),
                                             player.classSelected())
-                                    : player)
+                    : player)
                             .toList(),
                     classSelectionEndsAt,
+                    objectPlacementEndsAt,
                     countdownEndsAt,
                     trainingEndsAt,
                     roundNumber,
                     winsRequired,
-                    obstacles);
+                    obstacles,
+                    objectPlacementsByUserId);
         }
 
         MatchSession withRoundResult(UUID winnerUserId) {
@@ -697,17 +1097,19 @@ public class MatchmakingService {
                                             player.roundWins() + 1,
                                             player.selectedClass(),
                                             player.classSelected())
-                                    : player)
+                    : player)
                             .toList(),
                     classSelectionEndsAt,
+                    objectPlacementEndsAt,
                     countdownEndsAt,
                     trainingEndsAt,
                     roundNumber,
                     winsRequired,
-                    obstacles);
+                    obstacles,
+                    objectPlacementsByUserId);
         }
 
-        MatchSession nextRound(Instant nextCountdownEndsAt, Instant nextTrainingEndsAt) {
+        MatchSession nextRound() {
             return new MatchSession(
                     matchId,
                     simulationSeed,
@@ -724,11 +1126,13 @@ public class MatchmakingService {
                                     player.classSelected()))
                             .toList(),
                     classSelectionEndsAt,
-                    nextCountdownEndsAt,
-                    nextTrainingEndsAt,
+                    null,
+                    null,
+                    null,
                     roundNumber + 1,
                     winsRequired,
-                    obstacles);
+                    obstacles,
+                    objectPlacementsByUserId);
         }
 
         MatchSession withSelectedClass(UUID userId, String selectedClass, boolean classSelected) {
@@ -747,14 +1151,16 @@ public class MatchmakingService {
                                             player.roundWins(),
                                             selectedClass,
                                             classSelected)
-                                    : player)
+                    : player)
                             .toList(),
                     classSelectionEndsAt,
+                    objectPlacementEndsAt,
                     countdownEndsAt,
                     trainingEndsAt,
                     roundNumber,
                     winsRequired,
-                    obstacles);
+                    obstacles,
+                    objectPlacementsByUserId);
         }
 
         MatchSession withDefaultClassSelections() {
@@ -774,11 +1180,45 @@ public class MatchmakingService {
                                     true))
                             .toList(),
                     classSelectionEndsAt,
+                    objectPlacementEndsAt,
                     countdownEndsAt,
                     trainingEndsAt,
                     roundNumber,
                     winsRequired,
-                    obstacles);
+                    obstacles,
+                    objectPlacementsByUserId);
+        }
+
+        MatchSession withObjectPlacement(Instant nextObjectPlacementEndsAt) {
+            return new MatchSession(
+                    matchId,
+                    simulationSeed,
+                    players,
+                    classSelectionEndsAt,
+                    nextObjectPlacementEndsAt,
+                    null,
+                    null,
+                    roundNumber,
+                    winsRequired,
+                    List.of(),
+                    Map.of());
+        }
+
+        MatchSession withObjectPlacements(UUID userId, List<MatchPlaybackDTO.ObstaclePlacementDTO> objects) {
+            Map<UUID, List<MatchPlaybackDTO.ObstaclePlacementDTO>> placements = new HashMap<>(objectPlacementsByUserId);
+            placements.put(userId, List.copyOf(objects != null ? objects : List.of()));
+            return new MatchSession(
+                    matchId,
+                    simulationSeed,
+                    players,
+                    classSelectionEndsAt,
+                    objectPlacementEndsAt,
+                    countdownEndsAt,
+                    trainingEndsAt,
+                    roundNumber,
+                    winsRequired,
+                    obstacles,
+                    Map.copyOf(placements));
         }
 
         MatchSession withCountdown(Instant nextCountdownEndsAt, Instant nextTrainingEndsAt) {
@@ -798,11 +1238,13 @@ public class MatchmakingService {
                                     true))
                             .toList(),
                     classSelectionEndsAt,
+                    null,
                     nextCountdownEndsAt,
                     nextTrainingEndsAt,
                     roundNumber,
                     winsRequired,
-                    obstacles);
+                    obstacles,
+                    objectPlacementsByUserId);
         }
     }
 
