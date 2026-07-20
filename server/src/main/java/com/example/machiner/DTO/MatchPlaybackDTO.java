@@ -1,6 +1,7 @@
 package com.example.machiner.DTO;
 
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 public record MatchPlaybackDTO(
@@ -34,12 +35,39 @@ public record MatchPlaybackDTO(
             Integer gunAmmo,
             Integer gunReloadMs,
             int shieldHp,
-            int overdriveMs,
-            int barrierImmunityMs,
-            int inhibitionCharges,
             int slowedMs,
-            int jammedMs,
-            int commandLockedMs) {
+            int stunnedMs,
+            int silencedMs,
+            int shockRemainingMs,
+            int movementLockMs,
+            int maxHp,
+            List<String> abilities,
+            boolean gunShotActive,
+            boolean swingActive,
+            boolean fireballActive,
+            boolean stunActive,
+            boolean dashActive,
+            int fireballCharges,
+            int fireballReloadMs,
+            int swingCooldownMs,
+            int blockCharges,
+            int blockCooldownMs,
+            int blockRechargeMs,
+            int dashCooldownMs,
+            int gunCooldownMs,
+            int grenadeCooldownMs,
+            int fireballCooldownMs,
+            int stunCooldownMs,
+            Map<String, Integer> abilityCooldowns,
+            Map<String, Integer> abilityActiveMs,
+            String preparingAbility,
+            int preparingMs,
+            int burnRemainingMs,
+            int bleedRemainingMs,
+            int temporalRewindMs,
+            double temporalRewindX,
+            double temporalRewindY,
+            int temporalRewindPulseMs) {
         public FighterPlacementDTO(
                 UUID userId,
                 String username,
@@ -53,7 +81,7 @@ public record MatchPlaybackDTO(
                 boolean blockActive,
                 Integer gunAmmo,
                 Integer gunReloadMs) {
-            this(userId, username, slot, x, y, rotation, hp, combatClass, attackActive, blockActive, gunAmmo, gunReloadMs, 0, 0, 0, 0, 0, 0, 0);
+            this(userId, username, slot, x, y, rotation, hp, combatClass, attackActive, blockActive, gunAmmo, gunReloadMs, 0, 0, 0, 0, 0, 0, 100, List.of(), false, false, false, false, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, Map.of(), Map.of(), null, 0, 0, 0, 0, x, y, 0);
         }
     }
 
@@ -66,17 +94,22 @@ public record MatchPlaybackDTO(
             double rotation,
             int hp,
             int slotOneCaptureMs,
-            int slotTwoCaptureMs) {
+            int slotTwoCaptureMs,
+            Boolean armed,
+            Integer timerMs) {
+        public ObstaclePlacementDTO(String id, String type, double x, double y, int size, double rotation, int hp, int slotOneCaptureMs, int slotTwoCaptureMs) {
+            this(id, type, x, y, size, rotation, hp, slotOneCaptureMs, slotTwoCaptureMs, null, null);
+        }
         public ObstaclePlacementDTO(String id, String type, double x, double y, int size) {
-            this(id, type, x, y, size, 0.0, 0, 0, 0);
+            this(id, type, x, y, size, 0.0, 0, 0, 0, null, null);
         }
 
         public ObstaclePlacementDTO(String id, String type, double x, double y, int size, double rotation) {
-            this(id, type, x, y, size, rotation, 0, 0, 0);
+            this(id, type, x, y, size, rotation, 0, 0, 0, null, null);
         }
 
         public ObstaclePlacementDTO(String id, String type, double x, double y, int size, double rotation, int hp) {
-            this(id, type, x, y, size, rotation, hp, 0, 0);
+            this(id, type, x, y, size, rotation, hp, 0, 0, null, null);
         }
     }
 

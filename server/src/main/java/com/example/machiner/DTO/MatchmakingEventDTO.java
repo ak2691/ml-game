@@ -30,6 +30,7 @@ public record MatchmakingEventDTO(
         List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles,
         List<RoundBrainDTO> roundBrains,
         Boolean previousRoundWon,
+        List<String> abilityOffers,
         Integer roundBlockLimit) {
 
     public record RoundBrainDTO(int roundNumber, JsonNode brain, boolean won) {

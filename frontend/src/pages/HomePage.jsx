@@ -1,9 +1,23 @@
+import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/auth-context";
+import { loadBotRoom, loadMatchmaking } from "../routeLoaders";
 
 export default function HomePage() {
     const { user, logout } = useAuth();
     const navigate = useNavigate();
+
+    useEffect(() => {
+        const prefetchGameplay = () => {
+            void Promise.allSettled([loadBotRoom(), loadMatchmaking()]);
+        };
+        if ("requestIdleCallback" in window) {
+            const idleId = window.requestIdleCallback(prefetchGameplay, { timeout: 3000 });
+            return () => window.cancelIdleCallback(idleId);
+        }
+        const timeoutId = window.setTimeout(prefetchGameplay, 1000);
+        return () => window.clearTimeout(timeoutId);
+    }, []);
 
     const handleLogout = async () => {
         await logout();

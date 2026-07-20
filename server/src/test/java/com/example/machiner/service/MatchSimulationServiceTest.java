@@ -9,10 +9,7 @@ import com.example.machiner.service.MatchmakingService.MatchSession;
 import com.example.machiner.simulation.DuelSimulationService;
 import com.example.machiner.simulation.DuelSimulationService.DuelFighterRequest;
 import com.example.machiner.simulation.DuelSimulationService.DuelSimulationRequest;
-import com.example.machiner.simulation.DuelSimulationService.ObstacleRequest;
-import com.example.machiner.simulation.classes.CombatClassRegistry;
-import com.example.machiner.simulation.classes.MeleeClassSpec;
-import com.example.machiner.simulation.classes.RangedClassSpec;
+import com.example.machiner.simulation.combat.CombatCatalog;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -55,16 +52,11 @@ class MatchSimulationServiceTest {
         assertThat(duelSimulationService.capturedRequest).isNotNull();
         assertThat(duelSimulationService.capturedRequest.matchId()).isEqualTo(session.matchId());
         assertThat(duelSimulationService.capturedRequest.seed()).isEqualTo(99L);
-        assertThat(duelSimulationService.capturedRequest.arena().durationMs()).isEqualTo(30_000);
-        assertThat(duelSimulationService.capturedRequest.arena().obstacles()).hasSize(2);
-        assertThat(duelSimulationService.capturedRequest.arena().obstacles())
-                .extracting(ObstacleRequest::id, ObstacleRequest::type, ObstacleRequest::x, ObstacleRequest::y)
-                .containsExactly(
-                        org.assertj.core.groups.Tuple.tuple("object_center", "radarJammer", 400.0, 400.0),
-                        org.assertj.core.groups.Tuple.tuple("object_1", "healthPack", 300.0, 120.0));
+        assertThat(duelSimulationService.capturedRequest.arena().durationMs()).isEqualTo(60_000);
+        assertThat(duelSimulationService.capturedRequest.arena().obstacles()).isEmpty();
         assertThat(duelSimulationService.capturedRequest.fighters()).hasSize(2);
-        assertThat(duelSimulationService.capturedRequest.fighters().getFirst().x()).isEqualTo(400.0);
-        assertThat(duelSimulationService.capturedRequest.fighters().getFirst().y()).isEqualTo(120.0);
+        assertThat(duelSimulationService.capturedRequest.fighters().getFirst().x()).isEqualTo(500.0);
+        assertThat(duelSimulationService.capturedRequest.fighters().getFirst().y()).isEqualTo(150.0);
         assertThat(duelSimulationService.capturedRequest.fighters().getFirst().brain().get("blocks")).hasSize(1);
     }
 
@@ -89,7 +81,7 @@ class MatchSimulationServiceTest {
 
         List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles = service.buildMatchObstacles(session);
 
-        assertThat(obstacles).isEqualTo(duelSimulationService.generatedObstacles);
+        assertThat(obstacles).isEmpty();
     }
 
     private static final class CapturingDuelSimulationService extends DuelSimulationService {
@@ -97,7 +89,7 @@ class MatchSimulationServiceTest {
         private List<MatchPlaybackDTO.ObstaclePlacementDTO> generatedObstacles = List.of();
 
         private CapturingDuelSimulationService() {
-            super(new CombatClassRegistry(List.of(new MeleeClassSpec(), new RangedClassSpec())));
+            super(new CombatCatalog());
         }
 
         @Override
@@ -107,7 +99,7 @@ class MatchSimulationServiceTest {
                     request.matchId(),
                     DuelSimulationService.DUEL_RULESET_VERSION,
                     "COMPLETED",
-                    new MatchPlaybackDTO.ArenaStateDTO(800, 800, List.of(), List.of()),
+                    new MatchPlaybackDTO.ArenaStateDTO(1600, 1600, List.of(), List.of()),
                     List.of(),
                     "DRAW",
                     null,

@@ -8,6 +8,8 @@ import com.example.machiner.DTO.MatchmakingEventDTO;
 import com.example.machiner.domain.AppUser;
 import com.example.machiner.repository.UserRepository;
 import com.example.machiner.service.AuthException;
+import com.example.machiner.DTO.MatchmakingEventDTO;
+import java.time.Instant;
 import com.example.machiner.service.MatchmakingService;
 import com.example.machiner.service.MatchmakingService.OutboundMatchmakingEvent;
 import java.security.Principal;
@@ -17,6 +19,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.handler.annotation.MessageExceptionHandler;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
@@ -56,7 +59,43 @@ public class MatchmakingSocketController {
         AppUser user = requireUser(principal);
         List<OutboundMatchmakingEvent> events = matchmakingService.markFinished(user.getId(), payload == null ? null : payload.modelSubmissionId());
         publish(events);
+        scheduleClassSelectionTimeouts(events);
         scheduleObjectPlacementTimeouts(events);
+    }
+
+    @MessageExceptionHandler(AuthException.class)
+    public void handleMatchmakingError(AuthException exception, Principal principal) {
+        if (principal == null) return;
+        messagingTemplate.convertAndSendToUser(
+                principal.getName(),
+                "/queue/matchmaking",
+                new MatchmakingEventDTO(
+                        "MATCH_ERROR",
+                        null,
+                        null,
+                        "TRAINING",
+                        null,
+                        null,
+                        List.of(),
+                        Instant.now(),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        exception.getMessage(),
+                        null,
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        null,
+                        List.of(),
+                        null));
     }
 
     @MessageMapping("/matchmaking.selectClass")
@@ -121,15 +160,24 @@ public class MatchmakingSocketController {
     private void scheduleClassSelectionTimeouts(List<OutboundMatchmakingEvent> events) {
         events.stream()
                 .map(OutboundMatchmakingEvent::event)
-                .filter(event -> "MATCH_FOUND".equals(event.type()) && "CLASS_SELECT".equals(event.status()))
-                .map(MatchmakingEventDTO::matchId)
-                .distinct()
-                .forEach(matchId -> CompletableFuture.delayedExecutor(30, TimeUnit.SECONDS)
+                .filter(event -> ("MATCH_FOUND".equals(event.type()) || "MATCH_ROUND_READY".equals(event.type()))
+                        && "CLASS_SELECT".equals(event.status()))
+                .filter(event -> event.matchId() != null)
+                .collect(java.util.stream.Collectors.toMap(
+                        MatchmakingEventDTO::matchId,
+                        event -> event,
+                        (first, second) -> first))
+                .forEach((matchId, event) -> {
+                    long delayMillis = event.classSelectionEndsAt() == null
+                            ? TimeUnit.SECONDS.toMillis(60)
+                            : Math.max(0, Duration.between(Instant.now(), event.classSelectionEndsAt()).toMillis());
+                    CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS)
                         .execute(() -> {
                             List<OutboundMatchmakingEvent> timeoutEvents = matchmakingService.resolveClassSelectionTimeout(matchId);
                             publish(timeoutEvents);
                             scheduleObjectPlacementTimeouts(timeoutEvents);
-                        }));
+                        });
+                });
     }
 
     private void scheduleObjectPlacementTimeouts(List<OutboundMatchmakingEvent> events) {

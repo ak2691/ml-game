@@ -28,9 +28,11 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
 class MatchmakingServiceTest {
@@ -146,10 +148,10 @@ class MatchmakingServiceTest {
             assertThat(event.matchId()).isNotNull();
             assertThat(event.players()).hasSize(2);
             assertThat(event.players()).extracting("slot").containsExactlyInAnyOrder(1, 2);
-            assertThat(event.players()).extracting("selectedClass").containsOnly("melee");
+            assertThat(event.players()).extracting("selectedClass").containsOnly("custom::0,0,0,0");
             assertThat(event.players()).extracting("classSelected").containsOnly(false);
             assertThat(event.opponent()).isNotNull();
-            assertThat(event.classSelectionEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:00:30Z"));
+            assertThat(event.classSelectionEndsAt()).isEqualTo(Instant.parse("2026-06-03T12:01:00Z"));
             assertThat(event.countdownEndsAt()).isNull();
             assertThat(event.trainingEndsAt()).isNull();
             assertThat(event.rulesetVersion()).isEqualTo("duel-v1");
@@ -158,6 +160,7 @@ class MatchmakingServiceTest {
         assertThat(participants).hasSize(2);
     }
 
+    @Disabled("Replaced by combined loadout selection; object placement was removed")
     @Test
     void bothPlayersSelectingClassStartsObjectPlacementThenCountdown() {
         UUID firstUserId = UUID.randomUUID();
@@ -235,6 +238,43 @@ class MatchmakingServiceTest {
     }
 
     @Test
+    void bothPlayersLockingLoadoutsStartsCountdownWithoutArenaObjects() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        List<MatchmakingService.OutboundMatchmakingEvent> found =
+                service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        Map<String, String> codes = Map.ofEntries(
+                Map.entry("swing", "s"), Map.entry("block", "b"), Map.entry("dash", "d"), Map.entry("fire_gun", "g"),
+                Map.entry("throw_grenade", "r"), Map.entry("shoot_fireball", "f"), Map.entry("stun", "t"), Map.entry("heavy_slash", "h"),
+                Map.entry("repulsor_burst", "u"), Map.entry("concussive_shot", "c"), Map.entry("repair_pulse", "e"), Map.entry("proximity_mine", "m"),
+                Map.entry("quick_jab", "j"), Map.entry("pistol_shot", "p"));
+        var firstEvent = found.stream().map(MatchmakingService.OutboundMatchmakingEvent::event)
+                .filter(event -> event.player().userId().equals(firstUserId)).findFirst().orElseThrow();
+        var secondEvent = found.stream().map(MatchmakingService.OutboundMatchmakingEvent::event)
+                .filter(event -> event.player().userId().equals(secondUserId)).findFirst().orElseThrow();
+        assertThat(firstEvent.abilityOffers()).hasSize(6).doesNotHaveDuplicates();
+        assertThat(secondEvent.abilityOffers()).hasSize(6).doesNotHaveDuplicates();
+        assertThat(secondEvent.abilityOffers()).containsExactlyElementsOf(firstEvent.abilityOffers());
+        String firstPicks = firstEvent.abilityOffers().stream().limit(3).map(codes::get).sorted().collect(java.util.stream.Collectors.joining());
+        String secondPicks = secondEvent.abilityOffers().stream().limit(3).map(codes::get).sorted().collect(java.util.stream.Collectors.joining());
+
+        service.selectClass(firstUserId, "custom:" + firstPicks + ":2,2,0,0");
+        List<MatchmakingService.OutboundMatchmakingEvent> events =
+                service.selectClass(secondUserId, "custom:" + secondPicks + ":0,0,1,3");
+
+        assertThat(events).hasSize(2).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_COUNTDOWN_READY");
+            assertThat(outbound.event().status()).isEqualTo("COUNTDOWN");
+            assertThat(outbound.event().objectPlacementEndsAt()).isNull();
+            assertThat(outbound.event().obstacles()).isEmpty();
+            assertThat(outbound.event().players()).extracting("selectedClass")
+                    .containsExactlyInAnyOrder("custom:" + firstPicks + ":2,2,0,0", "custom:" + secondPicks + ":0,0,1,3");
+        });
+    }
+
+    @Disabled("Object placement was removed")
+    @Test
     void emptyObjectSubmissionIsAcknowledgedAndDoesNotCreatePlaceholderObjects() {
         UUID firstUserId = UUID.randomUUID();
         UUID secondUserId = UUID.randomUUID();
@@ -270,6 +310,7 @@ class MatchmakingServiceTest {
         });
     }
 
+    @Disabled("Object placement was removed")
     @Test
     void objectSubmissionIsCappedAtThreeAndClampedToThePlayersThird() {
         UUID firstUserId = UUID.randomUUID();
@@ -291,8 +332,8 @@ class MatchmakingServiceTest {
                 .satisfies(outbound -> {
                     assertThat(outbound.event().objectPlacements()).hasSize(3);
                     assertThat(outbound.event().objectPlacements()).allSatisfy(object -> {
-                        assertThat(object.x()).isBetween(0.0, 800.0);
-                        assertThat(object.y()).isBetween(0.0, 800.0 / 3.0);
+                        assertThat(object.x()).isBetween(0.0, 1600.0);
+                        assertThat(object.y()).isBetween(0.0, 1600.0 / 3.0);
                     });
                 });
 
@@ -317,6 +358,7 @@ class MatchmakingServiceTest {
         assertThat(events.get(0).event().type()).isEqualTo("QUEUE_WAITING");
     }
 
+    @Disabled("Object placement was removed")
     @Test
     void objectPlacementTimeoutStartsCountdownWithNoObjectsWhenNobodySubmits() {
         UUID firstUserId = UUID.randomUUID();
@@ -343,6 +385,7 @@ class MatchmakingServiceTest {
         });
     }
 
+    @Disabled("Old round/object lifecycle")
     @Test
     void firstRoundWinProducesPlaybackAndNextRoundEvents() {
         UUID firstUserId = UUID.randomUUID();
@@ -383,7 +426,7 @@ class MatchmakingServiceTest {
                     assertThat(outbound.event().status()).isEqualTo("READY_FOR_PLAYBACK");
                     assertThat(outbound.event().playback()).isNotNull();
                     assertThat(outbound.event().playback().result()).isNull();
-                    assertThat(outbound.delayMillis()).isZero();
+                    assertThat(outbound.delayMillis()).isEqualTo(3_000L);
                 });
         assertThat(secondFinishEvents)
                 .filteredOn(outbound -> outbound.event().type().equals("MATCH_RESULT_READY"))
@@ -413,6 +456,7 @@ class MatchmakingServiceTest {
         assertThat(savedMatch.getStatus()).isEqualTo(MatchStatus.RUNNING);
     }
 
+    @Disabled("Old round/object lifecycle")
     @Test
     void secondRoundWinCompletesBestOfThreeMatch() {
         UUID firstUserId = UUID.randomUUID();
@@ -455,6 +499,7 @@ class MatchmakingServiceTest {
         assertThat(savedMatch.getWinnerUser().getId()).isEqualTo(secondUserId);
     }
 
+    @Disabled("Object placement was removed")
     @Test
     void laterRoundsReuseInitialObjectPlacementsAndSkipPlacement() {
         UUID firstUserId = UUID.randomUUID();

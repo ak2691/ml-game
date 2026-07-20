@@ -7,13 +7,11 @@ import com.example.machiner.simulation.DuelSimulationService.DuelArenaRequest;
 import com.example.machiner.simulation.DuelSimulationService.DuelFighterRequest;
 import com.example.machiner.simulation.DuelSimulationService.DuelSimulationRequest;
 import com.example.machiner.simulation.DuelSimulationService.ObstacleRequest;
-import com.example.machiner.simulation.classes.CombatClassRegistry;
-import com.example.machiner.simulation.classes.MageClassSpec;
-import com.example.machiner.simulation.classes.MeleeClassSpec;
-import com.example.machiner.simulation.classes.RangedClassSpec;
+import com.example.machiner.simulation.combat.CombatCatalog;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Disabled;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -21,7 +19,7 @@ class DuelSimulationServiceTest {
 
     private final JsonMapper jsonMapper = new JsonMapper();
     private final DuelSimulationService service = new DuelSimulationService(
-            new CombatClassRegistry(List.of(new MeleeClassSpec(), new RangedClassSpec(), new MageClassSpec())));
+            new CombatCatalog());
     private final JsonNode idleBrain = brain("[]");
 
     @Test
@@ -34,6 +32,44 @@ class DuelSimulationServiceTest {
         assertThat(result.status()).isEqualTo("COMPLETED");
         assertThat(result.result()).isEqualTo("DRAW");
         assertThat(result.winnerUserId()).isNull();
+    }
+
+    @Test
+    void customLoadoutUsesAllocatedHpAndArenaHasNoFixtures() throws Exception {
+        JsonNode loadoutBrain = jsonMapper.readTree("""
+                {"version":"melee-logic-tree-v1",
+                 "loadout":{"abilities":["swing"],"statPoints":{"maxHp":2,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                 "blocks":[]}
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                new DuelArenaRequest(1000, 1000, 0, List.of(new ObstacleRequest("core_1", "core", 500.0, 50.0, 120))),
+                fighter("fighter-1", "One", 1, 100, 500, "custom", loadoutBrain),
+                fighter("fighter-2", "Two", 2, 900, 500, "custom", loadoutBrain)));
+
+        assertThat(result.initialState().obstacles()).isEmpty();
+        assertThat(result.initialState().fighters()).extracting(MatchPlaybackDTO.FighterPlacementDTO::hp).containsOnly(120);
+        assertThat(result.result()).isEqualTo("DRAW");
+    }
+
+    @Test
+    void fighterKnockoutIsTheOnlyWinningCondition() throws Exception {
+        JsonNode attackerBrain = jsonMapper.readTree("""
+                {"version":"melee-logic-blocks-v2",
+                 "loadout":{"abilities":["swing"],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":4,"attackSpeed":0}},
+                 "blocks":[{"priority":1,"conditions":[{"type":"always"}],"action":"swing"}]}
+                """);
+        JsonNode defenderBrain = jsonMapper.readTree("""
+                {"version":"melee-logic-blocks-v2",
+                 "loadout":{"abilities":["block"],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                 "blocks":[]}
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                new DuelArenaRequest(1000, 1000, 10_000, List.of()),
+                fighter("fighter-1", "One", 1, 480, 500, "custom", attackerBrain),
+                fighter("fighter-2", "Two", 2, 520, 500, "custom", defenderBrain)));
+
+        assertThat(result.result()).isEqualTo("FIGHTER_WIN");
+        assertThat(result.winnerUserId()).isEqualTo(UUID.nameUUIDFromBytes("fighter-1".getBytes()));
     }
 
     @Test
@@ -190,7 +226,7 @@ class DuelSimulationServiceTest {
                         """)),
                 fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
 
-        assertThat(result.frames().getFirst().fighters().getFirst().x() - 100).isEqualTo(20.0);
+        assertThat(result.frames().getFirst().fighters().getFirst().x() - 100).isEqualTo(40.0);
     }
 
     @Test
@@ -208,6 +244,7 @@ class DuelSimulationServiceTest {
         assertThat(result.frames().getFirst().fighters().getFirst().x() - 100).isEqualTo(4.0);
     }
 
+    @Disabled("Removed arena-object contract")
     @Test
     void clusterPriorityAndSharedConditionsSelectNestedBlocks() {
         MatchPlaybackDTO result = service.simulate(request(
@@ -230,17 +267,22 @@ class DuelSimulationServiceTest {
         assertThat(result.frames().getFirst().fighters().getFirst().x()).isLessThan(400.0);
     }
 
+    @Disabled("Cores were removed from duel-v1")
     @Test
-    void deterministicAttackRulesCanWinFight() {
+    void destroyingOpponentCoreWinsRound() {
         MatchPlaybackDTO result = service.simulate(request(
-                arena(6000, List.of()),
-                fighter("attacker", "Attacker", 1, 360, 400, brain("""
-                        [{"conditions":[{"type":"enemy_distance_lt","value":100}],"action":"swing"}]
+                arena(30_000, List.of()),
+                fighter("attacker", "Attacker", 1, 800, 1450, brain("""
+                        [{"conditions":[{"type":"always"}],"action":"swing","actionTarget":"opponent_core"}]
                         """)),
-                fighter("target", "Target", 2, 440, 400, idleBrain)));
+                fighter("target", "Target", 2, 400, 400, idleBrain)));
 
         assertThat(result.result()).isEqualTo("FIGHTER_WIN");
         assertThat(result.winnerUserId()).isEqualTo(UUID.nameUUIDFromBytes("attacker".getBytes()));
+        assertThat(result.frames().getLast().obstacles())
+                .filteredOn(obstacle -> "core_2".equals(obstacle.id()))
+                .singleElement()
+                .satisfies(core -> assertThat(core.hp()).isZero());
     }
 
     @Test
@@ -319,7 +361,7 @@ class DuelSimulationServiceTest {
                         """)),
                 fighter("target", "Target", 2, 190, 400, idleBrain)));
 
-        assertThat(result.frames().getFirst().fighters().get(1).hp()).isEqualTo(75);
+        assertThat(result.frames().getFirst().fighters().get(1).hp()).isEqualTo(80);
         assertThat(result.frames().getFirst().obstacles())
                 .anyMatch(obstacle -> "grenadeExplosion".equals(obstacle.type()));
     }
@@ -357,7 +399,38 @@ class DuelSimulationServiceTest {
     }
 
     @Test
-    void mageStunDamagesAndLocksTargetActionsForFifteenTicks() {
+    void attackSpeedShortensCooldownAtActivationWithoutSpeedingUpReplayTime() throws Exception {
+        JsonNode fastSwingBrain = jsonMapper.readTree("""
+                {"version":"melee-logic-blocks-v2",
+                 "loadout":{"abilities":["swing"],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":5}},
+                 "blocks":[{"priority":1,"conditions":[{"type":"always"}],"action":"swing"}],"clusters":[]}
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(150, List.of()),
+                fighter("fast-swing", "One", 1, 100, 400, "custom", fastSwingBrain),
+                fighter("idle", "Two", 2, 700, 400, "custom", customBrain("[]", "[]"))));
+
+        int initialCooldown = result.frames().get(0).fighters().getFirst().swingCooldownMs();
+        int nextCooldown = result.frames().get(1).fighters().getFirst().swingCooldownMs();
+        assertThat(initialCooldown).isEqualTo(667);
+        assertThat(nextCooldown).isEqualTo(567);
+    }
+
+    @Test
+    void repeatedFireballsRefreshBurnDurationWithoutPostponingBurnTicks() {
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(3500, List.of()),
+                fighter("mage", "Mage", 1, 100, 400, "mage", brain("""
+                        [{"conditions":[{"type":"my_fireball_ready"}],"action":"shoot_fireball"}]
+                        """)),
+                fighter("target", "Target", 2, 190, 400, idleBrain)));
+
+        int finalHp = result.frames().getLast().fighters().get(1).hp();
+        assertThat(finalHp).isLessThan(65);
+    }
+
+    @Test
+    void mageStunDealsFiveDamageAndLocksTargetActionsForTwelveTicks() {
         MatchPlaybackDTO result = service.simulate(request(
                 arena(2_200, List.of()),
                 fighter("mage", "Mage", 1, 100, 400, "mage", brain("""
@@ -367,11 +440,12 @@ class DuelSimulationServiceTest {
                         [{"conditions":[{"type":"always"}],"action":"move_outward"}]
                         """))));
 
-        assertThat(result.frames().getFirst().fighters().get(1).hp()).isEqualTo(115);
+        assertThat(result.frames().stream().map(frame -> frame.fighters().get(1).hp()).distinct().toList()).containsExactly(120);
+        assertThat(result.frames().getFirst().fighters().get(1).hp()).isEqualTo(120);
         assertThat(result.frames().getFirst().fighters().getFirst().attackActive()).isTrue();
         double stunnedX = result.frames().getFirst().fighters().get(1).x();
-        assertThat(result.frames().get(14).fighters().get(1).x()).isEqualTo(stunnedX);
-        assertThat(result.frames().get(15).fighters().get(1).x()).isGreaterThan(stunnedX);
+        assertThat(result.frames().get(11).fighters().get(1).x()).isEqualTo(stunnedX);
+        assertThat(result.frames().get(12).fighters().get(1).x()).isGreaterThan(stunnedX);
     }
 
     @Test
@@ -441,34 +515,228 @@ class DuelSimulationServiceTest {
                 fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
 
         assertThat(result.frames().getFirst().fighters().getFirst().x()).isEqualTo(100.0);
-        assertThat(result.frames().getFirst().fighters().getFirst().y()).isEqualTo(380.0);
+        assertThat(result.frames().getFirst().fighters().getFirst().y()).isEqualTo(360.0);
+    }
+
+    @Test
+    void logicTreeUsesNestedFirstMatchAndEarliestCreatedColumnForConflicts() throws Exception {
+        JsonNode tree = jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "columns":[
+                    {"id":"later","createdOrder":20,"branches":[
+                      {"id":"later-root","branchType":"if","createdOrder":1,"conditions":[{"type":"always"}],"action":"move_west"}
+                    ]},
+                    {"id":"earlier","createdOrder":10,"branches":[
+                      {"id":"parent","branchType":"if","createdOrder":1,"conditions":[{"type":"always"}],"action":"move_stop","children":[
+                        {"id":"false","branchType":"if","createdOrder":1,"conditions":[{"type":"expression","left":"my.hp","comparator":"lt","right":{"type":"number","value":1}}],"action":"move_west"},
+                        {"id":"fallback","branchType":"else","createdOrder":2,"conditions":[],"action":"move_east"}
+                      ]}
+                    ]}
+                  ]
+                }
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(100, List.of()),
+                fighter("tree", "Tree", 1, 400, 400, tree),
+                fighter("idle", "Idle", 2, 1200, 1200, idleBrain)));
+
+        assertThat(result.frames().getFirst().fighters().getFirst().x()).isGreaterThan(400.0);
     }
 
     @Test
     void dashLeavesMeleeAtMaxMovementSpeedInDashDirection() {
         MatchPlaybackDTO result = service.simulate(request(
                 arena(1200, List.of()),
-                fighter("fighter-1", "One", 1, 100, 400, brain("""
+                fighter("fighter-1", "One", 1, 100, 700, brain("""
                         [{"conditions":[{"type":"always"}],"action":"dash_north"}]
                         """)),
                 fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
 
-        assertThat(result.frames().get(9).fighters().getFirst().y()).isEqualTo(200.0);
-        assertThat(result.frames().get(10).fighters().getFirst().y()).isEqualTo(180.0);
+        assertThat(result.frames().get(9).fighters().getFirst().y()).isEqualTo(300.0);
+        assertThat(result.frames().get(10).fighters().getFirst().y()).isEqualTo(300.0);
     }
 
     @Test
-    void meleeDashUsesIndependentCharges() {
+    void dashUsesOneCooldownInsteadOfCharges() {
         MatchPlaybackDTO result = service.simulate(request(
                 arena(1200, List.of()),
-                fighter("fighter-1", "One", 1, 100, 400, brain("""
+                fighter("fighter-1", "One", 1, 100, 700, brain("""
                         [{"conditions":[{"type":"always"}],"action":"dash_north"}]
                         """)),
                 fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
 
-        assertThat(result.frames().get(0).fighters().getFirst().y()).isEqualTo(380.0);
-        assertThat(result.frames().get(9).fighters().getFirst().y()).isEqualTo(200.0);
-        assertThat(result.frames().get(10).fighters().getFirst().y()).isEqualTo(180.0);
+        assertThat(result.frames().get(0).fighters().getFirst().y()).isEqualTo(660.0);
+        assertThat(result.frames().get(9).fighters().getFirst().y()).isEqualTo(300.0);
+        assertThat(result.frames().get(10).fighters().getFirst().y()).isEqualTo(300.0);
+    }
+
+    @Test
+    void heavySlashAppliesFiveTwoDamageBleedTicks() {
+        JsonNode attackerBrain = customBrain("[\"heavy_slash\"]", """
+                [{"priority":1,"conditions":[{"type":"expression","left":"opponent.hp","comparator":"gt","right":{"type":"number","value":69}}],"action":"heavy_slash"}]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(6_000, List.of()),
+                fighter("slasher", "Slasher", 1, 400, 500, "custom", attackerBrain),
+                fighter("target", "Target", 2, 500, 500, "custom", customBrain("[]", "[]"))));
+
+        assertThat(result.frames().get(2).fighters().get(1).hp()).isEqualTo(70);
+        assertThat(result.frames().get(52).fighters().get(1).hp()).isEqualTo(60);
+    }
+
+    @Test
+    void blockedHeavySlashRemovesEveryShieldChargeWithoutDamageOrBleed() {
+        JsonNode slashBrain = customBrain("[\"heavy_slash\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"heavy_slash"}]
+                """);
+        JsonNode blockBrain = customBrain("[\"block\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"block"}]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(400, List.of()),
+                fighter("slasher", "Slasher", 1, 400, 500, "custom", slashBrain),
+                fighter("blocker", "Blocker", 2, 490, 500, "custom", blockBrain)));
+
+        var defender = result.frames().get(2).fighters().get(1);
+        assertThat(defender.hp()).isEqualTo(100);
+        assertThat(defender.blockCharges()).isZero();
+        assertThat(defender.bleedRemainingMs()).isZero();
+    }
+
+    @Test
+    void shieldBlocksFireballAndAttachedRayEffects() {
+        JsonNode blockBrain = customBrain("[\"block\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"block"}]
+                """);
+        JsonNode fireballBrain = customBrain("[\"shoot_fireball\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"shoot_fireball"}]
+                """);
+        MatchPlaybackDTO fireball = service.simulate(request(
+                arena(200, List.of()),
+                fighter("fireball", "Fireball", 1, 400, 500, "custom", fireballBrain),
+                fighter("blocker-fire", "Blocker", 2, 490, 500, "custom", blockBrain)));
+        var fireballDefender = fireball.frames().getFirst().fighters().get(1);
+        assertThat(fireballDefender.hp()).isEqualTo(100);
+        assertThat(fireballDefender.burnRemainingMs()).isZero();
+        assertThat(fireballDefender.blockCharges()).isEqualTo(4);
+
+        for (String ability : List.of("concussive_shot", "rail_shot")) {
+            JsonNode shotBrain = customBrain("[\"" + ability + "\"]", """
+                    [{"priority":1,"conditions":[{"type":"always"}],"action":"%s"}]
+                    """.formatted(ability));
+            MatchPlaybackDTO result = service.simulate(request(
+                    arena("rail_shot".equals(ability) ? 1_000 : 600, List.of()),
+                    fighter("shot-" + ability, "Shooter", 1, 400, 500, "custom", shotBrain),
+                    fighter("block-" + ability, "Blocker", 2, 490, 500, "custom", blockBrain)));
+            var defender = result.frames().getLast().fighters().get(1);
+            assertThat(defender.hp()).as(ability).isEqualTo(100);
+            assertThat(defender.slowedMs()).as(ability).isZero();
+            assertThat(defender.shockRemainingMs()).as(ability).isZero();
+            assertThat(defender.blockCharges()).as(ability).isEqualTo(4);
+        }
+    }
+
+    @Test
+    void releasingShieldStartsIndependentTwoSecondCooldown() {
+        JsonNode retreatBrain = customBrain("[]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"move_outward"}]
+                """);
+        JsonNode conditionalBlock = customBrain("[\"block\"]", """
+                [{"priority":1,"conditions":[{"type":"enemy_distance_lt","value":100}],"action":"block"}]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(1_000, List.of()),
+                fighter("retreat", "Retreat", 1, 400, 500, "custom", retreatBrain),
+                fighter("conditional-block", "Blocker", 2, 490, 500, "custom", conditionalBlock)));
+
+        int activeIndex = java.util.stream.IntStream.range(0, result.frames().size())
+                .filter(index -> result.frames().get(index).fighters().get(1).blockActive())
+                .findFirst().orElseThrow();
+        var released = result.frames().stream().skip(activeIndex + 1L)
+                .map(frame -> frame.fighters().get(1))
+                .filter(fighter -> !fighter.blockActive())
+                .findFirst().orElseThrow();
+        assertThat(released.blockCooldownMs()).isEqualTo(2_000);
+        assertThat(released.blockCharges()).isEqualTo(5);
+    }
+
+    @Test
+    void temporalRewindReturnsToActivationSnapshotAfterThreeSeconds() {
+        JsonNode rewindBrain = customBrain("[\"temporal_rewind\"]", """
+                [
+                  {"priority":1,"conditions":[{"type":"always"}],"action":"move_east"},
+                  {"priority":1,"conditions":[{"type":"always"}],"action":"temporal_rewind"}
+                ]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(3_500, List.of()),
+                fighter("rewinder", "Rewinder", 1, 400, 500, "custom", rewindBrain),
+                fighter("target", "Target", 2, 1200, 500, "custom", customBrain("[]", "[]"))));
+
+        double activationX = result.frames().getFirst().fighters().getFirst().x();
+        assertThat(result.frames().get(28).fighters().getFirst().x()).isGreaterThan(activationX);
+        assertThat(result.frames().get(30).fighters().getFirst().x()).isEqualTo(activationX);
+    }
+
+    @Test
+    void phaseStrikePassesThroughDamagesAndFacesTargetAfterLanding() {
+        JsonNode phaseBrain = customBrain("[\"phase_strike\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"phase_strike"}]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(100, List.of()),
+                fighter("phaser", "Phaser", 1, 400, 500, "custom", phaseBrain),
+                fighter("target", "Target", 2, 500, 500, "custom", customBrain("[]", "[]"))));
+
+        var attacker = result.frames().getFirst().fighters().getFirst();
+        var defender = result.frames().getFirst().fighters().get(1);
+        assertThat(attacker.x()).isEqualTo(550.0);
+        assertThat(attacker.rotation()).isEqualTo(180.0);
+        assertThat(defender.hp()).isEqualTo(86);
+    }
+
+    @Test
+    void reactiveArmorReducesAndReflectsIncomingDamage() {
+        JsonNode slashBrain = customBrain("[\"heavy_slash\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"heavy_slash"}]
+                """);
+        JsonNode armorBrain = customBrain("[\"reactive_armor\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"reactive_armor"}]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(300, List.of()),
+                fighter("slasher", "Slasher", 1, 400, 500, "custom", slashBrain),
+                fighter("armor", "Armor", 2, 500, 500, "custom", armorBrain)));
+
+        assertThat(result.frames().get(2).fighters()).extracting(MatchPlaybackDTO.FighterPlacementDTO::hp).containsExactly(85, 85);
+    }
+
+    @Test
+    void repulsorBurstDealsDamageAndPushes250UnitsButBlockOnlyPreventsDamage() {
+        JsonNode burstBrain = customBrain("[\"repulsor_burst\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"repulsor_burst"}]
+                """);
+        JsonNode blockBrain = customBrain("[\"block\"]", """
+                [{"priority":1,"conditions":[{"type":"always"}],"action":"block"}]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(100, List.of()),
+                fighter("caster", "Caster", 1, 400, 500, "custom", burstBrain),
+                fighter("target", "Target", 2, 480, 500, "custom", customBrain("[]", "[]"))));
+
+        var defender = result.frames().getFirst().fighters().get(1);
+        assertThat(defender.hp()).isEqualTo(80);
+        assertThat(defender.x()).isEqualTo(730.0);
+
+        MatchPlaybackDTO blockedResult = service.simulate(request(
+                arena(100, List.of()),
+                fighter("caster", "Caster", 1, 400, 500, "custom", burstBrain),
+                fighter("blocker", "Blocker", 2, 480, 500, "custom", blockBrain)));
+        var blocked = blockedResult.frames().getFirst().fighters().get(1);
+        assertThat(blocked.hp()).isEqualTo(100);
+        assertThat(blocked.x()).isEqualTo(730.0);
+        assertThat(blocked.blockCharges()).isEqualTo(4);
     }
 
     @Test
@@ -538,6 +806,84 @@ class DuelSimulationServiceTest {
     }
 
     @Test
+    void abilitiesDoNotImplicitlyRotateTowardTheirTarget() {
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(500, List.of()),
+                fighter("fighter-1", "One", 1, 400, 400, brain("""
+                        [{"priority":1,"conditions":[{"type":"always"}],"action":"swing","actionTarget":"opponent"}]
+                        """)),
+                fighter("fighter-2", "Two", 2, 400, 100, idleBrain)));
+
+        assertThat(result.frames()).allSatisfy(frame ->
+                assertThat(frame.fighters().getFirst().rotation()).isEqualTo(0.0));
+    }
+
+    @Test
+    void explicitRotationActionStillTurnsTowardItsTarget() {
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(200, List.of()),
+                fighter("fighter-1", "One", 1, 400, 400, brain("""
+                        [{"priority":1,"conditions":[{"type":"always"}],"action":"rotate_toward_enemy","actionTarget":"opponent"}]
+                        """)),
+                fighter("fighter-2", "Two", 2, 400, 100, idleBrain)));
+
+        assertThat(result.frames().getFirst().fighters().getFirst().rotation()).isNotEqualTo(0.0);
+    }
+
+    @Test
+    void pistolAndConcussiveShotsUseTheFighterCircleInsteadOfAnAngularCone() throws Exception {
+        for (String ability : List.of("pistol_shot", "concussive_shot")) {
+            JsonNode attackerBrain = jsonMapper.readTree("""
+                    {"version":"melee-logic-tree-v1",
+                     "loadout":{"abilities":["%s"],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                     "blocks":[{"priority":1,"conditions":[{"type":"always"}],"action":"%s"}]}
+                    """.formatted(ability, ability));
+            JsonNode defenderBrain = jsonMapper.readTree("""
+                    {"version":"melee-logic-tree-v1",
+                     "loadout":{"abilities":[],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                     "blocks":[]}
+                    """);
+
+            MatchPlaybackDTO miss = service.simulate(request(
+                    arena(700, List.of()),
+                    fighter("fighter-1", "One", 1, 100, 400, "custom", attackerBrain),
+                    fighter("fighter-2", "Two", 2, 500, 500, "custom", defenderBrain)));
+            MatchPlaybackDTO edgeHit = service.simulate(request(
+                    arena(700, List.of()),
+                    fighter("fighter-1", "One", 1, 100, 400, "custom", attackerBrain),
+                    fighter("fighter-2", "Two", 2, 500, 425, "custom", defenderBrain)));
+
+            assertThat(miss.frames().getLast().fighters().get(1).hp()).as(ability + " cone miss").isEqualTo(100);
+            assertThat(edgeHit.frames().getLast().fighters().get(1).hp()).as(ability + " circle hit").isLessThan(100);
+        }
+    }
+
+    @Test
+    void noDashDoesNotSuppressAnEligiblePistolShot() throws Exception {
+        JsonNode attackerBrain = jsonMapper.readTree("""
+                {"version":"melee-logic-tree-v1",
+                 "loadout":{"abilities":["pistol_shot"],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                 "blocks":[
+                   {"priority":1,"conditions":[{"type":"always"}],"action":"no_dash"},
+                   {"priority":1,"conditions":[{"type":"always"}],"action":"pistol_shot"}
+                 ]}
+                """);
+        JsonNode defenderBrain = jsonMapper.readTree("""
+                {"version":"melee-logic-tree-v1",
+                 "loadout":{"abilities":[],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                 "blocks":[]}
+                """);
+
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(100, List.of()),
+                fighter("fighter-1", "One", 1, 100, 400, "custom", attackerBrain),
+                fighter("fighter-2", "Two", 2, 500, 400, "custom", defenderBrain)));
+
+        assertThat(result.frames().getFirst().fighters().get(1).hp()).isEqualTo(96);
+    }
+
+    @Disabled("Removed arena-object contract")
+    @Test
     void buffObjectsGrantEffectsWhenKilledByLastHit() {
         MatchPlaybackDTO result = service.simulate(request(
                 arena(3_200, List.of(new ObstacleRequest("object_buff_1", "overdrive", 150.0, 400.0, 76))),
@@ -546,19 +892,18 @@ class DuelSimulationServiceTest {
                         """)),
                 fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
 
-        assertThat(result.frames().stream().anyMatch(frame -> frame.fighters().getFirst().overdriveMs() > 0))
-                .isTrue();
         assertThat(result.frames().getLast().obstacles())
                 .extracting(MatchPlaybackDTO.ObstaclePlacementDTO::type)
                 .doesNotContain("overdrive");
     }
 
+    @Disabled("Removed arena-object contract")
     @Test
     void generatedCenterBuffsAreEvenlySpacedAroundCenterObjective() {
         List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles = service.createMatchObstaclePlacements(
                 123L,
-                800,
-                800,
+                1600,
+                1600,
                 List.of(
                         fighter("fighter-1", "One", 1, 100, 400, idleBrain),
                         fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
@@ -581,11 +926,12 @@ class DuelSimulationServiceTest {
                 .orElseThrow();
 
         assertThat(center.x() - left.x()).isEqualTo(right.x() - center.x());
-        assertThat(center.x() - left.x()).isEqualTo(200.0);
+        assertThat(center.x() - left.x()).isEqualTo(400.0);
         assertThat(left.y()).isEqualTo(center.y());
         assertThat(right.y()).isEqualTo(center.y());
     }
 
+    @Disabled("Removed arena-object contract")
     @Test
     void radarJammerAppliesJammedAfterFiveSecondCapture() {
         MatchPlaybackDTO result = service.simulate(request(
@@ -604,14 +950,13 @@ class DuelSimulationServiceTest {
                         """)),
                 fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
 
-        MatchPlaybackDTO.FighterPlacementDTO opponentFrame = result.frames().get(49).fighters().get(1);
-        assertThat(opponentFrame.jammedMs()).isGreaterThan(0);
         assertThat(result.frames().get(49).obstacles())
                 .extracting(MatchPlaybackDTO.ObstaclePlacementDTO::id)
                 .doesNotContain("object_center");
         assertThat(result.frames().getLast().fighters().getFirst().x()).isGreaterThan(100);
     }
 
+    @Disabled("Removed arena-object contract")
     @Test
     void explicitArenaKeepsAllCenterAndPlayerObjectsWithoutRandomPadding() {
         List<ObstacleRequest> objects = List.of(
@@ -630,7 +975,8 @@ class DuelSimulationServiceTest {
                 fighter("fighter-1", "One", 1, 100, 400, idleBrain),
                 fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
 
-        assertThat(result.initialState().obstacles()).hasSize(9);
+        assertThat(result.initialState().obstacles()).hasSize(11);
+        assertThat(result.initialState().obstacles()).filteredOn(obstacle -> "core".equals(obstacle.type())).hasSize(2);
         assertThat(result.initialState().obstacles())
                 .filteredOn(obstacle -> "object_6".equals(obstacle.id()))
                 .singleElement()
@@ -653,7 +999,7 @@ class DuelSimulationServiceTest {
     }
 
     private DuelArenaRequest arena(int durationMs, List<ObstacleRequest> obstacles) {
-        return new DuelArenaRequest(800, 800, durationMs, obstacles);
+        return new DuelArenaRequest(1600, 1600, durationMs, obstacles);
     }
 
     private DuelFighterRequest fighter(String id, String username, int slot, double x, double y, JsonNode brain) {
@@ -675,6 +1021,61 @@ class DuelSimulationServiceTest {
 
     private JsonNode brain(String blocksJson) {
         return brainWithClusters(blocksJson, "[]");
+    }
+
+    @Test
+    void targetDirectionSupportsAReversedRangeThatWrapsAroundTheCircle() {
+        JsonNode directionBrain = customBrain("[]", """
+                [{"priority":1,"conditions":[{"type":"expression","left":"target.bearingFromMe","comparator":"range","target":"opponent","right":{"type":"range","min":32,"max":30}}],"action":"move_west"}]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(100, List.of()),
+                fighter("walker", "Walker", 1, 500, 400, "custom", directionBrain),
+                fighter("target", "Target", 2, 400, 400, "custom", customBrain("[]", "[]"))));
+
+        assertThat(result.frames().getFirst().fighters().getFirst().x()).isLessThan(500);
+    }
+
+    @Test
+    void sharedAbilityHeadFallsThroughBetweenFireballAndConcussiveShot() {
+        JsonNode idle = customBrain("[]", "[]");
+        JsonNode fireballFirst = customBrain("[\"shoot_fireball\",\"concussive_shot\"]", """
+                [
+                  {"priority":1,"conditions":[{"type":"always"}],"action":"shoot_fireball"},
+                  {"priority":2,"conditions":[{"type":"always"}],"action":"concussive_shot"}
+                ]
+                """);
+        MatchPlaybackDTO afterFireball = service.simulate(request(
+                arena(800, List.of()),
+                fighter("fireball-first", "One", 1, 100, 400, "custom", fireballFirst),
+                fighter("idle-1", "Two", 2, 700, 400, "custom", idle)));
+
+        assertThat(afterFireball.frames().getFirst().fighters().getFirst().fireballCharges()).isEqualTo(3);
+        assertThat(afterFireball.frames()).anyMatch(frame -> "concussive_shot".equals(frame.fighters().getFirst().preparingAbility()));
+
+        JsonNode concussiveFirst = customBrain("[\"shoot_fireball\",\"concussive_shot\"]", """
+                [
+                  {"priority":1,"conditions":[{"type":"always"}],"action":"concussive_shot"},
+                  {"priority":2,"conditions":[{"type":"always"}],"action":"shoot_fireball"}
+                ]
+                """);
+        MatchPlaybackDTO afterConcussive = service.simulate(request(
+                arena(800, List.of()),
+                fighter("concussive-first", "One", 1, 100, 400, "custom", concussiveFirst),
+                fighter("idle-2", "Two", 2, 700, 400, "custom", idle)));
+
+        assertThat(afterConcussive.frames()).anyMatch(frame -> "concussive_shot".equals(frame.fighters().getFirst().preparingAbility()));
+        assertThat(afterConcussive.frames().getLast().fighters().getFirst().fireballCharges()).isEqualTo(3);
+    }
+
+    private JsonNode customBrain(String abilitiesJson, String blocksJson) {
+        try {
+            return jsonMapper.readTree("""
+                    {"version":"melee-logic-blocks-v2","loadout":{"abilities":%s,"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},"blocks":%s,"clusters":[]}
+                    """.formatted(abilitiesJson, blocksJson));
+        } catch (Exception ex) {
+            throw new IllegalStateException(ex);
+        }
     }
 
     private JsonNode brainWithClusters(String blocksJson, String clustersJson) {

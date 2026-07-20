@@ -7,11 +7,12 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "test": "node --test src/ml/Featurebuilder.test.js src/ml/MeleeStrategy.test.js src/ml/MovementActions.test.js",
+    "test": "node --test src/logic/BotBrain.test.js src/logic/MovementActions.test.js src/beta/ecs/EntitySystems.test.js src/beta/pixi/snapshotInterpolation.test.js src/beta/pixi/pixiVisualState.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
     "@react-oauth/google": "^0.13.5",
+    "pixi.js": "^8.19.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-router-dom": "^7.15.1",

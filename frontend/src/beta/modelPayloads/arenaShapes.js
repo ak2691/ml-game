@@ -1,50 +1,36 @@
 import {
     BLOCK_MAX_CHARGES,
-    DASH_MAX_CHARGES,
-    MELEE_HP,
-} from "../classes/MeleeClass.jsx";
-import { RANGED_AMMO_MAX } from "../classes/RangedClass.jsx";
-import { FIREBALL_CHARGES_MAX } from "../classes/MageClass.jsx";
+    RANGED_AMMO_MAX,
+    FIREBALL_CHARGES_MAX,
+} from "../combat/Moves.js";
+import { DEFAULT_BOT_LOADOUT, botStatsForLoadout, botStatsForSandboxLoadout, decodeBotLoadout, decodeSandboxLoadout, normalizedBotLoadout } from "../loadout/BotLoadout.js";
 import {
-    BOUNCY_WALL_MAX_USES,
-    BOUNCY_WALL_TYPE,
-    BUFF_PICKUP_SIZE,
-    CENTER_OBJECTIVE_SIZE,
-    COMMAND_LOCK_TYPE,
-    RADAR_JAMMER_TYPE,
-    OVERDRIVE_TYPE,
-    BARRIER_TYPE,
-    INHIBITION_TYPE,
-    PROJECTILE_WALL_LENGTH,
-    PROJECTILE_WALL_TYPE,
-    snapWallRotation,
-} from "../ArenaObjects.js";
-import { combatClassHp } from "../classes/CombatClasses.js";
-import {
-    CANVAS_SIZE,
+    ARENA_HEIGHT_UNITS,
+    ARENA_WIDTH_UNITS,
     DUEL_SLOT_ONE_X,
     DUEL_SLOT_ONE_Y,
     DUEL_SLOT_TWO_X,
     DUEL_SLOT_TWO_Y,
-    HEALTH_PACK_SIZE,
-    MAX_OBSTACLES,
 } from "./arenaConstants.js";
 
 export const MAIN_SHAPE = {
     id: "main",
     type: "circle",
     slot: 1,
-    x: CANVAS_SIZE / 2,
-    y: CANVAS_SIZE / 2,
+    x: ARENA_WIDTH_UNITS / 2,
+    y: ARENA_HEIGHT_UNITS / 2,
     size: 60,
     rotation: 0,
-    combatClass: "melee",
-    hp: MELEE_HP,
+    combatClass: "custom",
+    loadout: DEFAULT_BOT_LOADOUT,
+    abilities: [],
+    hp: 100,
+    maxHp: 100,
     swingCooldownMs: 0,
     swingActiveMs: 0,
     blockCooldownMs: 0,
     blockActiveMs: 0,
-    blockCharges: BLOCK_MAX_CHARGES,
+    blockCharges: 0,
     blockRechargeMs: 0,
     gunCooldownMs: 0,
     gunActiveMs: 0,
@@ -66,9 +52,7 @@ export const MAIN_SHAPE = {
     stunCastActive: false,
     burnRemainingMs: 0,
     burnTickMs: 0,
-    dashCharges: DASH_MAX_CHARGES,
-    dashRechargeMs: 0,
-    dashChargeRechargeMs: [],
+    dashCooldownMs: 0,
     dashActiveMs: 0,
     dashDirectionX: 0,
     dashDirectionY: 0,
@@ -76,21 +60,14 @@ export const MAIN_SHAPE = {
     movementVelocityY: 0,
     velocityX: 0,
     velocityY: 0,
-    shieldHp: 0,
-    overdriveMs: 0,
-    barrierImmunityMs: 0,
-    inhibitionCharges: 0,
     slowedMs: 0,
 };
 
-let nextGeneratedId = 1;
-
-export function genId() {
-    return `shape-${Date.now()}-${nextGeneratedId++}`;
-}
-
 export function buildOpponentShape(opponent) {
     const combatClass = opponent?.selectedClass ?? "melee";
+    const loadout = decodeBotLoadout(combatClass);
+    const abilities = loadout.abilities;
+    const stats = botStatsForLoadout(loadout);
     const slot = Number(opponent?.slot) === 1 ? 1 : 2;
     return {
         id: "opponent-model",
@@ -101,7 +78,10 @@ export function buildOpponentShape(opponent) {
         size: 64,
         rotation: 270,
         combatClass,
-        hp: combatClassHp(combatClass),
+        loadout,
+        abilities,
+        hp: stats.maxHp,
+        maxHp: stats.maxHp,
         swingCooldownMs: 0,
         swingActiveMs: 0,
         blockCooldownMs: 0,
@@ -126,11 +106,16 @@ export function buildOpponentShape(opponent) {
         stunActiveMs: 0,
         stunnedMs: 0,
         stunCastActive: false,
+        abilityCooldowns: Object.fromEntries(abilities.map((ability) => [ability, 0])),
+        abilityCharges: Object.fromEntries(abilities.filter((ability) => ["proximity_mine", "hunter_drone", "reactive_armor"].includes(ability)).map((ability) => [ability, ability === "reactive_armor" ? 3 : 1])),
+        abilityActiveMs: {},
+        preparingAbility: null,
+        preparingMs: 0,
+        preparingTargetX: null,
+        preparingTargetY: null,
         burnRemainingMs: 0,
         burnTickMs: 0,
-        dashCharges: combatClass === "melee" ? DASH_MAX_CHARGES : 0,
-        dashRechargeMs: 0,
-        dashChargeRechargeMs: [],
+        dashCooldownMs: 0,
         dashActiveMs: 0,
         dashDirectionX: 0,
         dashDirectionY: 0,
@@ -138,14 +123,7 @@ export function buildOpponentShape(opponent) {
         movementVelocityY: 0,
         velocityX: 0,
         velocityY: 0,
-        shieldHp: 0,
-        overdriveMs: 0,
-        barrierImmunityMs: 0,
-        inhibitionCharges: 0,
         slowedMs: 0,
-        jammedMs: 0,
-        commandLockedMs: 0,
-        commandLockAction: null,
         opponentUsername: opponent?.username,
     };
 }
@@ -158,14 +136,15 @@ export function buildInitialArenaShapes(matchContext) {
 }
 
 export function buildMatchSpawnShapes(matchContext) {
-    const playerClass = matchContext?.player?.selectedClass ?? "melee";
-    const opponentClass = matchContext?.opponent?.selectedClass ?? "melee";
+    const playerClass = "custom";
+    const opponentClass = "custom";
     const playerSlot = Number(matchContext?.player?.slot) === 2 ? 2 : 1;
     const opponentSlot = playerSlot === 1 ? 2 : 1;
     const fighters = [
         resetFighterShape({
             ...MAIN_SHAPE,
             combatClass: playerClass,
+            loadout: matchContext?.loadout ?? DEFAULT_BOT_LOADOUT,
             x: playerSlot === 1 ? DUEL_SLOT_ONE_X : DUEL_SLOT_TWO_X,
             y: playerSlot === 1 ? DUEL_SLOT_ONE_Y : DUEL_SLOT_TWO_Y,
             rotation: playerSlot === 1 ? 90 : 270,
@@ -174,139 +153,22 @@ export function buildMatchSpawnShapes(matchContext) {
         resetFighterShape({
             ...buildOpponentShape(matchContext?.opponent),
             combatClass: opponentClass,
+            loadout: matchContext?.opponentLoadout ?? DEFAULT_BOT_LOADOUT,
             x: opponentSlot === 1 ? DUEL_SLOT_ONE_X : DUEL_SLOT_TWO_X,
             y: opponentSlot === 1 ? DUEL_SLOT_ONE_Y : DUEL_SLOT_TWO_Y,
             rotation: opponentSlot === 1 ? 90 : 270,
             slot: opponentSlot,
         }),
     ];
-    const matchObstacles = matchObstacleShapes(matchContext?.obstacles, true);
-    return [...fighters, ...(matchObstacles.length > 0 ? matchObstacles : defaultCenterObjectiveShapes())];
+    return fighters;
 }
 
-function defaultCenterObjectiveShapes() {
-    const buffOffset = CANVAS_SIZE / 4;
-    return [
-        {
-            id: "object_center",
-            type: RADAR_JAMMER_TYPE,
-            x: CANVAS_SIZE / 2,
-            y: CANVAS_SIZE / 2,
-            size: CENTER_OBJECTIVE_SIZE,
-            rotation: 0,
-            locked: true,
-        },
-        {
-            id: "object_buff_1",
-            type: OVERDRIVE_TYPE,
-            x: CANVAS_SIZE / 2 - buffOffset,
-            y: CANVAS_SIZE / 2,
-            size: BUFF_PICKUP_SIZE,
-            rotation: 0,
-            hp: 50,
-            locked: true,
-        },
-        {
-            id: "object_buff_2",
-            type: BARRIER_TYPE,
-            x: CANVAS_SIZE / 2 + buffOffset,
-            y: CANVAS_SIZE / 2,
-            size: BUFF_PICKUP_SIZE,
-            rotation: 0,
-            hp: 50,
-            locked: true,
-        },
-    ];
-}
-
-export function matchObstacleShapes(obstacles, locked = false) {
-    if (!Array.isArray(obstacles)) return [];
-    return obstacles
-        .filter((obstacle) => isObstacleType(obstacle?.type))
-        .map((obstacle, index) => ({
-            id: obstacle.id ?? `object_${index + 1}`,
-            type: obstacle.type,
-            x: Number.isFinite(Number(obstacle.x)) ? Number(obstacle.x) : CANVAS_SIZE / 2,
-            y: Number.isFinite(Number(obstacle.y)) ? Number(obstacle.y) : CANVAS_SIZE / 2,
-            size: Number.isFinite(Number(obstacle.size))
-                ? Number(obstacle.size)
-                : obstacle.type === "healthPack"
-                    ? HEALTH_PACK_SIZE
-                    : obstacle.type === RADAR_JAMMER_TYPE || obstacle.type === COMMAND_LOCK_TYPE
-                        ? CENTER_OBJECTIVE_SIZE
-                    : isBuffPickupType(obstacle.type)
-                        ? BUFF_PICKUP_SIZE
-                    : PROJECTILE_WALL_LENGTH,
-            rotation: obstacle.type === PROJECTILE_WALL_TYPE || obstacle.type === BOUNCY_WALL_TYPE
-                ? snapWallRotation(obstacle.rotation)
-                : 0,
-            usesRemaining: obstacle.type === BOUNCY_WALL_TYPE
-                ? Number(obstacle.usesRemaining ?? BOUNCY_WALL_MAX_USES)
-                : undefined,
-            hp: Number(obstacle.hp ?? 0),
-            captureBySlot: {
-                1: Number(obstacle.slotOneCaptureMs ?? obstacle.captureBySlot?.["1"] ?? obstacle.captureBySlot?.[1] ?? 0),
-                2: Number(obstacle.slotTwoCaptureMs ?? obstacle.captureBySlot?.["2"] ?? obstacle.captureBySlot?.[2] ?? 0),
-            },
-            locked,
-        }));
-}
-
-export function buildObstacleShape(type, id = genId(), random = Math.random, locked = false, occupiedShapes = []) {
-    const size = type === "healthPack"
-        ? HEALTH_PACK_SIZE
-        : type === RADAR_JAMMER_TYPE || type === COMMAND_LOCK_TYPE
-            ? CENTER_OBJECTIVE_SIZE
-        : isBuffPickupType(type)
-            ? BUFF_PICKUP_SIZE
-        : PROJECTILE_WALL_LENGTH;
-    let candidate = null;
-    for (let attempt = 0; attempt < 80; attempt += 1) {
-        candidate = {
-            id,
-            type,
-            x: size / 2 + random() * (CANVAS_SIZE - size),
-            y: size / 2 + random() * (CANVAS_SIZE - size),
-            size,
-            rotation: 0,
-            usesRemaining: type === BOUNCY_WALL_TYPE ? BOUNCY_WALL_MAX_USES : undefined,
-            locked,
-        };
-        if (!occupiedShapes.some((shape) => overlapsShape(shape, candidate, 8))) return candidate;
-    }
-    return candidate;
-}
-
-export function isObstacleType(type) {
-    return type === "healthPack"
-        || type === PROJECTILE_WALL_TYPE
-        || type === BOUNCY_WALL_TYPE
-        || type === RADAR_JAMMER_TYPE
-        || type === COMMAND_LOCK_TYPE
-        || isBuffPickupType(type);
-}
-
-export function isBuffPickupType(type) {
-    return type === OVERDRIVE_TYPE
-        || type === BARRIER_TYPE
-        || type === INHIBITION_TYPE;
-}
-
-export function nextObstacleId(shapes) {
-    const used = new Set(shapes.map((shape) => shape.id));
-    for (let index = 1; index <= MAX_OBSTACLES; index += 1) {
-        const id = `object_${index}`;
-        if (!used.has(id)) return id;
-    }
-    return genId();
+export function buildCoreShapes() {
+    return [];
 }
 
 export function cloneShape(shape) {
-    return {
-        ...shape,
-        damageZoneIds: shape.damageZoneIds ? [...shape.damageZoneIds] : undefined,
-        dashChargeRechargeMs: shape.dashChargeRechargeMs ? [...shape.dashChargeRechargeMs] : undefined,
-    };
+    return { ...shape };
 }
 
 export function cloneShapes(shapes) {
@@ -314,27 +176,40 @@ export function cloneShapes(shapes) {
 }
 
 export function resetFighterShape(shape) {
-    const combatClass = shape.combatClass ?? "melee";
+    const sandbox = String(shape.combatClass).startsWith("sandbox:");
+    const loadout = sandbox ? decodeSandboxLoadout(shape.combatClass) : normalizedBotLoadout(shape.loadout
+        ?? (String(shape.combatClass).startsWith("custom:") ? decodeBotLoadout(shape.combatClass) : DEFAULT_BOT_LOADOUT));
+    const abilities = loadout.abilities;
+    const stats = sandbox ? botStatsForSandboxLoadout(loadout) : botStatsForLoadout(loadout);
     return {
         ...shape,
-        hp: combatClassHp(combatClass),
+        combatClass: sandbox ? shape.combatClass : "custom",
+        loadout,
+        abilities,
+        spawnX: shape.spawnX ?? shape.x,
+        spawnY: shape.spawnY ?? shape.y,
+        hp: stats.maxHp,
+        maxHp: stats.maxHp,
+        moveSpeed: stats.moveSpeed,
+        attackDamageMultiplier: stats.attackDamagePercent / 100,
+        attackSpeedMultiplier: stats.attackSpeedPercent / 100,
         swingCooldownMs: 0,
         swingActiveMs: 0,
         blockCooldownMs: 0,
         blockActiveMs: 0,
-        blockCharges: combatClass === "melee" ? BLOCK_MAX_CHARGES : 0,
+        blockCharges: abilities.includes("block") ? BLOCK_MAX_CHARGES : 0,
         blockRechargeMs: 0,
         gunCooldownMs: 0,
         gunActiveMs: 0,
         gunShotActive: false,
-        gunAmmo: combatClass === "ranged" ? RANGED_AMMO_MAX : 0,
+        gunAmmo: abilities.includes("fire_gun") ? RANGED_AMMO_MAX : 0,
         gunReloadMs: 0,
         grenadeCooldownMs: 0,
         grenadeSerial: 1,
         thrownGrenade: null,
         fireballCooldownMs: 0,
         fireballActiveMs: 0,
-        fireballCharges: combatClass === "mage" ? FIREBALL_CHARGES_MAX : 0,
+        fireballCharges: abilities.includes("shoot_fireball") ? FIREBALL_CHARGES_MAX : 0,
         fireballReloadMs: 0,
         fireballSerial: 1,
         thrownFireball: null,
@@ -342,11 +217,18 @@ export function resetFighterShape(shape) {
         stunActiveMs: 0,
         stunnedMs: 0,
         stunCastActive: false,
+        abilityCooldowns: Object.fromEntries(abilities.map((ability) => [ability, 0])),
+        abilityCharges: Object.fromEntries(abilities
+            .filter((ability) => ["proximity_mine", "hunter_drone", "reactive_armor"].includes(ability))
+            .map((ability) => [ability, ability === "reactive_armor" ? 3 : 1])),
+        abilityActiveMs: {},
+        preparingAbility: null,
+        preparingMs: 0,
+        prototypeTriggered: null,
+        prototypeVisual: null,
         burnRemainingMs: 0,
         burnTickMs: 0,
-        dashCharges: combatClass === "melee" ? DASH_MAX_CHARGES : 0,
-        dashRechargeMs: 0,
-        dashChargeRechargeMs: [],
+        dashCooldownMs: 0,
         dashActiveMs: 0,
         dashDirectionX: 0,
         dashDirectionY: 0,
@@ -354,54 +236,27 @@ export function resetFighterShape(shape) {
         movementVelocityY: 0,
         velocityX: 0,
         velocityY: 0,
-        shieldHp: 0,
-        overdriveMs: 0,
-        barrierImmunityMs: 0,
-        inhibitionCharges: 0,
         slowedMs: 0,
-        damageZoneIds: [],
-        inDamageZone: false,
+        silencedMs: 0,
     };
 }
 
 export function buildAutoPlayStartShapes(currentShapes, matchContext, isMatchTraining) {
     const fallbackShapes = isMatchTraining ? buildMatchSpawnShapes(matchContext) : [];
     const fallbackMain = fallbackShapes.find((shape) => shape.id === "main");
-
-    const nextShapes = cloneShapes(currentShapes);
+    const nextShapes = cloneShapes(currentShapes).filter((shape) => shape.id === "main" || shape.id === "opponent-model");
     if (!nextShapes.some((shape) => shape.id === "main")) {
         nextShapes.unshift(resetFighterShape(fallbackMain ?? { ...MAIN_SHAPE }));
     }
-
-    const obstacles = nextShapes.filter((shape) => isObstacleType(shape.type));
-    const fallbackObstacles = fallbackShapes.filter((shape) => isObstacleType(shape.type));
-    if (isMatchTraining) {
-        return [
-            ...nextShapes.filter((shape) => !isObstacleType(shape.type)),
-            ...cloneShapes(fallbackObstacles),
-        ];
-    }
-    return [
-        ...nextShapes,
-        ...(!obstacles.length
-            ? fallbackObstacles.length
-                ? cloneShapes(fallbackObstacles)
-                : []
-            : []),
-    ];
+    return nextShapes;
 }
 
 export function resetArenaStartShapes(shapes, selectedClass, opponentSelectedClass) {
     return shapes.map((shape) => {
-        if (shape.id === "main") return resetFighterShape({ ...shape, combatClass: selectedClass });
+        if (shape.id === "main") return resetFighterShape({ ...shape, x: shape.spawnX ?? shape.x, y: shape.spawnY ?? shape.y, combatClass: selectedClass });
         if (shape.id === "opponent-model") {
-            return resetFighterShape({ ...shape, combatClass: opponentSelectedClass, locked: false });
+            return resetFighterShape({ ...shape, x: shape.spawnX ?? shape.x, y: shape.spawnY ?? shape.y, combatClass: opponentSelectedClass, locked: false });
         }
         return cloneShape(shape);
     });
-}
-
-function overlapsShape(first, second, padding = 0) {
-    return Math.hypot(first.x - second.x, first.y - second.y)
-        <= (first.size + second.size) / 2 + padding;
 }

@@ -16,9 +16,7 @@ import com.example.machiner.domain.ValidationStatus;
 import com.example.machiner.repository.ModelSubmissionRepository;
 import com.example.machiner.repository.TrainingSessionRepository;
 import com.example.machiner.repository.ValidationResultRepository;
-import com.example.machiner.simulation.classes.CombatClassRegistry;
-import com.example.machiner.simulation.classes.MeleeClassSpec;
-import com.example.machiner.simulation.classes.RangedClassSpec;
+import com.example.machiner.simulation.combat.CombatCatalog;
 import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.List;
@@ -46,7 +44,7 @@ class ModelSubmissionServiceTest {
     private final ModelSubmissionService service = new ModelSubmissionService(
             new ModelSubmissionValidationService(
                     jsonMapper,
-                    new CombatClassRegistry(List.of(new MeleeClassSpec(), new RangedClassSpec()))),
+                    new CombatCatalog()),
             modelSubmissionRepository,
             trainingSessionRepository,
             validationResultRepository,

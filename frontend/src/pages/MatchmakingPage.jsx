@@ -1,59 +1,58 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import BetaModel from "../beta/BetaModel";
-import Canvas from "../beta/Canvas";
+import PixiCanvas from "../beta/PixiCanvas";
 import {
-    BOUNCY_WALL_MAX_USES,
-    BOUNCY_WALL_TYPE,
-    BARRIER_TYPE,
+    ASSAULT_BOOST_TYPE,
     BUFF_PICKUP_SIZE,
     CENTER_OBJECTIVE_SIZE,
-    COMMAND_LOCK_TYPE,
-    INHIBITION_TYPE,
-    OVERDRIVE_TYPE,
+    MOBILITY_BOOST_TYPE,
     PROJECTILE_WALL_LENGTH,
     PROJECTILE_WALL_THICKNESS,
     PROJECTILE_WALL_TYPE,
-    RADAR_JAMMER_TYPE,
+    TEMPO_BOOST_TYPE,
+    VANGUARD_BEACON_TYPE,
+    isBoostType,
 } from "../beta/ArenaObjects";
-import { COMBAT_CLASSES } from "../beta/classes/CombatClasses";
+import { BOT_ABILITIES, DEFAULT_BOT_LOADOUT, MAX_EQUIPPED_ABILITIES, ROUND_ABILITY_DRAFT, STAT_POINT_BUDGET_PER_ROUND, botStatsForLoadout, decodeBotLoadout, encodeBotLoadout, normalizedBotLoadout } from "../beta/loadout/BotLoadout";
 import {
-    CANVAS_SIZE,
+    ARENA_HEIGHT_UNITS,
+    ARENA_WIDTH_UNITS,
     DISPLAY_ARENA_MAX_SIZE,
     DUEL_SLOT_ONE_X,
     DUEL_SLOT_ONE_Y,
     DUEL_SLOT_TWO_X,
     DUEL_SLOT_TWO_Y,
+    CORE_HP,
+    CORE_TYPE,
+    DEFENSE_WALL_TYPE,
+    WALL_CORE_HP,
+    WALL_CORE_TYPE,
     HEALTH_PACK_SIZE,
     PLAYER_OBJECT_PLACEMENT_LIMIT,
+    BOOST_PLACEMENT_LIMIT,
+    UTILITY_PLACEMENT_LIMIT,
 } from "../beta/modelPayloads/arenaConstants";
-import { MAIN_SHAPE } from "../beta/modelPayloads/arenaShapes";
-import { objectDisplayName } from "../beta/objectLabels";
+import { MAIN_SHAPE, buildCoreShapes } from "../beta/modelPayloads/arenaShapes";
 import { createMatchmakingClient } from "../matchmaking/stompClient";
+
+const SimulationReplay = lazy(() => import("../replay/SimulationReplay"));
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 const ROUND_RESULT_HOLD_MS = 3500;
-const CLASS_DETAILS = Object.freeze({
-    melee: {
-        summary: "Close-range fighter with dash, sword swings, and limited shield charges.",
-        abilities: "Swing, block, dash",
-        stats: "100 HP, 12 speed, 20 sword damage",
-    },
-    ranged: {
-        summary: "Distance fighter with no dash or block, built around gun pressure and grenades.",
-        abilities: "Fire gun, throw grenade",
-        stats: "100 HP, 8 speed, 2-15 gun damage, 25-50 grenade damage",
-    },
-    mage: {
-        summary: "Mid-speed caster that pressures space with fireballs and burn damage.",
-        abilities: "Shoot fireball",
-        stats: "100 HP, 10 speed, 15 fireball damage, 5s burn",
-    },
-});
+const MATCH_COUNTDOWN_SECONDS = 5;
 
-function secondsRemaining(countdownEndsAt) {
+function ReplayLoadingFallback() {
+    return (
+        <main className="flex min-h-[calc(100vh-52px)] items-center justify-center bg-arena-deep text-ink-muted">
+            <p role="status" className="font-mono text-xs tracking-[0.25em]">LOADING REPLAY...</p>
+        </main>
+    );
+}
+
+function secondsRemaining(countdownEndsAt, maximum = Number.POSITIVE_INFINITY) {
     if (!countdownEndsAt) return 0;
-    return Math.max(0, Math.ceil((countdownEndsAt - Date.now()) / 1000));
+    return Math.min(maximum, Math.max(0, Math.ceil((countdownEndsAt - Date.now()) / 1000)));
 }
 
 async function estimateServerClockOffset() {
@@ -165,9 +164,10 @@ export default function MatchmakingPage() {
     const [remaining, setRemaining] = useState(0);
     const [hasFinished, setHasFinished] = useState(false);
     const [hasSurrendered, setHasSurrendered] = useState(false);
+    const [finishError, setFinishError] = useState(null);
     const [placementSubmitPending, setPlacementSubmitPending] = useState(false);
     const [confirmedPlacementObjects, setConfirmedPlacementObjects] = useState([]);
-    const [classChoice, setClassChoice] = useState("melee");
+    const [loadoutChoice, setLoadoutChoice] = useState(() => normalizedBotLoadout(DEFAULT_BOT_LOADOUT));
 
     useEffect(() => {
         playbackRef.current = playback;
@@ -209,13 +209,14 @@ export default function MatchmakingPage() {
                         }
                         setCurrentMatchEvent(event);
                         updateQueueStatus(event.status === "CLASS_SELECT" ? "CLASS_SELECT" : "COUNTDOWN");
-                        setRemaining(secondsRemaining(
-                            event.status === "CLASS_SELECT" ? event.classSelectionEndsAtMs : event.countdownEndsAtMs
-                        ));
-                        setClassChoice(event.player?.selectedClass ?? "melee");
+                        setRemaining(event.status === "CLASS_SELECT"
+                            ? secondsRemaining(event.classSelectionEndsAtMs)
+                            : secondsRemaining(event.countdownEndsAtMs, MATCH_COUNTDOWN_SECONDS));
+                        setLoadoutChoice(decodeBotLoadout(event.player?.selectedClass));
                         playbackRef.current = null;
                         setPlayback(null);
                         setHasFinished(false);
+                        setFinishError(null);
                         setHasSurrendered(false);
                         placementSubmittedRef.current = false;
                         placementSubmitPendingRef.current = false;
@@ -226,13 +227,12 @@ export default function MatchmakingPage() {
                         setCurrentMatchEvent(event);
                         updateQueueStatus("CLASS_SELECT");
                         setRemaining(secondsRemaining(event.classSelectionEndsAtMs));
-                        setClassChoice(event.player?.selectedClass ?? "melee");
                     }
                     if (event.type === "MATCH_COUNTDOWN_READY") {
                         setCurrentMatchEvent(event);
                         updateQueueStatus("COUNTDOWN");
-                        setRemaining(secondsRemaining(event.countdownEndsAtMs));
-                        setClassChoice(event.player?.selectedClass ?? "melee");
+                        setRemaining(secondsRemaining(event.countdownEndsAtMs, MATCH_COUNTDOWN_SECONDS));
+                        setLoadoutChoice(decodeBotLoadout(event.player?.selectedClass));
                         placementSubmitPendingRef.current = false;
                         setPlacementSubmitPending(false);
                     }
@@ -241,7 +241,7 @@ export default function MatchmakingPage() {
                         setCurrentMatchEvent(event);
                         updateQueueStatus("OBJECT_PLACEMENT");
                         setRemaining(secondsRemaining(event.objectPlacementEndsAtMs));
-                        setClassChoice(event.player?.selectedClass ?? "melee");
+                        setLoadoutChoice(decodeBotLoadout(event.player?.selectedClass));
                         if (event.type === "MATCH_OBJECT_PLACEMENT_READY") {
                             placementSubmittedRef.current = false;
                             placementSubmitPendingRef.current = false;
@@ -262,12 +262,13 @@ export default function MatchmakingPage() {
                             setCurrentMatchEvent(event);
                             playbackRef.current = null;
                             setPlayback(null);
-                            updateQueueStatus(event.status === "OBJECT_PLACEMENT" ? "OBJECT_PLACEMENT" : "COUNTDOWN");
-                            setRemaining(secondsRemaining(event.status === "OBJECT_PLACEMENT"
-                                ? event.objectPlacementEndsAtMs
-                                : event.countdownEndsAtMs));
+                            updateQueueStatus(event.status === "CLASS_SELECT" ? "CLASS_SELECT" : "COUNTDOWN");
+                            setRemaining(event.status === "CLASS_SELECT"
+                                ? secondsRemaining(event.classSelectionEndsAtMs)
+                                : secondsRemaining(event.countdownEndsAtMs, MATCH_COUNTDOWN_SECONDS));
                             setHasFinished(false);
                             setHasSurrendered(false);
+                            setLoadoutChoice(decodeBotLoadout(event.player?.selectedClass));
                             placementSubmittedRef.current = false;
                             placementSubmitPendingRef.current = false;
                             setPlacementSubmitPending(false);
@@ -286,6 +287,11 @@ export default function MatchmakingPage() {
                     if (event.type === "PLAYER_FINISHED") {
                         setCurrentMatchEvent(event);
                         updateQueueStatus(event.status);
+                    }
+                    if (event.type === "MATCH_ERROR") {
+                        setHasFinished(false);
+                        setFinishError(event.message ?? "The server rejected the bot submission. Review the bot and try again.");
+                        updateQueueStatus("TRAINING");
                     }
                     if (event.type === "MATCH_PLAYBACK_READY") {
                         setCurrentMatchEvent(event);
@@ -358,7 +364,10 @@ export default function MatchmakingPage() {
         if (!deadlineMs) return;
 
         const interval = setInterval(() => {
-            const nextRemaining = secondsRemaining(deadlineMs);
+            const nextRemaining = secondsRemaining(
+                deadlineMs,
+                queueStatus === "COUNTDOWN" ? MATCH_COUNTDOWN_SECONDS : Number.POSITIVE_INFINITY,
+            );
             setRemaining(nextRemaining);
             if (queueStatus === "COUNTDOWN" && nextRemaining === 0) {
                 updateQueueStatus("PREP");
@@ -376,6 +385,7 @@ export default function MatchmakingPage() {
     }, [matchEvent?.classSelectionEndsAtMs, matchEvent?.countdownEndsAtMs, matchEvent?.objectPlacementEndsAtMs, queueStatus]);
 
     const finishMatch = (modelSubmissionId) => {
+        setFinishError(null);
         setHasFinished(true);
         clientRef.current?.finish(modelSubmissionId);
     };
@@ -386,7 +396,7 @@ export default function MatchmakingPage() {
     };
 
     const lockClass = () => {
-        clientRef.current?.selectClass(classChoice);
+        clientRef.current?.selectClass(encodeBotLoadout(loadoutChoice));
     };
 
     const placeObjects = (objects) => {
@@ -421,6 +431,8 @@ export default function MatchmakingPage() {
         roundBlockLimit: matchEvent?.roundBlockLimit ?? 10,
         message: matchEvent?.message,
         status: matchEvent?.status,
+        loadout: loadoutChoice,
+        opponentLoadout: decodeBotLoadout(matchEvent?.opponent?.selectedClass),
     }), [
         matchEvent?.matchId,
         matchEvent?.simulationSeed,
@@ -440,13 +452,17 @@ export default function MatchmakingPage() {
         matchEvent?.roundBlockLimit,
         matchEvent?.message,
         matchEvent?.status,
+        matchEvent?.opponent?.selectedClass,
+        loadoutChoice,
     ]);
 
     if (playback) {
         return (
             <main className="min-h-screen bg-arena-deep text-ink-hi font-ui">
                 <MatchHeader onExit={() => navigate("/home")} socketStatus={socketStatus} />
-                <DuelPlayback playback={playback} />
+                <Suspense fallback={<ReplayLoadingFallback />}>
+                    <SimulationReplay playback={playback} />
+                </Suspense>
             </main>
         );
     }
@@ -456,11 +472,13 @@ export default function MatchmakingPage() {
             <main className="min-h-screen bg-arena-deep text-ink-hi font-ui">
                 <MatchHeader onExit={() => navigate("/home")} socketStatus={socketStatus} />
                 <ClassSelectScreen
-                    selectedClass={classChoice}
-                    onSelectClass={setClassChoice}
+                    loadout={loadoutChoice}
+                    onChange={setLoadoutChoice}
                     onLockClass={lockClass}
                     player={matchEvent?.player}
                     opponent={opponent}
+                    roundNumber={matchEvent?.roundNumber ?? 1}
+                    abilityOffers={matchEvent?.abilityOffers ?? []}
                     remaining={remaining}
                 />
             </main>
@@ -474,13 +492,13 @@ export default function MatchmakingPage() {
                 <ObjectPlacementScreen
                     key={`${matchEvent?.matchId ?? "match"}-${matchEvent?.roundNumber ?? 1}-${matchEvent?.player?.slot ?? 1}`}
                     player={matchEvent?.player}
-                    opponent={opponent}
                     placedObjects={matchEvent?.obstacles ?? []}
                     confirmedObjects={confirmedPlacementObjects}
                     remaining={remaining}
                     onSubmit={placeObjects}
                     submitted={Boolean(matchEvent?.player?.objectPlacementSubmitted)}
                     submitting={placementSubmitPending}
+                    roundNumber={matchEvent?.roundNumber ?? 1}
                 />
             </main>
         );
@@ -491,6 +509,7 @@ export default function MatchmakingPage() {
             <BetaModel
                 matchContext={matchContext}
                 finishStatus={hasSurrendered ? "SURRENDERED" : hasFinished ? "FINISHED" : "TRAINING"}
+                finishError={finishError}
                 onFinishMatch={finishMatch}
                 onSurrenderMatch={surrenderMatch}
             />
@@ -510,7 +529,7 @@ export default function MatchmakingPage() {
                         </p>
                         {matchEvent?.roundNumber && (
                             <p className="mt-2 font-mono text-xs tracking-widest text-ink-muted">
-                                ROUND {matchEvent.roundNumber} · BEST OF {Math.max(1, (matchEvent.winsRequired ?? 1) * 2 - 1)}
+                                ROUND {matchEvent.roundNumber} OF 3
                             </p>
                         )}
                     </div>
@@ -531,52 +550,63 @@ export default function MatchmakingPage() {
     );
 }
 
-function ClassSelectScreen({ selectedClass, onSelectClass, onLockClass, player, opponent, remaining }) {
+function ClassSelectScreen({ loadout, onChange, onLockClass, player, opponent, remaining, roundNumber, abilityOffers }) {
     const playerLocked = Boolean(player?.classSelected);
     const opponentLocked = Boolean(opponent?.classSelected);
+    const normalized = normalizedBotLoadout(loadout);
+    const inheritedLoadout = decodeBotLoadout(player?.selectedClass);
+    const inheritedAbilities = playerLocked
+        ? normalized.abilities
+        : Number(roundNumber) > 1 ? inheritedLoadout.abilities : [];
+    const inheritedAbilityIds = new Set(inheritedAbilities);
+    const draftedAbilities = normalized.abilities.filter((ability) => !inheritedAbilityIds.has(ability));
+    const draftedAbilityIds = new Set(draftedAbilities);
+    const draftRule = ROUND_ABILITY_DRAFT[Math.max(1, Number(roundNumber) || 1)] ?? { offered: 0, picks: 0 };
+    const offeredAbilityIds = new Set(Array.isArray(abilityOffers) ? abilityOffers : []);
+    const spent = Object.values(normalized.statPoints).reduce((sum, value) => sum + value, 0);
+    const roundBudget = STAT_POINT_BUDGET_PER_ROUND * Math.max(1, Number(roundNumber) || 1);
+    const stats = botStatsForLoadout(normalized);
+    const toggleAbility = (id) => {
+        if (inheritedAbilityIds.has(id) || !offeredAbilityIds.has(id)) return;
+        const abilities = draftedAbilityIds.has(id)
+            ? normalized.abilities.filter((ability) => ability !== id)
+            : draftedAbilities.length < draftRule.picks ? [...normalized.abilities, id] : normalized.abilities;
+        onChange(normalizedBotLoadout({ ...normalized, abilities }));
+    };
+    const changePoint = (key, delta) => {
+        if (delta > 0 && spent >= roundBudget) return;
+        onChange(normalizedBotLoadout({ ...normalized, statPoints: { ...normalized.statPoints, [key]: Math.max(0, normalized.statPoints[key] + delta) } }));
+    };
 
     return (
         <section className="flex min-h-[calc(100vh-52px)] items-center justify-center px-6 py-8">
             <div className="w-full max-w-[860px]">
                 <div className="flex flex-wrap items-end justify-between gap-4">
                     <div>
-                        <p className="font-mono text-xs tracking-[0.25em] text-cyan">CLASS SELECT</p>
-                        <h1 className="mt-3 text-3xl font-bold text-ink-white">Choose your fighter</h1>
+                        <p className="font-mono text-xs tracking-[0.25em] text-cyan">ROUND LOADOUT</p>
+                        <h1 className="mt-3 text-3xl font-bold text-ink-white">Build your bot</h1>
+                        <p className="mt-2 text-sm text-ink-muted">Choose {draftRule.picks} from your {draftRule.offered} random Round {roundNumber} offers. Your previous picks stay equipped.</p>
                     </div>
                     <div className="font-mono text-5xl font-bold text-ink-white">{remaining}</div>
                 </div>
-                <div className="mt-6 grid gap-4 md:grid-cols-2">
-                    {Object.values(COMBAT_CLASSES).map((combatClass) => {
-                        const details = CLASS_DETAILS[combatClass.id] ?? CLASS_DETAILS.melee;
-                        const active = selectedClass === combatClass.id;
-                        return (
-                            <button
-                                key={combatClass.id}
-                                type="button"
-                                onClick={() => !playerLocked && onSelectClass(combatClass.id)}
-                                disabled={playerLocked}
-                                className={`min-h-[220px] rounded border p-5 text-left transition ${active
-                                    ? "border-cyan bg-cyan-950/30 text-ink-white"
-                                    : "border-border-lo bg-arena-panel text-ink-muted hover:border-border-hi hover:text-ink-white"} disabled:cursor-not-allowed`}
-                            >
-                                <div className="flex items-center justify-between font-mono text-xs tracking-widest">
-                                    <span>{combatClass.label}</span>
-                                    <span>{active ? "SELECTED" : "AVAILABLE"}</span>
-                                </div>
-                                <p className="mt-4 text-sm leading-6">{details.summary}</p>
-                                <dl className="mt-5 space-y-3 font-mono text-[10px] tracking-widest">
-                                    <div className="flex justify-between gap-4">
-                                        <dt className="text-ink-muted">ABILITIES</dt>
-                                        <dd className="text-right text-ink-white">{details.abilities}</dd>
-                                    </div>
-                                    <div className="flex justify-between gap-4">
-                                        <dt className="text-ink-muted">STATS</dt>
-                                        <dd className="text-right text-ink-white">{details.stats}</dd>
-                                    </div>
-                                </dl>
-                            </button>
-                        );
-                    })}
+                <div className="mt-6 grid gap-5 lg:grid-cols-[1.35fr_1fr]">
+                    <div>
+                        <div className="mb-4 grid grid-cols-3 gap-3" aria-label="Ability slots">
+                            {Array.from({ length: MAX_EQUIPPED_ABILITIES }, (_, index) => {
+                                const abilityId = normalized.abilities[index];
+                                const ability = BOT_ABILITIES.find((candidate) => candidate.id === abilityId);
+                                const isDraft = draftedAbilityIds.has(abilityId);
+                                return <button type="button" key={index} disabled={!isDraft || playerLocked} onClick={isDraft ? () => toggleAbility(abilityId) : undefined} aria-label={isDraft ? `Remove ${ability?.label} from slot ${index + 1}` : `Ability slot ${index + 1}${ability ? `: ${ability.label}` : ": empty"}`} className={`min-h-20 rounded border p-3 text-left ${ability ? isDraft ? "cursor-pointer border-cyan bg-cyan-950/30 hover:border-red-300" : "cursor-default border-green-800/70 bg-green-950/20" : "cursor-default border-dashed border-border-lo bg-zinc-950/40"}`}><div className="font-mono text-[9px] tracking-widest text-ink-muted">SLOT {index + 1}</div><div className="mt-2 text-xs font-bold text-ink-white">{ability?.label ?? "EMPTY"}</div>{isDraft && <div className="mt-1 font-mono text-[8px] tracking-widest text-cyan">ROUND {roundNumber} PICK · CLICK TO REMOVE</div>}</button>;
+                            })}
+                        </div>
+                        <div className="grid gap-3 sm:grid-cols-2">
+                            {BOT_ABILITIES.filter((ability) => offeredAbilityIds.has(ability.id)).map((ability) => { const active = draftedAbilityIds.has(ability.id); return <button key={ability.id} type="button" disabled={playerLocked || (!active && draftedAbilities.length >= draftRule.picks)} onClick={() => toggleAbility(ability.id)} className={`rounded border p-4 text-left transition ${active ? "border-cyan bg-cyan-950/30 -translate-y-1" : "border-border-lo bg-arena-panel"}`}><div className="flex items-center justify-between gap-2 font-mono text-xs tracking-widest text-ink-white"><span>{active ? "SELECTED - " : ""}{ability.label}</span><span className="text-[8px] text-cyan">{ability.kind.toUpperCase()}</span></div><p className="mt-2 text-xs text-ink-muted">{ability.summary}</p></button>; })}
+                        </div>
+                    </div>
+                    <div className="border border-border-lo bg-arena-panel p-5">
+                        <div className="font-mono text-xs tracking-widest text-cyan">STAT POINTS {spent}/{roundBudget}</div>
+                        {[ ["maxHp", "HP", stats.maxHp], ["moveSpeed", "MOVE", stats.moveSpeed], ["attackDamage", "DAMAGE", `${stats.attackDamagePercent}%`], ["attackSpeed", "ATTACK SPEED", `${stats.attackSpeedPercent}%`] ].map(([key,label,value]) => <div key={key} className="mt-4 flex items-center justify-between gap-3"><span className="font-mono text-[10px] tracking-widest text-ink-muted">{label}</span><div className="flex items-center gap-3"><button type="button" disabled={playerLocked || normalized.statPoints[key] <= 0} onClick={() => changePoint(key,-1)} className="h-8 w-8 border border-border-lo">-</button><span className="w-14 text-center font-mono text-sm">{value}</span><button type="button" disabled={playerLocked || spent >= roundBudget} onClick={() => changePoint(key,1)} className="h-8 w-8 border border-border-lo">+</button></div></div>)}
+                    </div>
                 </div>
                 <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border border-border-lo bg-arena-panel p-4">
                     <div className="font-mono text-[10px] tracking-widest text-ink-muted">
@@ -587,10 +617,10 @@ function ClassSelectScreen({ selectedClass, onSelectClass, onLockClass, player, 
                     <button
                         type="button"
                         onClick={onLockClass}
-                        disabled={playerLocked}
+                        disabled={playerLocked || draftedAbilities.length !== draftRule.picks || normalized.abilities.length > MAX_EQUIPPED_ABILITIES}
                         className="h-10 rounded border border-green-700/60 bg-green-900/30 px-5 font-mono text-[11px] font-bold tracking-widest text-green-200 hover:bg-green-900/50 disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                        {playerLocked ? "CLASS LOCKED" : `LOCK ${selectedClass.toUpperCase()}`}
+                        {playerLocked ? "LOADOUT LOCKED" : draftedAbilities.length === draftRule.picks ? "LOCK LOADOUT" : `SELECT ${draftRule.picks - draftedAbilities.length} MORE`}
                     </button>
                 </div>
             </div>
@@ -599,20 +629,22 @@ function ClassSelectScreen({ selectedClass, onSelectClass, onLockClass, player, 
 }
 
 const PLACEABLE_OBJECTS = Object.freeze([
-    { type: "healthPack", label: "Health Pack" },
-    { type: PROJECTILE_WALL_TYPE, label: "Projectile Wall" },
-    { type: BOUNCY_WALL_TYPE, label: "Bouncy Wall" },
+    { type: ASSAULT_BOOST_TYPE, label: "Assault Boost", category: "boost" },
+    { type: TEMPO_BOOST_TYPE, label: "Tempo Boost", category: "boost" },
+    { type: MOBILITY_BOOST_TYPE, label: "Mobility Boost", category: "boost" },
+    { type: "healthPack", label: "Health Pack", category: "utility" },
+    { type: PROJECTILE_WALL_TYPE, label: "Healing Projectile Wall", category: "utility" },
 ]);
 
 function ObjectPlacementScreen({
     player,
-    opponent,
     placedObjects = [],
     confirmedObjects = [],
     remaining,
     onSubmit,
     submitted,
     submitting,
+    roundNumber,
 }) {
     const placementSide = player?.slot === 2 ? "bottom" : "top";
     const spawnY = player?.slot === 2 ? DUEL_SLOT_TWO_Y : DUEL_SLOT_ONE_Y;
@@ -620,6 +652,15 @@ function ObjectPlacementScreen({
     const [selectedType, setSelectedType] = useState("healthPack");
     const [selectedId, setSelectedId] = useState(null);
     const [objects, setObjects] = useState([]);
+    if (player?.slot !== 2) {
+        return <section className="flex min-h-[calc(100vh-52px)] items-center justify-center px-6">
+            <div className="border border-emerald-800/70 bg-arena-panel px-10 py-12 text-center shadow-2xl">
+                <p className="font-mono text-xs tracking-[0.3em] text-emerald-300">DEFENDER</p>
+                <h1 className="mt-4 text-2xl font-bold text-ink-white">Waiting for attacker to choose objects</h1>
+                <p className="mt-3 font-mono text-sm text-ink-muted">{remaining}s remaining</p>
+            </div>
+        </section>;
+    }
     const playerShape = {
         ...MAIN_SHAPE,
         x: player?.slot === 2 ? DUEL_SLOT_TWO_X : DUEL_SLOT_ONE_X,
@@ -631,7 +672,6 @@ function ObjectPlacementScreen({
     const serverObjects = confirmedObjects.map((object, index) => ({
         ...object,
         id: object.id ?? `placement-${index + 1}`,
-        usesRemaining: object.usesRemaining ?? (object.type === BOUNCY_WALL_TYPE ? BOUNCY_WALL_MAX_USES : undefined),
     }));
     const visibleObjects = submitted ? serverObjects : objects;
     const localObjects = visibleObjects.map((object) => ({
@@ -643,39 +683,40 @@ function ObjectPlacementScreen({
         .map((object) => ({
             id: object.id,
             type: object.type,
-            x: Number.isFinite(Number(object.x)) ? Number(object.x) : CANVAS_SIZE / 2,
-            y: Number.isFinite(Number(object.y)) ? Number(object.y) : CANVAS_SIZE / 2,
+            x: Number.isFinite(Number(object.x)) ? Number(object.x) : ARENA_WIDTH_UNITS / 2,
+            y: Number.isFinite(Number(object.y)) ? Number(object.y) : ARENA_HEIGHT_UNITS / 2,
             size: Number.isFinite(Number(object.size))
                 ? Number(object.size)
-                : object.type === RADAR_JAMMER_TYPE || object.type === COMMAND_LOCK_TYPE
+                : object.type === VANGUARD_BEACON_TYPE
                     ? CENTER_OBJECTIVE_SIZE
                     : BUFF_PICKUP_SIZE,
             rotation: Number(object.rotation) || 0,
             hp: Number(object.hp ?? 0),
             locked: true,
         }));
-    const shapes = [playerShape, ...neutralObjects, ...localObjects];
+    const shapes = [...buildCoreShapes(), playerShape, ...neutralObjects, ...localObjects];
     const maxObjects = PLAYER_OBJECT_PLACEMENT_LIMIT;
     const ownPlacedCount = visibleObjects.length;
     const remainingSlots = maxObjects - ownPlacedCount;
-    const playerSubmitted = submitted || Boolean(player?.objectPlacementSubmitted);
-    const opponentSubmitted = Boolean(opponent?.objectPlacementSubmitted);
+    const boostCount = visibleObjects.filter((object) => isBoostType(object.type)).length;
+    const utilityCount = ownPlacedCount - boostCount;
 
     const addObject = () => {
-        if (submitted || ownPlacedCount >= maxObjects) return;
+        const selectedIsBoost = isBoostType(selectedType);
+        if (submitted || ownPlacedCount >= maxObjects
+            || (selectedIsBoost ? boostCount >= BOOST_PLACEMENT_LIMIT : utilityCount >= UTILITY_PLACEMENT_LIMIT)) return;
         const size = selectedType === "healthPack"
             ? HEALTH_PACK_SIZE
-            : isBuffPickupType(selectedType) ? BUFF_PICKUP_SIZE : PROJECTILE_WALL_LENGTH;
+            : isBoostType(selectedType) ? BUFF_PICKUP_SIZE : PROJECTILE_WALL_LENGTH;
         const bounds = placementBounds(placementSide, size);
         const index = objects.length;
         const object = {
             id: `placement-${index + 1}`,
             type: selectedType,
-            x: CANVAS_SIZE * (0.3 + index * 0.2),
+            x: ARENA_WIDTH_UNITS * (0.3 + index * 0.2),
             y: (bounds.minY + bounds.maxY) / 2,
             size,
             rotation: selectedType === "healthPack" ? 0 : 0,
-            usesRemaining: selectedType === BOUNCY_WALL_TYPE ? BOUNCY_WALL_MAX_USES : undefined,
         };
         const clamped = clampPlacementObject(object, placementSide);
         setObjects((current) => [...current, clamped]);
@@ -703,8 +744,8 @@ function ObjectPlacementScreen({
         <section className="flex min-h-[calc(100vh-52px)] flex-col items-center justify-center gap-5 px-6 py-5">
             <div className="flex w-full max-w-[1900px] items-end justify-between gap-4">
                 <div>
-                    <p className="font-mono text-xs tracking-[0.25em] text-cyan">ROUND OBJECT SETUP</p>
-                    <h1 className="mt-2 text-2xl font-bold text-ink-white">Place up to 3 objects on your side</h1>
+                    <p className="font-mono text-xs tracking-[0.25em] text-cyan">{roundNumber === 3 ? "SIDES SWITCHED · NEW ATTACKER" : "ROUND OBJECT SETUP"}</p>
+                    <h1 className="mt-2 text-2xl font-bold text-ink-white">Place two boosts and two utilities</h1>
                     <p className="mt-2 text-sm text-ink-muted">
                         Your side is the highlighted third. Center objectives are locked for this round.
                     </p>
@@ -712,7 +753,7 @@ function ObjectPlacementScreen({
                 <div className="font-mono text-5xl font-bold text-ink-white">{remaining}</div>
             </div>
             <div className="grid w-full max-w-[1900px] gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
-                <Canvas
+                <PixiCanvas
                     shapes={shapes}
                     selectedId={selectedId}
                     onSelectShape={(id) => id !== "main" && setSelectedId(id)}
@@ -720,7 +761,6 @@ function ObjectPlacementScreen({
                     onDeselectAll={() => setSelectedId(null)}
                     editable={!submitted}
                     placementSide={placementSide}
-                    showObjectLabels={false}
                 />
                 <aside className="border border-border-lo bg-arena-panel p-4">
                     <div className="mb-4 border border-border-lo bg-zinc-950/70 p-3">
@@ -729,28 +769,20 @@ function ObjectPlacementScreen({
                             {neutralObjects.length > 0 ? neutralObjects.map((object) => (
                                 <div key={object.id} className="flex justify-between gap-3 text-ink-muted">
                                     <span>{object.id === "object_center" ? "CENTER" : object.id === "object_buff_1" ? "LEFT" : "RIGHT"}</span>
-                                    <span className="text-ink-white">{objectDisplayName(object, neutralObjects)}</span>
+                                    <span className="text-ink-white">{object.type}</span>
                                 </div>
                             )) : (
                                 <div className="text-ink-muted">CENTER OBJECTS LOADING</div>
                             )}
                         </div>
                     </div>
-                    <div className="mb-4 grid grid-cols-2 gap-2 font-mono text-[10px] tracking-widest">
-                        <div className={`border p-2 ${playerSubmitted ? "border-green-700/70 bg-green-950/30 text-green-200" : "border-border-lo bg-zinc-950 text-amber-200"}`}>
-                            YOU<br />{playerSubmitted ? "SUBMITTED" : submitting ? "SUBMITTING" : "PLACING"}
-                        </div>
-                        <div className={`border p-2 ${opponentSubmitted ? "border-green-700/70 bg-green-950/30 text-green-200" : "border-border-lo bg-zinc-950 text-amber-200"}`}>
-                            {opponent?.username ?? "OPP"}<br />{opponentSubmitted ? "SUBMITTED" : "PLACING"}
-                        </div>
-                    </div>
-                    <div className="font-mono text-[10px] tracking-widest text-ink-muted">OBJECT TYPE</div>
+                    <div className="font-mono text-[10px] tracking-widest text-ink-muted">BOOSTS {boostCount}/{BOOST_PLACEMENT_LIMIT} · UTILITIES {utilityCount}/{UTILITY_PLACEMENT_LIMIT}</div>
                     <div className="mt-3 grid gap-2">
                         {PLACEABLE_OBJECTS.map((object) => (
                             <button
                                 key={object.type}
                                 type="button"
-                                disabled={submitted}
+                                disabled={submitted || (object.category === "boost" ? boostCount >= BOOST_PLACEMENT_LIMIT : utilityCount >= UTILITY_PLACEMENT_LIMIT)}
                                 onClick={() => setSelectedType(object.type)}
                                 className={`h-10 rounded border px-3 text-left font-mono text-[10px] tracking-widest ${selectedType === object.type
                                     ? "border-cyan-400 bg-cyan-950/40 text-cyan-100"
@@ -797,40 +829,37 @@ function ObjectPlacementScreen({
 function placementBounds(side, size) {
     const radius = size / 2;
     return side === "bottom"
-        ? { minY: (CANVAS_SIZE * 2) / 3 + radius, maxY: CANVAS_SIZE - radius }
-        : { minY: radius, maxY: CANVAS_SIZE / 3 - radius };
+        ? { minY: (ARENA_HEIGHT_UNITS * 2) / 3 + radius, maxY: ARENA_HEIGHT_UNITS - radius }
+        : { minY: radius, maxY: ARENA_HEIGHT_UNITS / 3 - radius };
+}
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
 }
 
 function clampPlacementObject(object, side) {
     const size = object.size ?? (object.type === "healthPack"
         ? HEALTH_PACK_SIZE
-        : isBuffPickupType(object.type) ? BUFF_PICKUP_SIZE : PROJECTILE_WALL_LENGTH);
+        : isBoostType(object.type) ? BUFF_PICKUP_SIZE : PROJECTILE_WALL_LENGTH);
     const radius = size / 2;
     const bounds = placementBounds(side, size);
+    const x = clamp(Number(object.x) || ARENA_WIDTH_UNITS / 2, radius, ARENA_WIDTH_UNITS - radius);
+    const y = clamp(Number(object.y) || bounds.minY, bounds.minY, Math.max(bounds.minY, bounds.maxY));
     return {
         ...object,
         size,
-        x: clamp(Number(object.x) || CANVAS_SIZE / 2, radius, CANVAS_SIZE - radius),
-        y: clamp(Number(object.y) || bounds.minY, bounds.minY, Math.max(bounds.minY, bounds.maxY)),
-        rotation: object.type === "healthPack" || isBuffPickupType(object.type)
+        x,
+        y,
+        rotation: object.type === "healthPack" || isBoostType(object.type)
             ? 0
             : Math.round(Number(object.rotation ?? 0) / 45) * 45,
     };
 }
 
-function isBuffPickupType(type) {
-    return type === OVERDRIVE_TYPE || type === BARRIER_TYPE || type === INHIBITION_TYPE;
-}
-
 function isNeutralMatchObject(object) {
     return object?.id === "object_center"
-        || object?.id === "object_buff_1"
-        || object?.id === "object_buff_2"
-        || object?.type === RADAR_JAMMER_TYPE
-        || object?.type === COMMAND_LOCK_TYPE
-        || isBuffPickupType(object?.type);
+        || object?.type === VANGUARD_BEACON_TYPE;
 }
-
 function MatchHeader({ onExit, socketStatus }) {
     return (
         <header className="flex h-[52px] items-center justify-between border-b border-border-lo bg-arena-panel px-6">
@@ -853,415 +882,5 @@ function MatchHeader({ onExit, socketStatus }) {
                 </button>
             </div>
         </header>
-    );
-}
-
-function frameIndexForElapsedMs(frames, elapsedMs) {
-    if (frames.length === 0) return 0;
-
-    let selectedIndex = 0;
-    for (let index = 0; index < frames.length; index++) {
-        if ((frames[index].elapsedMs ?? 0) > elapsedMs) {
-            break;
-        }
-        selectedIndex = index;
-    }
-
-    return selectedIndex;
-}
-
-function clamp(value, min, max) {
-    return Math.max(min, Math.min(max, value));
-}
-
-function PlaybackFighter({ fighter, arenaWidth, arenaHeight }) {
-    const isFirstSlot = fighter.slot === 1;
-    const isRanged = fighter.combatClass === "ranged";
-    const isMage = fighter.combatClass === "mage";
-    const hpPercent = clamp(fighter.hp ?? 100, 0, 100);
-    const shieldHp = Math.max(0, Number(fighter.shieldHp ?? 0));
-    const shieldPercent = clamp(shieldHp, 0, 25) * 4;
-    const overdriveActive = Number(fighter.overdriveMs ?? 0) > 0;
-    const barrierActive = Number(fighter.barrierImmunityMs ?? 0) > 0;
-    const inhibitionCharges = Math.max(0, Number(fighter.inhibitionCharges ?? 0));
-    const slowedActive = Number(fighter.slowedMs ?? 0) > 0;
-    const jammedActive = Number(fighter.jammedMs ?? 0) > 0;
-    const commandLockedActive = Number(fighter.commandLockedMs ?? 0) > 0;
-    const ammoMax = isMage ? 4 : 10;
-    const ammo = Math.max(0, Math.min(ammoMax, Number(fighter.gunAmmo ?? ammoMax)));
-    const reloadMs = Math.max(0, Number(fighter.gunReloadMs ?? 0));
-    const bodyClasses = isFirstSlot
-        ? "border-cyan bg-cyan/10 text-cyan"
-        : "border-fuchsia-400 bg-fuchsia-500/10 text-fuchsia-200";
-    const weaponClasses = fighter.attackActive
-        ? "border-red-200 bg-red-300/60 shadow-[0_0_14px_rgba(248,113,113,0.65)]"
-        : "border-zinc-200/70 bg-zinc-300/35";
-    const fighterSizePercent = `${((fighter.size ?? 60) / arenaWidth) * 100}%`;
-
-    return (
-        <div
-            className="absolute -translate-x-1/2 -translate-y-1/2 font-mono font-bold"
-            style={{
-                left: `${(fighter.x / arenaWidth) * 100}%`,
-                top: `${(fighter.y / arenaHeight) * 100}%`,
-                width: fighterSizePercent,
-                aspectRatio: "1 / 1",
-                fontSize: `${Math.max(8, Math.min(16, (fighter.size ?? 60) / 4))}px`,
-            }}
-            aria-label={`${fighter.username}, ${Math.round(fighter.hp ?? 100)} health`}
-        >
-            <div className="absolute -top-[10%] left-1/2 h-[6%] w-full -translate-x-1/2 overflow-hidden rounded bg-zinc-800 ring-1 ring-zinc-700">
-                <div className="h-full bg-lime" style={{ width: `${hpPercent}%` }} />
-                {shieldHp > 0 && (
-                    <div className="absolute inset-y-0 left-0 bg-sky-300/80" style={{ width: `${shieldPercent}%` }} />
-                )}
-            </div>
-            {(overdriveActive || barrierActive || inhibitionCharges > 0 || slowedActive || jammedActive || commandLockedActive) && (
-                <div className="absolute -right-5 -top-5 z-20 flex flex-col gap-0.5 text-[9px]">
-                    {overdriveActive && <span className="rounded border border-violet-300 bg-violet-950/90 px-1 text-violet-100">OD</span>}
-                    {barrierActive && <span className="rounded border border-sky-300 bg-sky-950/90 px-1 text-sky-100">SH</span>}
-                    {inhibitionCharges > 0 && <span className="rounded border border-rose-300 bg-rose-950/90 px-1 text-rose-100">IN {inhibitionCharges}</span>}
-                    {slowedActive && <span className="rounded border border-zinc-300 bg-zinc-950/90 px-1 text-zinc-100">SLOW</span>}
-                    {jammedActive && <span className="rounded border border-amber-300 bg-amber-950/90 px-1 text-amber-100">JAM</span>}
-                    {commandLockedActive && <span className="rounded border border-zinc-300 bg-zinc-800/90 px-1 text-zinc-100">LOCK</span>}
-                </div>
-            )}
-            {(isRanged || isMage) && (
-                <div className="absolute -top-10 left-1/2 flex min-w-16 -translate-x-1/2 items-center justify-center gap-1 rounded border border-amber-800/70 bg-zinc-950/90 px-1.5 py-0.5 text-[9px] text-amber-200">
-                    <span>{ammo}/{ammoMax}</span>
-                    {reloadMs > 0 && <span className="text-amber-400">R</span>}
-                </div>
-            )}
-            <div
-                className="absolute inset-0"
-                style={{ transform: `rotate(${fighter.rotation ?? 0}deg)` }}
-            >
-                <div className={`absolute inset-0 rounded-full border-2 ${bodyClasses}`} />
-                {shieldHp > 0 && (
-                    <div className="absolute -inset-1 rounded-full border-2 border-sky-200/80 shadow-[0_0_18px_rgba(125,211,252,0.45)]" />
-                )}
-                {overdriveActive && (
-                    <div className="absolute -inset-2 rounded-full border border-violet-300/80 shadow-[0_0_18px_rgba(167,139,250,0.45)]" />
-                )}
-                {isRanged ? (
-                    <>
-                        <div className="absolute left-1/2 top-1/2 h-[14%] w-[68%] -translate-y-1/2 rounded-sm border border-amber-100 bg-amber-300/65 shadow-[0_0_10px_rgba(251,191,36,0.42)]" />
-                        {fighter.attackActive && (
-                            <div
-                                className="absolute left-[140%] top-1/2 h-[2%] -translate-y-1/2 bg-amber-100 shadow-[0_0_12px_rgba(251,191,36,0.65)]"
-                                style={{ width: `${(542 / (fighter.size ?? 60)) * 100}%` }}
-                            />
-                        )}
-                    </>
-                ) : isMage ? (
-                    <div className="absolute left-1/2 top-1/2 h-[14%] w-[54%] -translate-y-1/2 rounded-full border border-orange-100 bg-orange-300/65 shadow-[0_0_10px_rgba(251,146,60,0.5)]" />
-                ) : (
-                    <div
-                        className={`absolute left-1/2 top-1/2 h-2 rounded-sm border ${weaponClasses}`}
-                        style={{
-                            width: fighter.attackActive ? "96%" : "80%",
-                            height: "10%",
-                            transformOrigin: "0 50%",
-                            transform: `translateY(-50%) rotate(${fighter.attackActive ? -25 : 0}deg)`,
-                        }}
-                    />
-                )}
-                {fighter.blockActive && (
-                    <div className="absolute left-[88%] top-1/2 h-[80%] w-[10%] -translate-y-1/2 rounded border border-blue-200 bg-blue-300/40 shadow-[0_0_14px_rgba(96,165,250,0.6)]" />
-                )}
-            </div>
-            <span className={`absolute inset-0 flex items-center justify-center ${isFirstSlot ? "text-cyan" : "text-fuchsia-200"}`}>
-                {fighter.slot}
-            </span>
-            <span className="absolute -bottom-[42%] left-1/2 -translate-x-1/2 whitespace-nowrap text-[10px] text-ink-white">
-                {fighter.username} · {Math.round(fighter.hp ?? 100)} HP
-            </span>
-        </div>
-    );
-}
-
-function centerCapturePct(obstacle) {
-    const bySlot = obstacle.captureBySlot ?? {};
-    const slotOne = Number(obstacle.slotOneCaptureMs ?? bySlot["1"] ?? bySlot[1] ?? 0);
-    const slotTwo = Number(obstacle.slotTwoCaptureMs ?? bySlot["2"] ?? bySlot[2] ?? 0);
-    const progressMs = Math.max(
-        Number.isFinite(slotOne) ? slotOne : 0,
-        Number.isFinite(slotTwo) ? slotTwo : 0
-    );
-    return Math.max(0, Math.min(1, progressMs / 5000));
-}
-
-function PlaybackObstacle({ obstacle, arenaWidth, arenaHeight, obstacles }) {
-    const size = obstacle.size ?? (obstacle.type === "healthPack"
-        ? 42
-        : isBuffPickupType(obstacle.type) ? BUFF_PICKUP_SIZE : obstacle.type === "grenade" ? 12 : obstacle.type === "fireball" ? 30 : 128);
-    const left = `${(obstacle.x / arenaWidth) * 100}%`;
-    const top = `${(obstacle.y / arenaHeight) * 100}%`;
-    const dimension = `${(size / arenaWidth) * 100}%`;
-    const label = obstacle.id?.startsWith?.("object_") ? objectDisplayName(obstacle, obstacles) : null;
-    const labelNode = label ? (
-        <span className="absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded border border-zinc-600 bg-zinc-950/90 px-1.5 py-0.5 font-mono text-[9px] tracking-wide text-ink-white">
-            {label}
-        </span>
-    ) : null;
-
-    if (obstacle.type === RADAR_JAMMER_TYPE || obstacle.type === COMMAND_LOCK_TYPE) {
-        const jammer = obstacle.type === RADAR_JAMMER_TYPE;
-        const capturePct = centerCapturePct(obstacle);
-        return (
-            <div
-                className={`absolute flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 ${jammer ? "border-amber-200 bg-amber-400/15 shadow-[0_0_20px_rgba(251,191,36,0.35)]" : "border-zinc-200 bg-zinc-500/15 shadow-[0_0_20px_rgba(212,212,216,0.32)]"}`}
-                style={{ left, top, width: dimension, aspectRatio: "1 / 1" }}
-            >
-                {capturePct > 0 && (
-                    <div
-                        className="absolute inset-[-7px] rounded-full opacity-85"
-                        style={{
-                            background: `conic-gradient(${jammer ? "rgba(251,191,36,0.9)" : "rgba(228,228,231,0.9)"} ${capturePct * 360}deg, rgba(63,63,70,0.35) 0deg)`,
-                            mask: "radial-gradient(circle, transparent 62%, black 64%)",
-                            WebkitMask: "radial-gradient(circle, transparent 62%, black 64%)",
-                        }}
-                    />
-                )}
-                {jammer ? (
-                    <div className="relative h-[54%] w-[66%]">
-                        <div className="absolute bottom-0 left-1/2 h-2 w-2 -translate-x-1/2 rounded-full bg-amber-100" />
-                        <div className="absolute bottom-1 left-1/2 h-5 w-10 -translate-x-1/2 rounded-t-full border-x-2 border-t-2 border-amber-100" />
-                        <div className="absolute bottom-1 left-1/2 h-9 w-16 -translate-x-1/2 rounded-t-full border-x-2 border-t-2 border-amber-100" />
-                        <div className="absolute left-1/2 top-1/2 h-1 w-full -translate-x-1/2 rotate-45 rounded bg-red-300" />
-                    </div>
-                ) : (
-                    <div className="relative h-[52%] w-[46%]">
-                        <div className="absolute bottom-0 left-0 h-[62%] w-full rounded border-2 border-zinc-100" />
-                        <div className="absolute left-1/2 top-0 h-[48%] w-[70%] -translate-x-1/2 rounded-t-full border-x-2 border-t-2 border-zinc-100" />
-                    </div>
-                )}
-                {labelNode}
-            </div>
-        );
-    }
-
-    if (obstacle.type === "healthPack") {
-        return (
-            <div
-                className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-emerald-300 bg-emerald-500/15 shadow-[0_0_14px_rgba(16,185,129,0.28)]"
-                style={{ left, top, width: dimension, aspectRatio: "1 / 1" }}
-            >
-                <div className="absolute left-1/2 top-1/2 h-[58%] w-[18%] -translate-x-1/2 -translate-y-1/2 rounded-sm bg-emerald-200" />
-                <div className="absolute left-1/2 top-1/2 h-[18%] w-[58%] -translate-x-1/2 -translate-y-1/2 rounded-sm bg-emerald-200" />
-                {labelNode}
-            </div>
-        );
-    }
-
-    if (isBuffPickupType(obstacle.type)) {
-        const tone = obstacle.type === OVERDRIVE_TYPE
-            ? "border-violet-300 bg-violet-500/15 shadow-[0_0_18px_rgba(167,139,250,0.35)] text-violet-100"
-            : obstacle.type === BARRIER_TYPE
-                ? "border-sky-200 bg-sky-400/15 shadow-[0_0_18px_rgba(125,211,252,0.35)] text-sky-100"
-                : "border-rose-300 bg-rose-500/15 shadow-[0_0_18px_rgba(251,113,133,0.35)] text-rose-100";
-        return (
-            <div
-                className={`absolute flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 ${tone}`}
-                style={{ left, top, width: dimension, aspectRatio: "1 / 1" }}
-            >
-                {obstacle.type === OVERDRIVE_TYPE && (
-                    <div className="relative h-[58%] w-[58%] rounded-full border-2 border-current">
-                        <div className="absolute left-1/2 top-1/2 h-[34%] w-0.5 -translate-x-1/2 -translate-y-full rounded bg-current" />
-                        <div className="absolute left-1/2 top-1/2 h-0.5 w-[32%] -translate-y-1/2 rounded bg-current" />
-                    </div>
-                )}
-                {(obstacle.hp ?? 0) > 0 && <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 font-mono text-[9px] text-white">{Math.ceil(obstacle.hp)}</span>}
-                {obstacle.type === BARRIER_TYPE && <div className="text-3xl font-black leading-none">◇</div>}
-                {obstacle.type === INHIBITION_TYPE && <div className="text-2xl font-black leading-none">⌁</div>}
-                {labelNode}
-            </div>
-        );
-    }
-
-    if (obstacle.type === PROJECTILE_WALL_TYPE || obstacle.type === BOUNCY_WALL_TYPE) {
-        const wallLength = `${(PROJECTILE_WALL_LENGTH / arenaWidth) * 100}%`;
-        const wallThickness = `${(PROJECTILE_WALL_THICKNESS / PROJECTILE_WALL_LENGTH) * 100}%`;
-        const capSize = `${(14 / arenaWidth) * 100}%`;
-        const colorClass = obstacle.type === PROJECTILE_WALL_TYPE ? "bg-yellow-300" : "bg-white";
-        return (
-            <div
-                className="absolute -translate-x-1/2 -translate-y-1/2"
-                style={{
-                    left,
-                    top,
-                    width: wallLength,
-                    aspectRatio: `${PROJECTILE_WALL_LENGTH} / ${PROJECTILE_WALL_LENGTH}`,
-                    transform: `translate(-50%, -50%) rotate(${obstacle.rotation ?? 0}deg)`,
-                }}
-            >
-                <div
-                    className={`absolute left-0 top-1/2 w-full -translate-y-1/2 shadow-[0_0_8px_rgba(255,255,255,0.55)] ${colorClass}`}
-                    style={{ height: wallThickness }}
-                />
-                <div
-                    className={`absolute left-0 top-1/2 rounded-full -translate-x-1/2 -translate-y-1/2 ${colorClass}`}
-                    style={{ width: capSize, aspectRatio: "1 / 1" }}
-                />
-                <div
-                    className={`absolute right-0 top-1/2 rounded-full translate-x-1/2 -translate-y-1/2 ${colorClass}`}
-                    style={{ width: capSize, aspectRatio: "1 / 1" }}
-                />
-                <div style={{ transform: `rotate(${-(obstacle.rotation ?? 0)}deg)` }}>
-                    {labelNode}
-                </div>
-            </div>
-        );
-    }
-
-    if (obstacle.type === "grenade") {
-        return (
-            <div
-                className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-lime-100 bg-lime-300 shadow-[0_0_10px_rgba(190,242,100,0.45)]"
-                style={{ left, top, width: dimension, aspectRatio: "1 / 1" }}
-            />
-        );
-    }
-
-    if (obstacle.type === "grenadeExplosion") {
-        return (
-            <div
-                className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-orange-200 bg-orange-400/25 shadow-[0_0_24px_rgba(251,146,60,0.6)]"
-                style={{ left, top, width: dimension, aspectRatio: "1 / 1" }}
-            />
-        );
-    }
-
-    if (obstacle.type === "fireball") {
-        return (
-            <div
-                className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-orange-100 bg-orange-400 shadow-[0_0_18px_rgba(251,146,60,0.75)]"
-                style={{ left, top, width: dimension, aspectRatio: "1 / 1" }}
-            />
-        );
-    }
-
-    return (
-        <div
-            className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-red-400 bg-red-500/14 shadow-[inset_0_0_24px_rgba(248,113,113,0.2)]"
-            style={{ left, top, width: dimension, aspectRatio: "1 / 1" }}
-        />
-    );
-}
-
-function DuelPlayback({ playback }) {
-    const frames = playback.frames ?? [];
-    const playbackStartMs = playback.playbackStartsAtMs
-        ?? (playback.playbackStartsAt ? new Date(playback.playbackStartsAt).getTime() : null);
-    const [nowMs, setNowMs] = useState(() => Date.now());
-    const elapsedPlaybackMs = playbackStartMs == null
-        ? 0
-        : Math.max(0, nowMs - playbackStartMs);
-    const finalElapsedMs = frames.length === 0
-        ? 0
-        : frames[frames.length - 1].elapsedMs ?? 0;
-    const displayElapsedMs = frames.length === 0
-        ? 0
-        : Math.min(elapsedPlaybackMs, finalElapsedMs);
-    const frameIndex = frames.length === 0
-        ? 0
-        : frameIndexForElapsedMs(frames, displayElapsedMs);
-    const activeFrame = frames[Math.min(frameIndex, Math.max(frames.length - 1, 0))];
-    const fallbackFighters = playback.initialState?.fighters ?? [];
-    const fighters = activeFrame?.fighters ?? fallbackFighters;
-    const winner = [...fighters, ...fallbackFighters].find((fighter) =>
-        String(fighter.userId) === String(playback.winnerUserId));
-    const winnerName = winner?.username ?? "A fighter";
-    const winnerHp = winner?.hp == null ? null : Math.max(0, Math.round(winner.hp));
-    const obstacles = activeFrame?.obstacles ?? playback.initialState?.obstacles ?? [];
-    const arenaWidth = playback.initialState?.width ?? 800;
-    const arenaHeight = playback.initialState?.height ?? 800;
-    const lastFrameIndex = Math.max(frames.length - 1, 0);
-    const hasReachedFinalFrame = frames.length === 0 || frameIndex >= lastFrameIndex;
-    const hasOfficialResult = Boolean(playback.result);
-    const shouldRevealResult = hasOfficialResult && hasReachedFinalFrame;
-    const resultTitle = shouldRevealResult
-        ? playback.result === "FIGHTER_WIN"
-            ? `${winnerName} won the round${winnerHp == null ? "" : ` with ${winnerHp} HP`}`
-            : playback.result === "DRAW"
-                ? "Fight drawn"
-                : playback.result === "RESIGNATION_WIN"
-                    ? "Won by resignation"
-                    : "Simulation failed"
-        : hasReachedFinalFrame
-            ? "Awaiting official result"
-            : "Replay in progress";
-
-    useEffect(() => {
-        let animationFrameId = null;
-        let timeoutId = null;
-        let cancelled = false;
-
-        const tick = () => {
-            if (cancelled) return;
-            setNowMs(Date.now());
-
-            if (typeof requestAnimationFrame === "function" && !document.hidden) {
-                animationFrameId = requestAnimationFrame(tick);
-            } else {
-                timeoutId = setTimeout(tick, 250);
-            }
-        };
-
-        tick();
-
-        return () => {
-            cancelled = true;
-            if (animationFrameId != null) {
-                cancelAnimationFrame(animationFrameId);
-            }
-            if (timeoutId != null) {
-                clearTimeout(timeoutId);
-            }
-        };
-    }, [playbackStartMs]);
-
-    return (
-        <section className="flex min-h-[calc(100vh-52px)] flex-col items-center justify-center gap-5 px-6 py-5">
-            <div className="text-center">
-                <p className="font-mono text-xs tracking-[0.25em] text-cyan">{playback.rulesetVersion ?? "duel-v1"}</p>
-                <h1 className="mt-2 text-2xl font-bold text-ink-white">
-                    {resultTitle}
-                </h1>
-                <p className="mt-2 text-sm text-ink-muted">
-                    {shouldRevealResult
-                        ? playback.message
-                        : hasReachedFinalFrame
-                            ? "Waiting for the server to publish the result."
-                            : "Watching the submitted bot brains fight."}
-                </p>
-            </div>
-            <div
-                className="relative w-full max-w-[1600px] overflow-hidden rounded border border-border-mid bg-[#0d1117]"
-                style={{
-                    width: `min(100%, ${DISPLAY_ARENA_MAX_SIZE}px, calc(100vh - 190px))`,
-                    aspectRatio: `${arenaWidth} / ${arenaHeight}`,
-                }}
-            >
-                <div className="absolute inset-0 canvas-grid-bg opacity-60" />
-                {obstacles.map((obstacle) => (
-                    <PlaybackObstacle
-                        key={obstacle.id}
-                        obstacle={obstacle}
-                        obstacles={obstacles}
-                        arenaWidth={arenaWidth}
-                        arenaHeight={arenaHeight}
-                    />
-                ))}
-                {fighters.map((fighter) => (
-                    <PlaybackFighter
-                        key={fighter.userId}
-                        fighter={fighter}
-                        arenaWidth={arenaWidth}
-                        arenaHeight={arenaHeight}
-                    />
-                ))}
-            </div>
-        </section>
     );
 }

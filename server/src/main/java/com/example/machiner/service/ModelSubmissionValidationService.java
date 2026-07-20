@@ -2,8 +2,8 @@ package com.example.machiner.service;
 
 import com.example.machiner.DTO.ModelSubmissionPayloadDTO;
 import com.example.machiner.DTO.ModelSubmissionValidationResponseDTO;
-import com.example.machiner.simulation.classes.CombatClassRegistry;
-import com.example.machiner.simulation.classes.CombatClassSpec;
+import com.example.machiner.simulation.combat.CombatCatalog;
+import com.example.machiner.simulation.combat.CombatRules;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -31,11 +31,14 @@ public class ModelSubmissionValidationService {
     private static final int MAX_MODEL_HASH_LENGTH = 128;
     private static final int MAX_SELECTED_CLASS_LENGTH = 40;
     private static final int MAX_BASE_MODEL_ARTIFACT_ID_LENGTH = 100;
-    private static final int MAX_LOGIC_BLOCKS = 50;
-    private static final int MAX_CLUSTERS = 12;
-    private static final int MAX_CONDITIONS_PER_BLOCK = 4;
+    private static final int MAX_LOGIC_BLOCKS = 100;
+    private static final int MAX_TOTAL_CONDITIONS = 300;
+    private static final int MAX_CLUSTERS = 100;
+    private static final int MAX_CONDITIONS_PER_BLOCK = MAX_TOTAL_CONDITIONS;
     private static final int MAX_ROUND_TRAINING_STEPS = 0;
     private static final Set<String> MOVEMENT_ACTIONS = Set.of(
+            "none",
+            "move_walk",
             "move_inward",
             "move_outward",
             "move_tangent_left",
@@ -82,9 +85,7 @@ public class ModelSubmissionValidationService {
             "my_shield_charges_gt");
     private static final Set<String> DASH_CONDITIONS = Set.of(
             "my_dash_ready",
-            "my_dash_cooldown",
-            "my_dash_charges_lt",
-            "my_dash_charges_gt");
+            "my_dash_cooldown");
     private static final Set<String> GUN_CONDITIONS = Set.of("my_fire_gun_ready", "my_fire_gun_cooldown");
     private static final Set<String> GRENADE_CONDITIONS = Set.of("my_grenade_ready", "my_grenade_cooldown");
     private static final Set<String> FIREBALL_CONDITIONS = Set.of("my_fireball_ready", "my_fireball_cooldown");
@@ -96,25 +97,28 @@ public class ModelSubmissionValidationService {
             "opponent.hp",
             "opponent.x",
             "opponent.y",
-            "my.overdriveMs",
-            "my.barrierMs",
-            "my.slowedMs",
-            "my.jammedMs",
-            "my.commandLockedMs",
-            "opponent.overdriveMs",
-            "opponent.barrierMs",
-            "opponent.slowedMs",
-            "opponent.jammedMs",
-            "opponent.commandLockedMs",
             "target.distance",
-            "opponent.objectDistance",
+            "target.hp",
+            "target.bearingFromMe",
+            "my.bearingFromTarget",
+            "target.relativeBearing",
+            "target.relativeBearingClockwise",
+            "target.relativeBearingCounterclockwise",
+            "target.facing",
+            "target.count",
+            "target.age",
+            "my.selectedAbilityCooldownMs",
+            "my.selectedAbilityAmmo",
+            "my.selectedAbilityPreparationMs",
+            "opponent.selectedAbilityCooldownMs",
+            "opponent.selectedAbilityAmmo",
+            "opponent.selectedAbilityPreparationMs",
             "my.edgeDistance",
             "target.edgeDistance",
             "my.swingCooldownMs",
             "my.shieldCharges",
             "my.blockRechargeMs",
             "my.dashCooldownMs",
-            "my.dashCharges",
             "my.gunCooldownMs",
             "my.gunAmmo",
             "my.gunReloadMs",
@@ -127,7 +131,6 @@ public class ModelSubmissionValidationService {
             "opponent.shieldCharges",
             "opponent.blockRechargeMs",
             "opponent.dashCooldownMs",
-            "opponent.dashCharges",
             "opponent.gunCooldownMs",
             "opponent.gunAmmo",
             "opponent.gunReloadMs",
@@ -153,23 +156,41 @@ public class ModelSubmissionValidationService {
             "opponent.grenadeReady",
             "opponent.fireballReady",
             "opponent.stunReady",
-            "my.jammed",
-            "my.commandLocked",
-            "opponent.jammed",
-            "opponent.commandLocked",
             "target.exists",
-            "target.isHealthPack",
-            "target.isDamageZone",
-            "target.isProjectileWall",
-            "target.isBouncyWall",
-            "my.insideDamageZone");
+            "target.alive",
+            "my.selectedAbilityReady",
+            "my.selectedAbilityPreparing",
+            "opponent.selectedAbilityReady",
+            "opponent.selectedAbilityPreparing");
     private static final Set<String> NUMERIC_COMPARATORS = Set.of("lt", "lte", "eq", "neq", "gte", "gt");
     private static final Set<String> BOOLEAN_COMPARATORS = Set.of("eq", "neq");
+    private static final Set<String> BASE_ALLOWED_TARGETS = Set.of(
+            "opponent", "orbital_zone", "opponent_grenade", "opponent_fireball",
+            "opponent_concussive_shot", "opponent_proximity_mine", "opponent_gravity_field",
+            "opponent_hunter_drone", "opponent_orbital_zone", "opponent_null_zone", "opponent_silence_wave", "opponent_temporal_rewind_zone",
+            "my_grenade", "my_fireball", "my_concussive_shot", "my_proximity_mine", "my_gravity_field", "my_hunter_drone",
+            "my_orbital_zone", "my_null_zone", "my_silence_wave", "my_temporal_rewind_zone");
+    private static final Set<String> ALLOWED_ABILITIES = Set.of(
+            "swing", "block", "dash", "fire_gun", "throw_grenade", "shoot_fireball", "stun",
+            "heavy_slash", "repulsor_burst", "concussive_shot", "repair_pulse", "proximity_mine",
+            "quick_jab", "pistol_shot", "rail_shot", "gravity_grenade", "silence_pulse",
+            "reactive_armor", "hunter_drone", "thrust", "micro_dash", "temporal_rewind",
+            "orbital_strike", "absolute_guard", "null_zone", "phase_strike");
+    private static final Set<String> PROTOTYPE_ACTIONS = Set.of(
+            "heavy_slash", "repulsor_burst", "concussive_shot", "repair_pulse", "proximity_mine",
+            "quick_jab", "pistol_shot", "rail_shot", "gravity_grenade",
+            "silence_pulse", "reactive_armor", "hunter_drone", "thrust", "micro_dash", "micro_dash_outward",
+            "micro_dash_left", "micro_dash_right", "micro_dash_toward_left", "micro_dash_toward_right", "micro_dash_away_left", "micro_dash_away_right", "micro_dash_north", "micro_dash_south", "micro_dash_east", "micro_dash_west",
+            "micro_dash_northeast", "micro_dash_northwest", "micro_dash_southeast", "micro_dash_southwest",
+            "temporal_rewind", "orbital_strike", "absolute_guard", "null_zone", "phase_strike", "phase_strike_keep_facing",
+            "phase_strike_face_origin", "phase_strike_mirror_facing");
+    private static final Set<String> PREPARING_ABILITIES = Set.of("heavy_slash", "concussive_shot", "repair_pulse", "rail_shot", "silence_pulse", "null_zone");
+    private static final Set<String> STAT_POINT_KEYS = Set.of("maxHp", "moveSpeed", "attackDamage", "attackSpeed");
 
     private final JsonMapper jsonMapper;
-    private final CombatClassRegistry combatClasses;
+    private final CombatCatalog combatClasses;
 
-    public ModelSubmissionValidationService(JsonMapper jsonMapper, CombatClassRegistry combatClasses) {
+    public ModelSubmissionValidationService(JsonMapper jsonMapper, CombatCatalog combatClasses) {
         this.jsonMapper = jsonMapper;
         this.combatClasses = combatClasses;
     }
@@ -210,7 +231,7 @@ public class ModelSubmissionValidationService {
         if (requireObject(errors, payload.getTrainingMetrics(), "trainingMetrics")) {
             validateRoundTrainingLimits(errors, payload.getTrainingMetrics());
         }
-        CombatClassSpec classSpec = combatClasses.forId(hasText(payload.getSelectedClass()) ? payload.getSelectedClass() : "melee");
+        CombatRules classSpec = combatClasses.duelV1();
         validateBrain(errors, submittedBrain(payload), classSpec);
 
         String computedHash = null;
@@ -257,7 +278,7 @@ public class ModelSubmissionValidationService {
         return response;
     }
 
-    private void validateBrain(List<String> errors, JsonNode brain, CombatClassSpec classSpec) {
+    private void validateBrain(List<String> errors, JsonNode brain, CombatRules classSpec) {
         if (!requireObject(errors, brain, "brain")) {
             return;
         }
@@ -265,19 +286,29 @@ public class ModelSubmissionValidationService {
         if (!brain.hasNonNull("version") || !brain.get("version").isTextual()) {
             errors.add("brain.version must be a string");
         }
+        validateLoadout(errors, brain.get("loadout"));
+        validateActionsAgainstLoadout(errors, brain);
+
+        JsonNode columns = brain.get("columns");
+        if (columns != null) {
+            validateLogicColumns(errors, columns, classSpec);
+            return;
+        }
 
         if (!brain.hasNonNull("blocks") || !brain.get("blocks").isArray()) {
-            errors.add("brain.blocks must be an array");
+            errors.add("brain must contain a columns array or legacy blocks array");
             return;
         }
 
         int blockCount = 0;
+        int conditionCount = 0;
         JsonNode blocks = brain.get("blocks");
-        blockCount += blocks.size();
+        for (JsonNode block : blocks) blockCount += executableActionCount(block);
         if (blockCount > MAX_LOGIC_BLOCKS) {
             errors.add("brain.blocks exceeds the logic block limit");
         }
         for (int index = 0; index < blocks.size(); index++) {
+            conditionCount += conditionCount(blocks.get(index));
             validateLogicBlock(errors, blocks.get(index), "brain.blocks[" + index + "]", classSpec);
         }
 
@@ -301,31 +332,204 @@ public class ModelSubmissionValidationService {
                         errors.add(clusterPath + ".conditions must be an array");
                     } else if (clusterConditions.size() > MAX_CONDITIONS_PER_BLOCK) {
                         errors.add(clusterPath + ".conditions exceeds the condition limit");
+                    } else {
+                        conditionCount += clusterConditions.size();
                     }
                     JsonNode clusterBlocks = cluster.get("blocks");
                     if (clusterBlocks == null || !clusterBlocks.isArray()) {
                         errors.add(clusterPath + ".blocks must be an array");
                         continue;
                     }
-                    blockCount += clusterBlocks.size();
+                    for (JsonNode block : clusterBlocks) blockCount += executableActionCount(block);
                     if (blockCount > MAX_LOGIC_BLOCKS) {
                         errors.add("brain blocks exceed the logic block limit");
                     }
                     for (int blockIndex = 0; blockIndex < clusterBlocks.size(); blockIndex++) {
+                        conditionCount += conditionCount(clusterBlocks.get(blockIndex));
                         validateLogicBlock(errors, clusterBlocks.get(blockIndex),
                                 clusterPath + ".blocks[" + blockIndex + "]", classSpec);
                     }
                 }
             }
         }
+        if (conditionCount > MAX_TOTAL_CONDITIONS) errors.add("brain exceeds the total condition limit");
     }
 
-    private void validateLogicBlock(List<String> errors, JsonNode block, String path, CombatClassSpec classSpec) {
+    private void validateLoadout(List<String> errors, JsonNode loadout) {
+        if (loadout == null) return; // Legacy replay/submission compatibility.
+        if (!loadout.isObject()) {
+            errors.add("brain.loadout must be an object");
+            return;
+        }
+        JsonNode abilities = loadout.get("abilities");
+        if (abilities == null || !abilities.isArray() || abilities.size() > 6) {
+            errors.add("brain.loadout.abilities must contain between 0 and 6 abilities");
+        } else {
+            Set<String> seen = new HashSet<>();
+            abilities.forEach(ability -> {
+                if (!ability.isTextual() || !ALLOWED_ABILITIES.contains(ability.asText()) || !seen.add(ability.asText())) {
+                    errors.add("brain.loadout.abilities contains an invalid or duplicate ability");
+                }
+            });
+        }
+        JsonNode statPoints = loadout.get("statPoints");
+        if (statPoints == null || !statPoints.isObject()) {
+            errors.add("brain.loadout.statPoints must be an object");
+            return;
+        }
+        int total = 0;
+        for (String key : STAT_POINT_KEYS) {
+            JsonNode value = statPoints.get(key);
+            if (value == null || !value.isIntegralNumber() || value.asInt() < 0 || value.asInt() > 12) {
+                errors.add("brain.loadout.statPoints." + key + " must be an integer from 0 to 12");
+            } else {
+                total += value.asInt();
+            }
+        }
+        if (total > 12) errors.add("brain.loadout.statPoints exceeds the match budget of 12");
+    }
+
+    private void validateActionsAgainstLoadout(List<String> errors, JsonNode brain) {
+        JsonNode abilities = brain.path("loadout").path("abilities");
+        if (!abilities.isArray()) return;
+        Set<String> equipped = new HashSet<>();
+        abilities.forEach(ability -> equipped.add(ability.asText("")));
+        validateActionNodes(errors, brain, equipped, "brain");
+    }
+
+    private void validateActionNodes(List<String> errors, JsonNode node, Set<String> equipped, String path) {
+        if (node == null) return;
+        if (node.isArray()) {
+            for (int index = 0; index < node.size(); index++) {
+                validateActionNodes(errors, node.get(index), equipped, path + "[" + index + "]");
+            }
+            return;
+        }
+        if (!node.isObject()) return;
+        JsonNode action = node.get("action");
+        if (action != null && action.isTextual()) {
+            String requiredAbility = abilityForAction(action.asText());
+            if (requiredAbility != null && !equipped.contains(requiredAbility)) {
+                errors.add(path + ".action requires equipped ability " + requiredAbility);
+            }
+        }
+        JsonNode left = node.get("left");
+        JsonNode selectedAbility = node.get("ability");
+        if (left != null && left.isTextual() && left.asText().startsWith("my.selectedAbility")
+                && selectedAbility != null && selectedAbility.isTextual() && !equipped.contains(selectedAbility.asText())) {
+            errors.add(path + ".ability requires equipped ability " + selectedAbility.asText());
+        }
+        node.properties().forEach(entry -> {
+            if (!"loadout".equals(entry.getKey())) {
+                validateActionNodes(errors, entry.getValue(), equipped, path + "." + entry.getKey());
+            }
+        });
+    }
+
+    private String abilityForAction(String action) {
+        if ("swing".equals(action)) return "swing";
+        if ("block".equals(action)) return "block";
+        if (DASH_ACTIONS.contains(action)) return "dash";
+        if ("fire_gun".equals(action)) return "fire_gun";
+        if ("throw_grenade".equals(action)) return "throw_grenade";
+        if ("shoot_fireball".equals(action)) return "shoot_fireball";
+        if ("stun".equals(action)) return "stun";
+        if (action.startsWith("micro_dash")) return "micro_dash";
+        if (action.startsWith("phase_strike")) return "phase_strike";
+        for (String ability : ALLOWED_ABILITIES) if (ability.equals(action)) return ability;
+        return null;
+    }
+
+    private void validateLogicColumns(List<String> errors, JsonNode columns, CombatRules classSpec) {
+        if (!columns.isArray()) {
+            errors.add("brain.columns must be an array");
+            return;
+        }
+        if (columns.size() > MAX_CLUSTERS) errors.add("brain.columns exceeds the column limit");
+        int[] branchCount = { 0 };
+        int[] conditionCount = { 0 };
+        for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
+            JsonNode column = columns.get(columnIndex);
+            String path = "brain.columns[" + columnIndex + "]";
+            if (column == null || !column.isObject()) {
+                errors.add(path + " must be an object");
+                continue;
+            }
+            JsonNode branches = column.get("branches");
+            if (branches == null || !branches.isArray()) {
+                errors.add(path + ".branches must be an array");
+                continue;
+            }
+            validateTreeBranches(errors, branches, path + ".branches", classSpec, branchCount, conditionCount);
+        }
+        if (branchCount[0] > MAX_LOGIC_BLOCKS) errors.add("brain tree actions exceed the action node limit");
+        if (conditionCount[0] > MAX_TOTAL_CONDITIONS) errors.add("brain tree exceeds the total condition limit");
+    }
+
+    private void validateTreeBranches(List<String> errors, JsonNode branches, String path,
+            CombatRules classSpec, int[] branchCount, int[] conditionCount) {
+        for (int index = 0; index < branches.size(); index++) {
+            JsonNode branch = branches.get(index);
+            String branchPath = path + "[" + index + "]";
+            branchCount[0] += executableActionCount(branch);
+            conditionCount[0] += conditionCount(branch);
+            validateLogicBlock(errors, branch, branchPath, classSpec);
+            String expected = index == 0 ? "if" : null;
+            String type = branch != null && branch.hasNonNull("branchType") ? branch.get("branchType").asText() : expected;
+            if (index == 0 && !"if".equals(type)) errors.add(branchPath + ".branchType must be if for the first sibling");
+            if (index > 0 && !"else_if".equals(type) && !"else".equals(type)) errors.add(branchPath + ".branchType must be else_if or else");
+            if ("else".equals(type) && index != branches.size() - 1) errors.add(branchPath + " else branch must be last");
+            JsonNode children = branch != null ? branch.get("children") : null;
+            if (children != null) {
+                if (!children.isArray()) errors.add(branchPath + ".children must be an array");
+                else validateTreeBranches(errors, children, branchPath + ".children", classSpec, branchCount, conditionCount);
+            }
+        }
+    }
+
+    private int conditionCount(JsonNode block) {
+        JsonNode conditions = block != null ? block.get("conditions") : null;
+        return conditions != null && conditions.isArray() ? conditions.size() : 0;
+    }
+
+    private void validateLogicBlock(List<String> errors, JsonNode block, String path, CombatRules classSpec) {
         if (!block.isObject()) {
             errors.add(path + " must be an object");
             return;
         }
-        if (!block.hasNonNull("action") || !block.get("action").isTextual()) {
+        validateTarget(errors, block.get("actionTarget"), path + ".actionTarget");
+        JsonNode actions = block.get("actions");
+        if (actions != null && actions.isArray() && !actions.isEmpty()) {
+            Set<String> heads = new HashSet<>();
+            for (int index = 0; index < actions.size(); index++) {
+                JsonNode entry = actions.get(index);
+                String actionPath = path + ".actions[" + index + "]";
+                if (entry == null || !entry.isObject() || !entry.hasNonNull("action") || !entry.get("action").isTextual()) {
+                    errors.add(actionPath + ".action must be a string");
+                    continue;
+                }
+                String action = entry.get("action").asText();
+                validateActionAllowed(errors, action, actionPath, classSpec);
+                validateTarget(errors, entry.get("actionTarget"), actionPath + ".actionTarget");
+                if (entry.has("targetOffsetX")) validateSignedCoordinate(errors, entry.get("targetOffsetX"), actionPath + ".targetOffsetX", 1000);
+                if (entry.has("targetOffsetY")) validateSignedCoordinate(errors, entry.get("targetOffsetY"), actionPath + ".targetOffsetY", 800);
+                if ("orbital_strike".equals(action)) {
+                    JsonNode targetModeNode = entry.get("targetMode");
+                    String targetMode = targetModeNode != null && targetModeNode.isTextual()
+                            ? targetModeNode.asText()
+                            : entry.has("targetX") || entry.has("targetY") ? "coordinates" : "target";
+                    if (!"target".equals(targetMode) && !"coordinates".equals(targetMode)) {
+                        errors.add(actionPath + ".targetMode must be target or coordinates");
+                    } else if ("coordinates".equals(targetMode)) {
+                        validateCoordinate(errors, entry.get("targetX"), actionPath + ".targetX", 1000);
+                        validateCoordinate(errors, entry.get("targetY"), actionPath + ".targetY", 800);
+                    }
+                }
+                String head = validationActionHead(action);
+                if (!heads.add(head)) errors.add(path + " has multiple " + head + " actions");
+            }
+            if (heads.contains("none") && heads.size() > 1) errors.add(path + " cannot combine N/A with executable actions");
+        } else if (!block.hasNonNull("action") || !block.get("action").isTextual()) {
             errors.add(path + ".action must be a string");
         } else {
             validateActionAllowed(errors, block.get("action").asText(), path, classSpec);
@@ -342,7 +546,27 @@ public class ModelSubmissionValidationService {
         }
     }
 
-    private void validateActionAllowed(List<String> errors, String action, String path, CombatClassSpec classSpec) {
+    private int executableActionCount(JsonNode block) {
+        if (block == null || !block.isObject()) return 0;
+        JsonNode actions = block.get("actions");
+        if (actions != null && actions.isArray() && !actions.isEmpty()) {
+            int count = 0;
+            for (JsonNode entry : actions) {
+                if (entry != null && entry.isObject() && !"none".equals(entry.path("action").asText("none"))) count++;
+            }
+            return count;
+        }
+        return "none".equals(block.path("action").asText("none")) ? 0 : 1;
+    }
+
+    private String validationActionHead(String action) {
+        if ("none".equals(action)) return "none";
+        if ("rotate_toward_enemy".equals(action)) return "rotation";
+        if (MOVEMENT_ACTIONS.contains(action)) return "movement";
+        return "ability";
+    }
+
+    private void validateActionAllowed(List<String> errors, String action, String path, CombatRules classSpec) {
         Set<String> allowed = new HashSet<>(MOVEMENT_ACTIONS);
         if (classSpec.canSwing()) allowed.add("swing");
         if (classSpec.canBlock()) allowed.add("block");
@@ -351,12 +575,15 @@ public class ModelSubmissionValidationService {
         if (classSpec.canThrowGrenade()) allowed.add("throw_grenade");
         if (classSpec.canShootFireball()) allowed.add("shoot_fireball");
         if (classSpec.canStun()) allowed.add("stun");
+        // duel-v1 actions are loadout-owned. validateActionsAgainstLoadout()
+        // separately rejects actions whose required ability is not equipped.
+        if ("duel-v1".equals(classSpec.id())) allowed.addAll(PROTOTYPE_ACTIONS);
         if (!allowed.contains(action)) {
             errors.add(path + ".action is not allowed for " + classSpec.id());
         }
     }
 
-    private void validateConditionAllowed(List<String> errors, JsonNode condition, String path, CombatClassSpec classSpec) {
+    private void validateConditionAllowed(List<String> errors, JsonNode condition, String path, CombatRules classSpec) {
         if (condition == null || !condition.isObject()) {
             errors.add(path + " must be an object");
             return;
@@ -367,6 +594,7 @@ public class ModelSubmissionValidationService {
             return;
         }
         String type = typeNode.asText();
+        validateTarget(errors, condition.get("target"), path + ".target");
         if ("expression".equals(type)) {
             validateExpressionCondition(errors, condition, path, classSpec);
             return;
@@ -383,7 +611,40 @@ public class ModelSubmissionValidationService {
         }
     }
 
-    private void validateExpressionCondition(List<String> errors, JsonNode condition, String path, CombatClassSpec classSpec) {
+    private void validateTarget(List<String> errors, JsonNode target, String path) {
+        if (target == null || target.isNull()) return;
+        if (!target.isTextual() || !isAllowedTarget(target.asText())) {
+            errors.add(path + " is not an allowed fight target");
+        }
+    }
+
+    private static boolean isAllowedTarget(String target) {
+        if (BASE_ALLOWED_TARGETS.contains(target)) return true;
+        String[] parts = target.split(":", -1);
+        if (parts.length != 3 || !BASE_ALLOWED_TARGETS.contains(parts[0]) || "opponent".equals(parts[0])) return false;
+        if (!Set.of("closest", "farthest", "oldest", "newest").contains(parts[1])) return false;
+        try {
+            int ordinal = Integer.parseInt(parts[2]);
+            return ordinal >= 1 && ordinal <= 100;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
+
+    private void validateCoordinate(List<String> errors, JsonNode value, String path, int maximum) {
+        if (value == null || !value.isNumber() || !Double.isFinite(value.asDouble()) || value.asDouble() < 0 || value.asDouble() > maximum) {
+            errors.add(path + " must be a number from 0 to " + maximum);
+        }
+    }
+
+    private void validateSignedCoordinate(List<String> errors, JsonNode value, String path, int magnitude) {
+        if (value == null || !value.isNumber() || !Double.isFinite(value.asDouble())
+                || value.asDouble() < -magnitude || value.asDouble() > magnitude) {
+            errors.add(path + " must be a number from " + (-magnitude) + " to " + magnitude);
+        }
+    }
+
+    private void validateExpressionCondition(List<String> errors, JsonNode condition, String path, CombatRules classSpec) {
         JsonNode leftNode = condition.get("left");
         if (leftNode == null || !leftNode.isTextual()) {
             errors.add(path + ".left must be a variable id");
@@ -396,11 +657,23 @@ public class ModelSubmissionValidationService {
             return;
         }
         validateVariableAllowedForClass(errors, left, path + ".left", classSpec);
+        if (left.contains(".selectedAbility")) {
+            JsonNode ability = condition.get("ability");
+            if (ability == null || !ability.isTextual() || !ALLOWED_ABILITIES.contains(ability.asText())) {
+                errors.add(path + ".ability must identify an allowed equipped ability");
+            } else if (left.endsWith("Preparing") || left.endsWith("PreparationMs")) {
+                if (!PREPARING_ABILITIES.contains(ability.asText())) errors.add(path + ".ability does not have preparation time");
+            }
+        }
 
         JsonNode comparatorNode = condition.get("comparator");
         String comparator = comparatorNode != null && comparatorNode.isTextual() ? comparatorNode.asText() : "";
-        if ("number".equals(valueType) && !NUMERIC_COMPARATORS.contains(comparator)) {
+        boolean directionRange = "target.bearingFromMe".equals(left);
+        if ("number".equals(valueType) && !directionRange && !NUMERIC_COMPARATORS.contains(comparator)) {
             errors.add(path + ".comparator is not allowed for number variables");
+        }
+        if (directionRange && !"range".equals(comparator)) {
+            errors.add(path + ".comparator must be range for target.bearingFromMe");
         }
         if ("boolean".equals(valueType) && !BOOLEAN_COMPARATORS.contains(comparator)) {
             errors.add(path + ".comparator is not allowed for boolean variables");
@@ -419,9 +692,21 @@ public class ModelSubmissionValidationService {
         String rightType = rightTypeNode.asText();
         JsonNode rightValue = right.get("value");
         if ("number".equals(valueType)) {
-            if ("number".equals(rightType)) {
+            if (directionRange) {
+                JsonNode minimum = right.get("min");
+                JsonNode maximum = right.get("max");
+                if (!"range".equals(rightType) || minimum == null || !minimum.isNumber() || maximum == null || !maximum.isNumber()) {
+                    errors.add(path + ".right must be a numeric direction range");
+                } else if (minimum.asDouble() < -360 || minimum.asDouble() > 360
+                        || maximum.asDouble() < -360 || maximum.asDouble() > 360
+                        || Math.abs(maximum.asDouble() - minimum.asDouble()) > 360) {
+                    errors.add(path + ".right direction bounds must be within -360 to 360 and span at most 360 degrees");
+                }
+            } else if ("number".equals(rightType)) {
                 if (rightValue == null || !rightValue.isNumber()) {
                     errors.add(path + ".right.value must be a number");
+                } else if ("target.age".equals(left) && Math.abs(rightValue.asDouble() * 10.0 - Math.rint(rightValue.asDouble() * 10.0)) > 1e-9) {
+                    errors.add(path + ".right.value for target.age must use 0.1 second increments");
                 }
             } else if ("variable".equals(rightType)) {
                 if (rightValue == null || !rightValue.isTextual() || !"number".equals(variableValueType(rightValue.asText()))) {
@@ -442,12 +727,22 @@ public class ModelSubmissionValidationService {
     }
 
     private String variableValueType(String variable) {
+        if (isPreparingVariable(variable, "preparingMs")) return "number";
+        if (isPreparingVariable(variable, "preparing")) return "boolean";
         if (NUMBER_VARIABLES.contains(variable)) return "number";
         if (BOOLEAN_VARIABLES.contains(variable)) return "boolean";
         return null;
     }
 
-    private void validateVariableAllowedForClass(List<String> errors, String variable, String path, CombatClassSpec classSpec) {
+    private boolean isPreparingVariable(String variable, String field) {
+        if (variable == null) return false;
+        String marker = "." + field + ".";
+        int markerIndex = variable.indexOf(marker);
+        if ((!variable.startsWith("my.") && !variable.startsWith("opponent.")) || markerIndex < 0) return false;
+        return PREPARING_ABILITIES.contains(variable.substring(markerIndex + marker.length()));
+    }
+
+    private void validateVariableAllowedForClass(List<String> errors, String variable, String path, CombatRules classSpec) {
         if (!variable.startsWith("my.")) return;
         if ((!classSpec.canSwing() && variable.contains("swing"))
                 || (!classSpec.canBlock() && (variable.contains("block") || variable.contains("shield")))

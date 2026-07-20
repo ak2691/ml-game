@@ -2,11 +2,11 @@ package com.example.machiner.service;
 
 import com.example.machiner.DTO.MatchPlaybackDTO;
 import com.example.machiner.domain.ModelSubmission;
+import com.example.machiner.simulation.ArenaUnits;
 import com.example.machiner.simulation.DuelSimulationService;
 import com.example.machiner.simulation.DuelSimulationService.DuelArenaRequest;
 import com.example.machiner.simulation.DuelSimulationService.DuelFighterRequest;
 import com.example.machiner.simulation.DuelSimulationService.DuelSimulationRequest;
-import com.example.machiner.simulation.DuelSimulationService.ObstacleRequest;
 import com.example.machiner.service.MatchmakingService.MatchPlayer;
 import com.example.machiner.service.MatchmakingService.MatchSession;
 import java.util.List;
@@ -20,13 +20,14 @@ import tools.jackson.databind.json.JsonMapper;
 public class MatchSimulationService {
 
     public static final String DUEL_RULESET_VERSION = "duel-v1";
-    private static final int ARENA_SIZE = 800;
+    private static final int ARENA_WIDTH_UNITS = ArenaUnits.WIDTH;
+    private static final int ARENA_HEIGHT_UNITS = ArenaUnits.HEIGHT;
     private static final int FIGHTER_SIZE = 60;
-    private static final int SIMULATION_DURATION_MS = 30_000;
-    private static final double SLOT_ONE_X = ARENA_SIZE / 2.0;
-    private static final double SLOT_ONE_Y = 120.0;
-    private static final double SLOT_TWO_X = ARENA_SIZE / 2.0;
-    private static final double SLOT_TWO_Y = ARENA_SIZE - 120.0;
+    private static final int SIMULATION_DURATION_MS = 60_000;
+    private static final double SLOT_ONE_X = ARENA_WIDTH_UNITS / 2.0;
+    private static final double SLOT_ONE_Y = ARENA_HEIGHT_UNITS * 0.15;
+    private static final double SLOT_TWO_X = ARENA_WIDTH_UNITS / 2.0;
+    private static final double SLOT_TWO_Y = ARENA_HEIGHT_UNITS * 0.85;
 
     private final JsonMapper jsonMapper;
     private final DuelSimulationService duelSimulationService;
@@ -48,14 +49,7 @@ public class MatchSimulationService {
     }
 
     public List<MatchPlaybackDTO.ObstaclePlacementDTO> buildMatchObstacles(MatchSession session) {
-        List<DuelFighterRequest> fighters = session.players().stream()
-                .map(player -> toFighterRequest(player, null))
-                .toList();
-        return duelSimulationService.createMatchObstaclePlacements(
-                session.simulationSeed(),
-                ARENA_SIZE,
-                ARENA_SIZE,
-                fighters);
+        return List.of();
     }
 
     private DuelSimulationRequest toRequest(
@@ -68,23 +62,8 @@ public class MatchSimulationService {
                 session.matchId(),
                 DUEL_RULESET_VERSION,
                 session.simulationSeed(),
-                new DuelArenaRequest(ARENA_SIZE, ARENA_SIZE, SIMULATION_DURATION_MS, toObstacleRequests(session.obstacles())),
+                new DuelArenaRequest(ARENA_WIDTH_UNITS, ARENA_HEIGHT_UNITS, SIMULATION_DURATION_MS, List.of()),
                 fighters);
-    }
-
-    private List<ObstacleRequest> toObstacleRequests(List<MatchPlaybackDTO.ObstaclePlacementDTO> obstacles) {
-        if (obstacles == null || obstacles.isEmpty()) {
-            return List.of();
-        }
-        return obstacles.stream()
-                .map(obstacle -> new ObstacleRequest(
-                        obstacle.id(),
-                        obstacle.type(),
-                        obstacle.x(),
-                        obstacle.y(),
-                        obstacle.size(),
-                        obstacle.rotation()))
-                .toList();
     }
 
     private DuelFighterRequest toFighterRequest(MatchPlayer player, ModelSubmission submission) {
@@ -138,8 +117,8 @@ public class MatchSimulationService {
                 DUEL_RULESET_VERSION,
                 "FAILED",
                 new MatchPlaybackDTO.ArenaStateDTO(
-                        ARENA_SIZE,
-                        ARENA_SIZE,
+                        ARENA_WIDTH_UNITS,
+                        ARENA_HEIGHT_UNITS,
                         fighters,
                         session.obstacles() != null ? session.obstacles() : List.of()),
                 List.of(),

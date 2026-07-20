@@ -3,11 +3,10 @@ package com.example.machiner.service;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.example.machiner.DTO.ModelSubmissionPayloadDTO;
-import com.example.machiner.simulation.classes.CombatClassRegistry;
-import com.example.machiner.simulation.classes.MeleeClassSpec;
-import com.example.machiner.simulation.classes.RangedClassSpec;
+import com.example.machiner.simulation.combat.CombatCatalog;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Disabled;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -16,7 +15,7 @@ class ModelSubmissionValidationServiceTest {
     private final JsonMapper jsonMapper = new JsonMapper();
     private final ModelSubmissionValidationService service = new ModelSubmissionValidationService(
             jsonMapper,
-            new CombatClassRegistry(List.of(new MeleeClassSpec(), new RangedClassSpec())));
+            new CombatCatalog());
 
     @Test
     void acceptsValidDeterministicBrainContract() throws Exception {
@@ -45,6 +44,24 @@ class ModelSubmissionValidationServiceTest {
     }
 
     @Test
+    void acceptsTheSixAbilityRoundThreeLoadoutMaximum() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-strategy-v1",
+                  "loadout":{
+                    "abilities":["swing","block","rail_shot","micro_dash","orbital_strike","null_zone"],
+                    "statPoints":{"maxHp":3,"moveSpeed":3,"attackDamage":3,"attackSpeed":3}
+                  },
+                  "blocks":[]
+                }
+                """));
+
+        assertThat(service.validate(payload).isAccepted()).isTrue();
+    }
+
+    @Disabled("Removed arena-object contract")
+    @Test
     void acceptsClusteredLogicBlocksWithinLimit() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setBrain(jsonMapper.readTree("""
@@ -69,6 +86,48 @@ class ModelSubmissionValidationServiceTest {
         assertThat(result.isAccepted()).isTrue();
     }
 
+    @Test
+    void acceptsNestedLogicColumns() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "columns":[{
+                    "id":"column-1","createdOrder":1,
+                    "branches":[{
+                      "id":"branch-1","branchType":"if","createdOrder":1,
+                      "action":"move_inward","conditions":[{"type":"always"}],
+                      "children":[
+                        {"id":"nested-1","branchType":"if","createdOrder":2,"action":"dash","conditions":[{"type":"always"}],"children":[]},
+                        {"id":"nested-2","branchType":"else","createdOrder":3,"action":"move_stop","conditions":[],"children":[]}
+                      ]
+                    }]
+                  }]
+                }
+                """));
+
+        var result = service.validate(payload);
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.isAccepted()).isTrue();
+    }
+
+    @Test
+    void rejectsElseBeforeElseIfInLogicColumn() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("""
+                {"version":"melee-logic-tree-v1","columns":[{"id":"column-1","branches":[
+                  {"id":"first","branchType":"if","action":"move_inward","conditions":[{"type":"always"}],"children":[]},
+                  {"id":"fallback","branchType":"else","action":"stop","conditions":[],"children":[]},
+                  {"id":"late","branchType":"else_if","action":"move_outward","conditions":[{"type":"always"}],"children":[]}
+                ]}]}
+                """));
+
+        var result = service.validate(payload);
+        assertThat(result.isAccepted()).isFalse();
+        assertThat(result.getErrors()).anyMatch(error -> error.contains("else branch must be last"));
+    }
+
+    @Disabled("Removed arena boost/timer variables")
     @Test
     void acceptsPositionAndBuffTimerExpressionConditions() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
@@ -160,6 +219,7 @@ class ModelSubmissionValidationServiceTest {
         assertThat(result.isAccepted()).isTrue();
     }
 
+    @Disabled("Actions are loadout-gated instead of class-gated")
     @Test
     void rejectsExpressionConditionsWithInvalidTypesForClass() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
@@ -236,6 +296,7 @@ class ModelSubmissionValidationServiceTest {
                 "trainingMetrics.epochsCompleted must be 0 for deterministic bot brains");
     }
 
+    @Disabled("Actions are loadout-gated instead of class-gated")
     @Test
     void rejectsRangedDashActionsAndOwnDashConditions() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
@@ -293,6 +354,7 @@ class ModelSubmissionValidationServiceTest {
         assertThat(result.isAccepted()).isTrue();
     }
 
+    @Disabled("Actions are loadout-gated instead of class-gated")
     @Test
     void acceptsRangedGrenadeActionAndRejectsItForMelee() throws Exception {
         ModelSubmissionPayloadDTO rangedPayload = validPayload();
@@ -362,6 +424,126 @@ class ModelSubmissionValidationServiceTest {
         var result = service.validate(payload);
 
         assertThat(result.isAccepted()).isTrue();
+    }
+
+    @Test
+    void acceptsOneActionPerExecutionCategoryOnTheSameConditional() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "columns":[{"branches":[{
+                    "branchType":"if",
+                    "actions":[
+                      {"action":"move_inward","actionTarget":"opponent"},
+                      {"action":"rotate_toward_enemy","actionTarget":"opponent"},
+                      {"action":"swing"}
+                    ],
+                    "conditions":[{"type":"always"}],
+                    "children":[]
+                  }]}]
+                }
+                """));
+
+        assertThat(service.validate(payload).isAccepted()).isTrue();
+    }
+
+    @Test
+    void rejectsMultipleActionsFromTheSameExecutionCategory() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "columns":[{"branches":[{
+                    "branchType":"if",
+                    "actions":[{"action":"move_inward"},{"action":"move_outward"}],
+                    "conditions":[{"type":"always"}],
+                    "children":[]
+                  }]}]
+                }
+                """));
+
+        assertThat(service.validate(payload).getErrors()).contains(
+                "brain.columns[0].branches[0] has multiple movement actions");
+    }
+
+    @Test
+    void validatesFightOnlyTargetsAndLoadoutBudget() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "loadout":{
+                    "abilities":["swing","dash","block"],
+                    "statPoints":{"maxHp":5,"moveSpeed":4,"attackDamage":4,"attackSpeed":0}
+                  },
+                  "columns":[{"branches":[{
+                    "branchType":"if","action":"fire_gun","actionTarget":"defender_core",
+                    "conditions":[{"type":"always"}],"children":[]
+                  }]}]
+                }
+                """));
+
+        assertThat(service.validate(payload).getErrors()).contains(
+                "brain.loadout.statPoints exceeds the match budget of 12",
+                "brain.columns[0].branches[0].actionTarget is not an allowed fight target",
+                "brain.columns[0].branches[0].action requires equipped ability fire_gun");
+    }
+
+    @Test
+    void acceptsGenericSelectedAbilityAmmoCondition() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setSelectedClass("custom");
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "loadout":{"abilities":["fire_gun"],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                  "columns":[{"branches":[{
+                    "branchType":"if","action":"fire_gun",
+                    "conditions":[{"type":"expression","left":"my.selectedAbilityAmmo","ability":"fire_gun","comparator":"gt","right":{"type":"number","value":0}}],
+                    "children":[]
+                  }]}]
+                }
+                """));
+
+        assertThat(service.validate(payload).getErrors()).isEmpty();
+    }
+
+    @Test
+    void acceptsEquippedDuelV1AbilityActionInColumnBrain() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setSelectedClass("duel-v1");
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "loadout":{"abilities":["concussive_shot"],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                  "columns":[{"branches":[{
+                    "branchType":"if","actions":[{"action":"concussive_shot"}],
+                    "conditions":[{"type":"always"}],"children":[]
+                  }]}]
+                }
+                """));
+
+        assertThat(service.validate(payload).getErrors()).isEmpty();
+    }
+
+    @Test
+    void rejectsUnequippedDuelV1VariantAction() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setSelectedClass("duel-v1");
+        payload.setBrain(jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "loadout":{"abilities":[],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                  "columns":[{"branches":[{
+                    "branchType":"if","actions":[{"action":"phase_strike_keep_facing"}],
+                    "conditions":[{"type":"always"}],"children":[]
+                  }]}]
+                }
+                """));
+
+        assertThat(service.validate(payload).getErrors())
+                .contains("brain.columns[0].branches[0].actions[0].action requires equipped ability phase_strike");
     }
 
     private ModelSubmissionPayloadDTO validPayload() throws Exception {

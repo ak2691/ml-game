@@ -6,37 +6,42 @@ import {
     TARGET_TYPES,
     CONDITION_COMPARATORS,
     STATE_VARIABLES,
+    actionExecutionHead,
     actionSupportsTarget,
-    createLogicCluster,
     createLogicBlock,
+    createLogicColumn,
     createExpressionCondition,
-    MAX_CLUSTERS,
     MAX_CONDITIONS_PER_BLOCK,
     MAX_LOGIC_BLOCKS,
+    MAX_TOTAL_CONDITIONS,
     MAX_PRIORITY,
     MIN_PRIORITY,
+    moveLogicColumnPriority,
     validateMeleeStrategyConfiguration,
-} from "../ml/MeleeStrategy.js";
+    normalizeMeleeStrategyConfiguration,
+} from "../logic/BotBrain.js";
 import {
     actionTypesForCombatClass,
-    COMBAT_CLASSES,
     conditionTypesForMatchup,
-} from "./classes/CombatClasses.js";
-import { objectTargetTypes as labelObjectTargetTypes } from "./objectLabels.js";
+} from "./combat/CombatLoadouts.js";
+import { BOT_ABILITIES, decodeBotLoadout, decodeSandboxLoadout } from "./loadout/BotLoadout.js";
 
 const CONDITION_GROUP_ORDER = ["Basic", "My Bot", "Opponent", "Objects", "Target", "General"];
-const LOGIC_BLOCK_WIDTH = 360;
+const LEGACY_MOVEMENT_ACTION = /^(move_(?!walk$)|dash_(?!$)|micro_dash_)/;
+const LOGIC_BLOCK_WIDTH = 500;
 const LOGIC_BLOCK_HEIGHT_ESTIMATE = 320;
-const CLUSTER_NODE_WIDTH = 780;
+// Used only while rendering a brain that is being migrated from the pre-tree schema.
+const CLUSTER_NODE_WIDTH = 1080;
 const LOGIC_CANVAS_WIDTH = 3400;
 const LOGIC_CANVAS_HEIGHT = 2400;
 const MIN_ZOOM = 0.45;
 const MAX_ZOOM = 1.35;
 
-function clampNumber(value, min, max, fallback) {
+function clampNumber(value, min, max, fallback, step = 1) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return fallback;
-    return Math.max(min, Math.min(max, Math.round(numeric)));
+    const bounded = Math.max(min, Math.min(max, numeric));
+    return Number((Math.round(bounded / step) * step).toFixed(10));
 }
 
 function clamp(value, min, max) {
@@ -52,22 +57,19 @@ export default function StrategyTrainingPanel({
     onStopTraining,
     isTraining,
     selectedClass = "melee",
-    onClassChange = null,
     opponentSelectedClass = "melee",
-    onOpponentClassChange = null,
-    canChangeClass = false,
-    canChangeOpponentClass = false,
     isMatchTraining = false,
     matchContext = null,
     trainingRemaining = null,
     playerRoundWins = 0,
     opponentRoundWins = 0,
-    obstacleCount = 0,
-    obstacleObjects = [],
     isAutoPlaying = false,
     hasArenaCheckpoint = false,
+    measurementEnabled = false,
+    onMeasurementToggle,
     isBaseTraining = false,
     finishStatus = null,
+    finishError = null,
     isFinishingMatch = false,
     canFinishMatch = false,
     onAutoPlayToggle,
@@ -78,15 +80,15 @@ export default function StrategyTrainingPanel({
     onResetRoundModel,
     onSurrenderMatch,
     onFinishMatch,
+    onOpenPlayerLoadout,
+    onOpenOpponentLoadout,
+    onSpawnOpponent,
 }) {
     const [isLogicOpen, setIsLogicOpen] = useState(false);
     const [activeBrain, setActiveBrain] = useState("player");
-    const [nodePositions, setNodePositions] = useState({});
-    const [activeBlockId, setActiveBlockId] = useState(null);
     const [canvasZoom, setCanvasZoom] = useState(0.85);
     const [canvasPan, setCanvasPan] = useState({ x: 40, y: 36 });
     const currentRound = Math.max(1, Number(matchContext?.roundNumber) || 1);
-    const [selectedLogicRound, setSelectedLogicRound] = useState(currentRound);
     const validation = validateMeleeStrategyConfiguration(configuration);
     const editingOpponent = activeBrain === "opponent" && opponentConfiguration && onOpponentChange;
     const playerBotLabel = matchContext?.player?.username ? `${matchContext.player.username}'s bot` : "Your bot";
@@ -97,63 +99,54 @@ export default function StrategyTrainingPanel({
         if (editingOpponent) onOpponentChange(next);
         else onChange(next);
     };
-    const updateBlocks = (blocks) => updateActiveConfiguration({ ...activeConfiguration, blocks });
-    const updateBlock = (index, updates) => updateBlocks((activeConfiguration.blocks ?? []).map((block, candidate) => (
-        candidate === index ? { ...block, ...updates } : block
-    )));
-    const updateClusters = (clusters) => updateActiveConfiguration({ ...activeConfiguration, clusters });
-    const updateCluster = (index, updates) => updateClusters((activeConfiguration.clusters ?? []).map((cluster, candidate) => (
-        candidate === index ? { ...cluster, ...updates } : cluster
-    )));
+    const updateColumns = (columns) => updateActiveConfiguration({
+        version: "melee-logic-tree-v1",
+        columns,
+        blocks: [],
+        clusters: [],
+    });
     const totalActiveBlocks = countLogicBlocks(activeConfiguration);
-    const roundBrains = editingOpponent ? [] : matchContext?.roundBrains ?? [];
-    const blockRoundById = useMemo(
-        () => blockIntroductionRounds(roundBrains, activeConfiguration, currentRound),
-        [activeConfiguration, currentRound, roundBrains],
-    );
-    const displayedConfiguration = useMemo(
-        () => configurationForRound(activeConfiguration, blockRoundById, selectedLogicRound),
-        [activeConfiguration, blockRoundById, selectedLogicRound],
-    );
-    const roundBlockLimit = Math.max(1, Number(matchContext?.roundBlockLimit) || 10);
-    const currentRoundBlockCount = [...blockRoundById.values()]
-        .filter((round) => round === currentRound).length;
-    const viewingCurrentRound = selectedLogicRound === currentRound;
-    const viewingPreviousRound = selectedLogicRound === currentRound - 1;
-    const previousRoundWon = Boolean(matchContext?.previousRoundWon);
-    const roundFieldsLocked = !viewingCurrentRound
-        && (!viewingPreviousRound || previousRoundWon);
-    const roundDeleteLocked = selectedLogicRound <= currentRound - 2;
-    const totalRounds = Math.max(1, (matchContext?.winsRequired ?? 1) * 2 - 1);
+    const totalActiveConditions = countLogicConditions(activeConfiguration);
+    const usesTree = Array.isArray(activeConfiguration?.columns);
+    const viewingCurrentRound = true;
+    const roundDeleteLocked = false;
+    const selectedLogicRound = currentRound;
+    const currentRoundBlockCount = totalActiveBlocks;
+    const roundBlockLimit = MAX_LOGIC_BLOCKS;
+    const totalRounds = isMatchTraining ? 3 : Math.max(1, (matchContext?.winsRequired ?? 1) * 2 - 1);
     const visibleConditionTypes = useMemo(
-        () => conditionTypesForMatchup(CONDITION_TYPES, activeClass, activeOpponentClass),
+        () => {
+            const matchupConditionTypes = conditionTypesForMatchup(CONDITION_TYPES, activeClass, activeOpponentClass);
+            if (matchupConditionTypes.some((condition) => condition.id === "always")) return matchupConditionTypes;
+            const alwaysCondition = CONDITION_TYPES.find((condition) => condition.id === "always");
+            return alwaysCondition ? [alwaysCondition, ...matchupConditionTypes] : matchupConditionTypes;
+        },
         [activeClass, activeOpponentClass],
     );
     const visibleStateVariables = useMemo(() => {
         const visibleConditionIds = new Set(visibleConditionTypes.map((condition) => condition.id));
+        const ownAbilities = abilityIdsForConfiguration(activeClass);
+        const opponentAbilities = abilityIdsForConfiguration(activeOpponentClass);
         return STATE_VARIABLES.filter((variable) => (
             (!variable.ownConditionId || visibleConditionIds.has(variable.ownConditionId))
             && (!variable.opponentConditionId || visibleConditionIds.has(variable.opponentConditionId))
-        ));
-    }, [visibleConditionTypes]);
+        )).map((variable) => {
+            if (!variable.supportsAbility) return variable;
+            const equipped = variable.abilityOwner === "opponent" ? opponentAbilities : ownAbilities;
+            return {
+                ...variable,
+                abilityOptions: BOT_ABILITIES.filter((ability) => equipped.has(ability.id) && (!variable.requiredTag || ability.tags.includes(variable.requiredTag))),
+            };
+        }).filter((variable) => !variable.supportsAbility || variable.abilityOptions.length > 0);
+    }, [visibleConditionTypes, activeClass, activeOpponentClass]);
     const defaultCondition = visibleConditionTypes[0] ?? CONDITION_TYPES[0];
     const defaultVariable = visibleStateVariables.find((variable) => variable.id === "target.distance")
         ?? visibleStateVariables[0]
         ?? STATE_VARIABLES[0];
     const visibleTargetTypes = useMemo(
-        () => labelObjectTargetTypes(
-            targetTypesForOpponentClass(activeOpponentClass),
-            obstacleObjects,
-        ),
-        [activeOpponentClass, obstacleObjects],
+        () => targetTypesForLoadouts(activeClass, activeOpponentClass),
+        [activeClass, activeOpponentClass],
     );
-    useEffect(() => setSelectedLogicRound(currentRound), [currentRound]);
-    const nodeKey = (type, id) => `${activeBrain}:${type}:${id}`;
-    const positionForNode = (key, index, type = "block") => nodePositions[key] ?? {
-        x: 120 + (index % 3) * 460,
-        y: 100 + Math.floor(index / 3) * 420 + (type === "cluster" ? 60 : 0),
-    };
-
     useEffect(() => {
         const sanitized = sanitizeConfigurationConditions(activeConfiguration, visibleConditionTypes, defaultCondition);
         if (sanitized === activeConfiguration) return;
@@ -161,74 +154,27 @@ export default function StrategyTrainingPanel({
         else onChange(sanitized);
     }, [activeConfiguration, activeClass, activeOpponentClass, defaultCondition, editingOpponent, onChange, onOpponentChange, visibleConditionTypes]);
 
-    const addLogicBlock = () => {
-        if (!viewingCurrentRound || currentRoundBlockCount >= roundBlockLimit) return;
+    useEffect(() => {
+        if (!isLogicOpen || usesTree) return;
+        const migrated = normalizeMeleeStrategyConfiguration(activeConfiguration);
+        const tree = { version: migrated.version, columns: migrated.columns, blocks: [], clusters: [] };
+        if (editingOpponent) onOpponentChange?.(tree);
+        else onChange(tree);
+    }, [activeConfiguration, editingOpponent, isLogicOpen, onChange, onOpponentChange, usesTree]);
+
+    const addLogicColumn = () => {
+        if (totalActiveConditions >= MAX_TOTAL_CONDITIONS) return;
+        const column = createLogicColumn(`Column ${(activeConfiguration.columns ?? []).length + 1}`);
         const block = {
-            ...createLogicBlock(defaultCondition.id),
+            ...createLogicBlock(defaultCondition.id, "none"),
+            branchType: "if",
+            createdOrder: Date.now(),
             conditions: [createExpressionCondition(defaultVariable.id)],
+            actions: [],
+            children: [],
         };
-        setActiveBlockId(block.id);
-        updateBlocks([...(activeConfiguration.blocks ?? []), block]);
-    };
-
-    const addCluster = () => {
-        if (!viewingCurrentRound || currentRoundBlockCount >= roundBlockLimit) return;
-        const cluster = {
-            ...createLogicCluster(defaultCondition.id),
-            conditions: [createExpressionCondition(defaultVariable.id)],
-        };
-        updateClusters([...(activeConfiguration.clusters ?? []), cluster]);
-    };
-
-    const addClusterBlock = (clusterIndex) => {
-        if (!viewingCurrentRound || currentRoundBlockCount >= roundBlockLimit) return;
-        const block = {
-            ...createLogicBlock(defaultCondition.id),
-            conditions: [createExpressionCondition(defaultVariable.id)],
-        };
-        setActiveBlockId(block.id);
-        updateCluster(clusterIndex, {
-            blocks: [...((activeConfiguration.clusters ?? [])[clusterIndex]?.blocks ?? []), block],
-        });
-    };
-    const updateDisplayedBlock = (index, updates) => {
-        const id = displayedConfiguration.blocks?.[index]?.id;
-        updateBlocks((activeConfiguration.blocks ?? []).map((block) => (
-            block.id === id ? { ...block, ...updates } : block
-        )));
-    };
-    const removeDisplayedBlock = (index) => {
-        const id = displayedConfiguration.blocks?.[index]?.id;
-        updateBlocks((activeConfiguration.blocks ?? []).filter((block) => block.id !== id));
-    };
-    const displayedClusterId = (index) => displayedConfiguration.clusters?.[index]?.id;
-    const activeClusterIndex = (displayIndex) => (activeConfiguration.clusters ?? [])
-        .findIndex((cluster) => cluster.id === displayedClusterId(displayIndex));
-
-    const beginNodeDrag = (event, { key, index, type = "block", activeId = null }) => {
-        if (isTraining || event.button !== 0) return;
-        const position = positionForNode(key, index, type);
-        setActiveBlockId(activeId);
-
-        const moveDrag = (moveEvent) => {
-            const nextX = clamp(position.x + (moveEvent.clientX - event.clientX) / canvasZoom, 24, LOGIC_CANVAS_WIDTH - 420);
-            const nextY = clamp(position.y + (moveEvent.clientY - event.clientY) / canvasZoom, 24, LOGIC_CANVAS_HEIGHT - 360);
-            setNodePositions((current) => ({
-                ...current,
-                [key]: { x: nextX, y: nextY },
-            }));
-        };
-
-        const endDrag = () => {
-            window.removeEventListener("pointermove", moveDrag);
-            window.removeEventListener("pointerup", endDrag);
-            window.removeEventListener("pointercancel", endDrag);
-        };
-
-        event.currentTarget.setPointerCapture?.(event.pointerId);
-        window.addEventListener("pointermove", moveDrag);
-        window.addEventListener("pointerup", endDrag);
-        window.addEventListener("pointercancel", endDrag);
+        column.branches = [block];
+        updateColumns([...(activeConfiguration.columns ?? []), column]);
     };
 
     const changeZoom = (delta, origin = null) => {
@@ -271,17 +217,18 @@ export default function StrategyTrainingPanel({
 
                 <section className="rounded border border-border-lo bg-arena-surface p-3">
                     <div className="flex items-center justify-between font-mono text-[10px] tracking-widest">
-                        <span className="text-cyan">LOGIC BLOCKS</span>
-                        <strong className="text-ink-muted">{countLogicBlocks(configuration)}/{MAX_LOGIC_BLOCKS}</strong>
+                        <span className="text-cyan">BOT BRAIN</span>
+                        <strong className="text-ink-muted">{countLogicBlocks(configuration)}/{MAX_LOGIC_BLOCKS} A · {countLogicConditions(configuration)}/{MAX_TOTAL_CONDITIONS} C</strong>
                     </div>
                     <button
                         type="button"
                         onClick={() => setIsLogicOpen(true)}
                         className="mt-3 h-10 w-full rounded border border-cyan-800/70 bg-cyan-950/30 font-mono text-[11px] font-bold tracking-widest text-cyan-200 hover:bg-cyan-900/40"
                     >
-                        OPEN LOGIC BLOCKS
+                        OPEN BOT BRAIN
                     </button>
                     {validation.errors.map((error) => <p key={error} className="mt-2 text-[10px] text-red-300">{error}</p>)}
+                    {validation.warnings?.map((warning) => <p key={warning} className="mt-2 text-[10px] text-amber-300">WARNING: {warning}</p>)}
                     <button
                         type="button"
                         onClick={isTraining ? onStopTraining : onStartTraining}
@@ -297,25 +244,8 @@ export default function StrategyTrainingPanel({
                 <section className="rounded border border-border-lo bg-arena-surface p-3">
                     <div className="mb-3 flex items-center justify-between font-mono text-[10px] tracking-widest">
                         <span className="text-cyan">MATCH TOOLS</span>
-                        <span className="text-ink-muted">{selectedClass.toUpperCase()}</span>
+                        <span className="text-ink-muted">BOT LOADOUT</span>
                     </div>
-                    {onClassChange && (
-                        <ClassSelect
-                            label={playerBotLabel}
-                            value={selectedClass}
-                            disabled={!canChangeClass}
-                            onChange={onClassChange}
-                        />
-                    )}
-                    {onOpponentClassChange && !isMatchTraining && (
-                        <ClassSelect
-                            label="Opponent bot"
-                            value={opponentSelectedClass}
-                            disabled={!canChangeOpponentClass}
-                            onChange={onOpponentClassChange}
-                            className="mb-3"
-                        />
-                    )}
                     <div className="grid grid-cols-2 gap-1.5">
                         <ControlButton
                             onClick={onAutoPlayToggle}
@@ -332,6 +262,22 @@ export default function StrategyTrainingPanel({
                             RESET STATS
                         </ControlButton>
                     </div>
+                    <ControlButton onClick={onMeasurementToggle} disabled={!onMeasurementToggle} tone={measurementEnabled ? "blue" : "neutral"} className="mt-2 w-full">
+                        {measurementEnabled ? "MEASURING ON" : "MEASURING OFF"}
+                    </ControlButton>
+                    {!isMatchTraining && (
+                        <div className="mt-2 grid grid-cols-1 gap-1.5">
+                            <ControlButton onClick={onOpenPlayerLoadout} disabled={!onOpenPlayerLoadout || isTraining || isAutoPlaying} tone="blue">
+                                EDIT MY LOADOUT
+                            </ControlButton>
+                            <ControlButton onClick={onSpawnOpponent} disabled={!onSpawnOpponent || isTraining || isAutoPlaying} tone="violet">
+                                SPAWN OPPONENT
+                            </ControlButton>
+                            <ControlButton onClick={onOpenOpponentLoadout} disabled={!onOpenOpponentLoadout || isTraining || isAutoPlaying} tone="violet">
+                                EDIT OPPONENT LOADOUT
+                            </ControlButton>
+                        </div>
+                    )}
                     <div className="mt-1.5 grid grid-cols-2 gap-1.5">
                         <ControlButton
                             onClick={onSaveArenaCheckpoint}
@@ -356,10 +302,6 @@ export default function StrategyTrainingPanel({
                     >
                         FULL RESET
                     </ControlButton>
-                    <div className="mt-2 flex justify-between font-mono text-[10px] tracking-widest text-ink-muted">
-                        <span>OBSTACLES</span>
-                        <strong className="text-ink-white">{obstacleCount}</strong>
-                    </div>
                     {isMatchTraining ? (
                         <>
                             <ControlButton
@@ -384,6 +326,7 @@ export default function StrategyTrainingPanel({
                                             ? "SUBMITTING"
                                             : "FINISH BOT"}
                             </ControlButton>
+                            {finishError && <p className="mt-2 rounded border border-red-800/70 bg-red-950/40 px-2 py-2 font-mono text-[9px] leading-relaxed text-red-200">{finishError}</p>}
                             <ControlButton
                                 onClick={onSurrenderMatch}
                                 disabled={!onSurrenderMatch || finishStatus === "SURRENDERED" || isFinishingMatch || isTraining}
@@ -402,9 +345,9 @@ export default function StrategyTrainingPanel({
                     <section className="flex h-[min(94vh,900px)] w-[min(98vw,1480px)] flex-col overflow-hidden rounded border border-border-mid bg-zinc-800 shadow-2xl">
                         <header className="flex min-h-14 flex-shrink-0 items-center justify-between gap-3 border-b border-border-lo px-4 py-2">
                             <div>
-                                <div className="font-mono text-[11px] font-bold tracking-widest text-cyan">LOGIC BLOCK WORKSPACE</div>
+                                <div className="font-mono text-[11px] font-bold tracking-widest text-cyan">BOT BRAIN WORKSPACE</div>
                                 <div className="mt-1 font-mono text-[9px] tracking-widest text-ink-muted">
-                                    {editingOpponent ? "TRAINING OPPONENT" : "YOUR BOT"} - {activeClass.toUpperCase()} - {totalActiveBlocks}/{MAX_LOGIC_BLOCKS} RULES
+                                    {editingOpponent ? "TRAINING OPPONENT" : "YOUR BOT"} - {totalActiveBlocks}/{MAX_LOGIC_BLOCKS} ACTIONS - {totalActiveConditions}/{MAX_TOTAL_CONDITIONS} CONDITIONS
                                 </div>
                             </div>
                             <div className="flex flex-wrap items-center justify-end gap-2">
@@ -417,23 +360,12 @@ export default function StrategyTrainingPanel({
                                 <button
                                     type="button"
                                     disabled={isTraining || !viewingCurrentRound
-                                        || totalActiveBlocks >= MAX_LOGIC_BLOCKS
-                                        || currentRoundBlockCount >= roundBlockLimit}
-                                    onClick={addLogicBlock}
+                                        || totalActiveConditions >= MAX_TOTAL_CONDITIONS
+                                        || totalActiveBlocks >= MAX_LOGIC_BLOCKS}
+                                    onClick={addLogicColumn}
                                     className="h-8 rounded border border-dashed border-cyan-800/70 px-3 font-mono text-[10px] tracking-widest text-cyan-300 disabled:opacity-35"
                                 >
-                                    ADD BLOCK
-                                </button>
-                                <button
-                                    type="button"
-                                    disabled={isTraining || !viewingCurrentRound
-                                        || (activeConfiguration.clusters ?? []).length >= MAX_CLUSTERS
-                                        || totalActiveBlocks >= MAX_LOGIC_BLOCKS
-                                        || currentRoundBlockCount >= roundBlockLimit}
-                                    onClick={addCluster}
-                                    className="h-8 rounded border border-dashed border-violet-800/70 px-3 font-mono text-[10px] tracking-widest text-violet-300 disabled:opacity-35"
-                                >
-                                    ADD CLUSTER
+                                    ADD BRAIN NODE
                                 </button>
                                 <div className="flex items-center gap-1 rounded border border-border-lo bg-zinc-950 p-1">
                                     <button
@@ -463,13 +395,15 @@ export default function StrategyTrainingPanel({
                                 </button>
                             </div>
                         </header>
-                        {isMatchTraining && !editingOpponent && (
-                            <div className="flex items-center gap-1 border-b border-border-lo bg-zinc-950 px-4 py-2">
+                        {isMatchTraining && !editingOpponent && currentRound < 0 && (
+                            <div className="border-b border-border-lo bg-zinc-950 px-4 py-2">
+                                {currentRound >= 3 && <div className="mb-2 border border-amber-800/70 bg-amber-950/30 px-3 py-2 font-mono text-[9px] tracking-widest text-amber-200">ROUNDS 1-2 LOGIC ARCHIVED · NOT USED FOR YOUR NEW ROLE</div>}
+                                <div className="flex items-center gap-1">
                                 {Array.from({ length: currentRound }, (_, index) => index + 1).map((round) => (
                                     <button
                                         key={round}
                                         type="button"
-                                        onClick={() => setSelectedLogicRound(round)}
+                                        onClick={() => {}}
                                         className={`h-7 border px-3 font-mono text-[9px] tracking-widest ${
                                             selectedLogicRound === round
                                                 ? "border-cyan-500 bg-cyan-950 text-cyan-100"
@@ -482,73 +416,315 @@ export default function StrategyTrainingPanel({
                                 <span className="ml-auto font-mono text-[9px] tracking-widest text-ink-muted">
                                     {viewingCurrentRound
                                         ? `${currentRoundBlockCount}/${roundBlockLimit} NEW BLOCKS`
-                                        : roundFieldsLocked
-                                            ? roundDeleteLocked ? "LOCKED" : "DELETE ONLY"
-                                            : "MODIFY OR DELETE"}
+                                            : roundDeleteLocked ? "LOCKED" : "DELETE ONLY"}
                                 </span>
+                                </div>
                             </div>
                         )}
-                        <LogicBoard
-                            configuration={displayedConfiguration}
-                            disabled={isTraining || roundDeleteLocked}
-                            canRemove={!isTraining && !roundDeleteLocked}
-                            activeBlockId={activeBlockId}
-                            totalBlocks={totalActiveBlocks}
-                            zoom={canvasZoom}
-                            pan={canvasPan}
-                            onPanChange={setCanvasPan}
-                            onZoomChange={changeZoom}
-                            positionForNode={positionForNode}
-                            nodeKey={nodeKey}
-                            onBeginNodeDrag={beginNodeDrag}
-                            onBlockChange={roundFieldsLocked ? () => {} : updateDisplayedBlock}
-                            onBlockRemove={removeDisplayedBlock}
-                            onClusterChange={!viewingCurrentRound
-                                ? () => {}
-                                : (clusterIndex, updates) => updateCluster(activeClusterIndex(clusterIndex), updates)}
-                            onClusterRemove={(clusterIndex) => {
-                                const id = displayedClusterId(clusterIndex);
-                                if (viewingCurrentRound) {
-                                    updateClusters((activeConfiguration.clusters ?? []).filter((cluster) => cluster.id !== id));
-                                    return;
-                                }
-                                const displayedIds = new Set(
-                                    displayedConfiguration.clusters?.[clusterIndex]?.blocks?.map((block) => block.id) ?? [],
-                                );
-                                updateClusters((activeConfiguration.clusters ?? []).map((cluster) => (
-                                    cluster.id === id
-                                        ? { ...cluster, blocks: cluster.blocks.filter((block) => !displayedIds.has(block.id)) }
-                                        : cluster
-                                )));
-                            }}
-                            onClusterAddBlock={roundFieldsLocked
-                                ? () => {}
-                                : (clusterIndex) => addClusterBlock(activeClusterIndex(clusterIndex))}
-                            onClusterBlockChange={roundFieldsLocked ? () => {} : (clusterIndex, blockIndex, updates) => updateCluster(activeClusterIndex(clusterIndex), {
-                                blocks: (activeConfiguration.clusters ?? [])[activeClusterIndex(clusterIndex)].blocks.map((block) => (
-                                    block.id === displayedConfiguration.clusters?.[clusterIndex]?.blocks?.[blockIndex]?.id
-                                        ? { ...block, ...updates }
-                                        : block
-                                )),
-                            })}
-                            onClusterBlockRemove={(clusterIndex, blockIndex) => updateCluster(activeClusterIndex(clusterIndex), {
-                                blocks: (activeConfiguration.clusters ?? [])[activeClusterIndex(clusterIndex)].blocks.filter((block) => (
-                                    block.id !== displayedConfiguration.clusters?.[clusterIndex]?.blocks?.[blockIndex]?.id
-                                )),
-                            })}
-                            onSelectBlock={setActiveBlockId}
-                            selectedClass={activeClass}
-                            conditionTypes={visibleConditionTypes}
-                            stateVariables={visibleStateVariables}
-                            defaultVariable={defaultVariable}
-                            defaultCondition={defaultCondition}
-                            targetTypes={visibleTargetTypes}
-                        />
+                        <TreeLogicBoard
+                                configuration={activeConfiguration}
+                                disabled={isTraining || !viewingCurrentRound}
+                                canRemove={!isTraining && !roundDeleteLocked}
+                                selectedClass={activeClass}
+                                conditionTypes={visibleConditionTypes}
+                                stateVariables={visibleStateVariables}
+                                defaultVariable={defaultVariable}
+                                targetTypes={visibleTargetTypes}
+                                onChange={updateColumns}
+                                zoom={canvasZoom}
+                                pan={canvasPan}
+                                onPanChange={setCanvasPan}
+                                onZoomChange={changeZoom}
+                            />
                     </section>
                 </div>
             )}
         </aside>
     );
+}
+
+function TreeLogicBoard({
+    configuration,
+    disabled,
+    canRemove,
+    selectedClass,
+    conditionTypes,
+    stateVariables,
+    defaultVariable,
+    targetTypes,
+    onChange,
+    zoom,
+    pan,
+    onPanChange,
+    onZoomChange,
+}) {
+    const viewportRef = useRef(null);
+    const [nodeOffsets, setNodeOffsets] = useState({});
+    const columns = configuration.columns ?? [];
+    const graphActionCount = countLogicBlocks(configuration);
+    const graphConditionCount = countLogicConditions(configuration);
+    const beginPan = (event) => {
+        if (event.button !== 2) return;
+        event.preventDefault();
+        const start = { x: event.clientX, y: event.clientY, pan };
+        const move = (next) => onPanChange({ x: start.pan.x + next.clientX - start.x, y: start.pan.y + next.clientY - start.y });
+        const end = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", end);
+            window.removeEventListener("pointercancel", end);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", end);
+        window.addEventListener("pointercancel", end);
+    };
+    const updateColumn = (columnIndex, updates) => onChange(columns.map((column, index) => index === columnIndex ? { ...column, ...updates } : column));
+    const removeColumn = (columnIndex) => onChange(columns.filter((_, index) => index !== columnIndex));
+    const moveColumn = (columnIndex, delta) => {
+        const reordered = moveLogicColumnPriority(columns, columnIndex, delta);
+        if (reordered !== columns) onChange(reordered);
+    };
+    const beginNodeDrag = (event, key) => {
+        if (disabled || event.button !== 0 || event.target?.closest?.("button,input,select,textarea,label")) return;
+        event.stopPropagation();
+        const startOffset = nodeOffsets[key] ?? { x: 0, y: 0 };
+        const start = { x: event.clientX, y: event.clientY };
+        const move = (next) => setNodeOffsets((current) => ({
+            ...current,
+            [key]: {
+                x: startOffset.x + (next.clientX - start.x) / zoom,
+                y: startOffset.y + (next.clientY - start.y) / zoom,
+            },
+        }));
+        const end = () => {
+            window.removeEventListener("pointermove", move);
+            window.removeEventListener("pointerup", end);
+            window.removeEventListener("pointercancel", end);
+        };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", end);
+        window.addEventListener("pointercancel", end);
+    };
+    const graph = buildLogicGraph(columns);
+    const updateBranch = (columnIndex, path, updater) => onChange(updateTreeBranch(columns, columnIndex, path, updater));
+    const removeBranch = (columnIndex, path) => onChange(removeTreeBranch(columns, columnIndex, path));
+    return (
+        <div
+            ref={viewportRef}
+            className="relative min-h-0 flex-1 overflow-hidden bg-zinc-900"
+            onPointerDown={beginPan}
+            onContextMenu={(event) => event.preventDefault()}
+            onWheel={(event) => {
+                event.preventDefault();
+                const rect = viewportRef.current?.getBoundingClientRect();
+                onZoomChange(event.deltaY > 0 ? -0.06 : 0.06, rect ? { x: event.clientX - rect.left, y: event.clientY - rect.top } : null);
+            }}
+        >
+            {!columns.length && <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] tracking-widest text-ink-muted">ADD A BRAIN NODE TO START</div>}
+            <div className="absolute left-0 top-0 bg-[linear-gradient(rgba(63,63,70,0.28)_1px,transparent_1px),linear-gradient(90deg,rgba(63,63,70,0.28)_1px,transparent_1px)] bg-[size:32px_32px]" style={{ width: Math.max(LOGIC_CANVAS_WIDTH, graph.width), height: Math.max(LOGIC_CANVAS_HEIGHT, graph.height), transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: "0 0" }}>
+                <svg className="pointer-events-none absolute inset-0 overflow-visible" width={Math.max(LOGIC_CANVAS_WIDTH, graph.width)} height={Math.max(LOGIC_CANVAS_HEIGHT, graph.height)}>
+                    {graph.edges.map((edge) => <path key={edge.id} d={graphEdgePath(edge, nodeOffsets)} fill="none" stroke="rgba(165,180,252,.72)" strokeWidth="2" />)}
+                </svg>
+                {graph.brains.map((node) => {
+                    const column = columns[node.columnIndex];
+                    return <section key={node.id} className="absolute w-[300px] rounded border border-cyan-600 bg-zinc-950 shadow-2xl" style={graphNodeStyle(node, nodeOffsets)}>
+                        <header onPointerDown={(event) => beginNodeDrag(event, node.id)} className="flex cursor-move items-center justify-between rounded-t bg-cyan-950 px-3 py-2 font-mono text-[10px] font-bold tracking-widest text-cyan-100"><span>BRAIN NODE {node.columnIndex + 1}</span><span>PRIORITY #{node.columnIndex + 1}</span></header>
+                        <div className="space-y-2 p-3"><input value={column.name} disabled={disabled} onChange={(event) => updateColumn(node.columnIndex, { name: event.target.value })} className="h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 font-mono text-[10px] text-white" />
+                            <div className="flex items-center justify-between gap-2 font-mono text-[9px]"><button type="button" disabled={disabled || node.columnIndex === 0} onClick={() => moveColumn(node.columnIndex, -1)} className="text-cyan-300 disabled:opacity-35">HIGHER PRIORITY</button><button type="button" disabled={disabled || node.columnIndex >= columns.length - 1} onClick={() => moveColumn(node.columnIndex, 1)} className="text-cyan-300 disabled:opacity-35">LOWER PRIORITY</button></div>
+                            <div className="flex justify-between"><button type="button" disabled={disabled || graphConditionCount >= MAX_TOTAL_CONDITIONS} onClick={() => updateColumn(node.columnIndex, { branches: [...(column.branches ?? []), newTreeBranch(column.branches?.length ? "else_if" : "if", defaultVariable)] })} className="font-mono text-[9px] text-cyan-300 disabled:opacity-35">+ CONDITIONAL</button><button type="button" disabled={!canRemove} onClick={() => removeColumn(node.columnIndex)} className="font-mono text-[9px] text-red-300 disabled:opacity-35">REMOVE</button></div>
+                        </div>
+                    </section>;
+                })}
+                {graph.conditions.map((node) => {
+                    const branch = treeBranchAt(columns[node.columnIndex]?.branches, node.path);
+                    if (!branch) return null;
+                    return <GraphConditionNode key={node.id} {...{ node, branch, disabled, canRemove, conditionTypes, stateVariables, defaultVariable, targetTypes, nodeOffsets, beginNodeDrag }} canAddAction={graphActionCount < MAX_LOGIC_BLOCKS} canAddCondition={graphConditionCount < MAX_TOTAL_CONDITIONS}
+                        onChange={(updates) => updateBranch(node.columnIndex, node.path, (current) => ({ ...current, ...updates }))}
+                        onRemove={() => removeBranch(node.columnIndex, node.path)}
+                        onAddConditional={() => updateBranch(node.columnIndex, node.path, (current) => ({ ...current, children: [...(current.children ?? []), newTreeBranch(current.children?.length ? "else_if" : "if", defaultVariable)] }))}
+                        onAddAction={() => updateBranch(node.columnIndex, node.path, (current) => addGraphAction(current, selectedClass))} />;
+                })}
+                {graph.actions.map((node) => {
+                    const branch = treeBranchAt(columns[node.columnIndex]?.branches, node.path);
+                    const actions = graphBranchActions(branch);
+                    const entry = actions[node.actionIndex];
+                    if (!branch || !entry) return null;
+                    return <GraphActionNode key={node.id} {...{ node, entry, actions, branch, disabled, selectedClass, targetTypes, nodeOffsets, beginNodeDrag }}
+                        onChange={(nextEntry) => updateBranch(node.columnIndex, node.path, (current) => setGraphActions(current, actions.map((item, index) => index === node.actionIndex ? nextEntry : item)))}
+                        onRemove={() => updateBranch(node.columnIndex, node.path, (current) => setGraphActions(current, actions.filter((_, index) => index !== node.actionIndex)))} />;
+                })}
+            </div>
+        </div>
+    );
+}
+
+const GRAPH_NODE_WIDTH = 460;
+const GRAPH_NODE_GAP = 80;
+const GRAPH_LEVEL_GAP = 250;
+
+function buildLogicGraph(columns) {
+    const graph = { brains: [], conditions: [], actions: [], edges: [], width: 0, height: 0 };
+    let forestX = 80;
+    const measureBranch = (branch) => {
+        const actions = graphBranchActions(branch).length;
+        const childWidth = (branch.children ?? []).reduce((sum, child) => sum + measureBranch(child), 0);
+        return Math.max(GRAPH_NODE_WIDTH + GRAPH_NODE_GAP, actions * (GRAPH_NODE_WIDTH + GRAPH_NODE_GAP) + childWidth, GRAPH_NODE_WIDTH + GRAPH_NODE_GAP);
+    };
+    const measureLevel = (branches) => Math.max(GRAPH_NODE_WIDTH + GRAPH_NODE_GAP, (branches ?? []).reduce((sum, branch) => sum + measureBranch(branch), 0));
+    const addBranch = (branch, columnIndex, path, left, y, parent) => {
+        const width = measureBranch(branch);
+        const condition = { id: `condition:${branch.id}`, columnIndex, path, x: left + width / 2 - GRAPH_NODE_WIDTH / 2, y, width: GRAPH_NODE_WIDTH, height: 190, priority: path.at(-1) + 1 };
+        graph.conditions.push(condition);
+        graph.edges.push({ id: `${parent.id}->${condition.id}`, fromId: parent.id, toId: condition.id, x1: parent.x + parent.width / 2, y1: parent.y + parent.height, x2: condition.x + condition.width / 2, y2: condition.y });
+        let childX = left;
+        const childY = y + GRAPH_LEVEL_GAP;
+        graphBranchActions(branch).forEach((_, actionIndex) => {
+            const action = { id: `action:${branch.id}:${actionIndex}`, columnIndex, path, actionIndex, x: childX, y: childY, width: GRAPH_NODE_WIDTH, height: 150 };
+            graph.actions.push(action);
+            graph.edges.push({ id: `${condition.id}->${action.id}`, fromId: condition.id, toId: action.id, x1: condition.x + condition.width / 2, y1: condition.y + condition.height, x2: action.x + action.width / 2, y2: action.y });
+            childX += GRAPH_NODE_WIDTH + GRAPH_NODE_GAP;
+        });
+        (branch.children ?? []).forEach((child, childIndex) => {
+            const childWidth = measureBranch(child);
+            addBranch(child, columnIndex, [...path, childIndex], childX, childY, condition);
+            childX += childWidth;
+        });
+        graph.height = Math.max(graph.height, childY + 230);
+        return width;
+    };
+    columns.forEach((column, columnIndex) => {
+        const treeWidth = measureLevel(column.branches);
+        const brain = { id: `column:${column.id}`, columnIndex, x: forestX + treeWidth / 2 - 150, y: 50, width: 300, height: 130 };
+        graph.brains.push(brain);
+        let branchX = forestX;
+        (column.branches ?? []).forEach((branch, branchIndex) => {
+            branchX += addBranch(branch, columnIndex, [branchIndex], branchX, 300, brain);
+        });
+        forestX += treeWidth + 140;
+    });
+    graph.width = forestX + 100;
+    graph.height = Math.max(graph.height, 900);
+    return graph;
+}
+
+function graphNodeStyle(node, offsets) {
+    const offset = offsets[node.id] ?? { x: 0, y: 0 };
+    return { left: node.x + offset.x, top: node.y + offset.y };
+}
+
+function graphEdgePath(edge, offsets) {
+    const from = offsets[edge.fromId] ?? { x: 0, y: 0 };
+    const to = offsets[edge.toId] ?? { x: 0, y: 0 };
+    const x1 = edge.x1 + from.x;
+    const y1 = edge.y1 + from.y;
+    const x2 = edge.x2 + to.x;
+    const y2 = edge.y2 + to.y;
+    return `M ${x1} ${y1} C ${x1} ${y1 + 70}, ${x2} ${y2 - 70}, ${x2} ${y2}`;
+}
+
+function treeBranchAt(branches, path = []) {
+    let branch = branches?.[path[0]];
+    for (let index = 1; branch && index < path.length; index += 1) branch = branch.children?.[path[index]];
+    return branch;
+}
+
+function mapBranchAt(branches, path, updater) {
+    const [head, ...tail] = path;
+    return (branches ?? []).map((branch, index) => {
+        if (index !== head) return branch;
+        if (!tail.length) return updater(branch);
+        return { ...branch, children: mapBranchAt(branch.children, tail, updater) };
+    });
+}
+
+function updateTreeBranch(columns, columnIndex, path, updater) {
+    return columns.map((column, index) => index === columnIndex ? { ...column, branches: mapBranchAt(column.branches, path, updater) } : column);
+}
+
+function normalizeSiblingTypes(branches) {
+    return branches.map((branch, index) => ({ ...branch, branchType: index === 0 ? "if" : "else_if", createdOrder: index }));
+}
+
+function removeTreeBranch(columns, columnIndex, path) {
+    const parentPath = path.slice(0, -1);
+    const removeIndex = path.at(-1);
+    if (!parentPath.length) return columns.map((column, index) => index === columnIndex ? { ...column, branches: normalizeSiblingTypes((column.branches ?? []).filter((_, candidate) => candidate !== removeIndex)) } : column);
+    return updateTreeBranch(columns, columnIndex, parentPath, (parent) => ({ ...parent, children: normalizeSiblingTypes((parent.children ?? []).filter((_, candidate) => candidate !== removeIndex)) }));
+}
+
+function graphBranchActions(branch) {
+    if (Array.isArray(branch?.actions)) return branch.actions.filter((entry) => entry.action && entry.action !== "none");
+    return branch?.action && branch.action !== "none" ? [{ action: branch.action, actionTarget: branch.actionTarget ?? "opponent" }] : [];
+}
+
+function setGraphActions(branch, actions) {
+    const first = actions[0] ?? { action: "none", actionTarget: "opponent" };
+    return { ...branch, actions, ...first };
+}
+
+function addGraphAction(branch, selectedClass) {
+    const actions = graphBranchActions(branch);
+    const actionTypes = actionTypesForCombatClass(ACTION_TYPES, selectedClass);
+    const usedHeads = new Set(actions.map((entry) => actionTypes.find((action) => action.id === entry.action)).filter(Boolean).map(actionExecutionHead));
+    const next = actionTypes.find((action) => action.id !== "none" && !usedHeads.has(actionExecutionHead(action)));
+    return next ? setGraphActions(branch, [...actions, { action: next.id, actionTarget: "opponent" }]) : branch;
+}
+
+function GraphConditionNode({ node, branch, disabled, canRemove, canAddAction, canAddCondition, stateVariables, defaultVariable, targetTypes, nodeOffsets, beginNodeDrag, onChange, onRemove, onAddConditional, onAddAction }) {
+    const conditions = Array.isArray(branch.conditions) ? branch.conditions : [];
+    const siblingIndex = node.path.at(-1);
+    return <section className="absolute w-[460px] rounded border border-blue-500 bg-zinc-950 shadow-2xl" style={graphNodeStyle(node, nodeOffsets)}>
+        <header onPointerDown={(event) => beginNodeDrag(event, node.id)} className="flex cursor-move items-center justify-between rounded-t bg-blue-700 px-3 py-2 font-mono text-[10px] font-bold tracking-widest text-white"><span>CONDITIONAL {node.priority}</span><span className="rounded bg-black/30 px-1.5 py-0.5 text-[8px]">{siblingIndex === 0 ? "IF" : "ELSE IF"}</span></header>
+        <div className="space-y-2 p-3 text-[10px] [&_button]:!text-[10px] [&_input]:!text-[10px] [&_select]:!text-[10px] [&_span]:!text-[10px]">
+            {conditions.map((condition, index) => <ConditionEditor key={`${index}-${condition.type}`} condition={condition} prefix={index ? (condition.join === "or" ? "OR" : "AND") : "IF"} canChangeJoin={index > 0} removable={conditions.length > 1} stateVariables={stateVariables} defaultVariable={defaultVariable} targetTypes={targetTypes} onChange={(next) => onChange({ conditions: conditions.map((item, candidate) => candidate === index ? next : item) })} onRemove={() => onChange({ conditions: conditions.filter((_, candidate) => candidate !== index) })} />)}
+            <div className="flex flex-wrap gap-3 border-t border-border-lo pt-2 font-mono text-[10px] font-semibold tracking-wide"><button type="button" disabled={disabled || !canAddCondition || conditions.length >= MAX_CONDITIONS_PER_BLOCK} onClick={() => onChange({ conditions: [...conditions, createExpressionCondition(defaultVariable.id)] })} className="text-blue-200 disabled:opacity-35">+ CONDITION</button><button type="button" disabled={disabled || !canAddCondition} onClick={onAddConditional} className="text-violet-300 disabled:opacity-35">+ CHILD IF</button><button type="button" disabled={disabled || !canAddAction} onClick={onAddAction} className="text-fuchsia-300 disabled:opacity-35">+ ACTION</button></div>
+            <div className="flex justify-end border-t border-border-lo pt-2 font-mono text-[9px]"><button type="button" disabled={!canRemove} onClick={onRemove} className="text-red-300">REMOVE</button></div>
+        </div>
+    </section>;
+}
+
+function GraphActionNode({ node, entry, actions, disabled, selectedClass, targetTypes, nodeOffsets, beginNodeDrag, onChange, onRemove }) {
+    const actionTypes = actionTypesForCombatClass(ACTION_TYPES, selectedClass);
+    const selected = actionTypes.find((action) => action.id === entry.action) ?? actionTypes[0];
+    const usedHeads = new Set(actions.filter((_, index) => index !== node.actionIndex).map((item) => actionTypes.find((action) => action.id === item.action)).filter(Boolean).map(actionExecutionHead));
+    const available = actionTypes.filter((action) => !LEGACY_MOVEMENT_ACTION.test(action.id) && (action.id === entry.action || action.id === "none" || !usedHeads.has(actionExecutionHead(action))));
+    const targetMode = selected.movementConfig ? (entry.movementMode ?? "target") : entry.targetMode === "coordinates"
+        || (entry.targetMode == null && (entry.targetX != null || entry.targetY != null))
+        ? "coordinates"
+        : "target";
+    return <section className="absolute w-[460px] rounded border border-fuchsia-500 bg-zinc-950 shadow-2xl" style={graphNodeStyle(node, nodeOffsets)}>
+        <header onPointerDown={(event) => beginNodeDrag(event, node.id)} className="cursor-move rounded-t bg-fuchsia-800 px-3 py-2 font-mono text-[10px] font-bold tracking-widest text-white">ACTION NODE</header>
+        <div className="space-y-2 p-3 text-[10px] [&_button]:!text-[10px] [&_input]:!text-[10px] [&_select]:!text-[10px]"><SearchablePicker value={selected.id} options={available} placeholder="Search actions..." onChange={(action) => onChange({ ...entry, action, movementMode: "target", movementDirection: "toward" })} />
+            {selected.movementConfig && <MovementConfigurationControls entry={entry} onChange={onChange} />}
+            {selected.orientationConfig && <PhaseOrientationControls entry={entry} onChange={onChange} />}
+            {selected.coordinateTarget && !selected.movementConfig && <select value={targetMode} onChange={(event) => onChange({ ...entry, targetMode: event.target.value })} className="h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 font-mono text-[9px] text-white"><option value="target">Target object at execution</option><option value="coordinates">Exact coordinates</option></select>}
+            {actionSupportsTarget(selected) && (!selected.coordinateTarget || targetMode === "target") && <OrderedTargetPicker value={entry.actionTarget} targetTypes={targetTypes} onChange={(actionTarget) => onChange({ ...entry, actionTarget })} />}
+            {actionSupportsTarget(selected) && (!selected.coordinateTarget || targetMode === "target") && <div className="grid grid-cols-2 gap-2"><label className="font-mono text-[9px] text-ink-muted">TARGET OFFSET X<input type="number" value={entry.targetOffsetX ?? 0} onChange={(event) => onChange({ ...entry, targetOffsetX: event.target.value })} className="mt-1 h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 text-white" /></label><label className="font-mono text-[9px] text-ink-muted">TARGET OFFSET Y<input type="number" value={entry.targetOffsetY ?? 0} onChange={(event) => onChange({ ...entry, targetOffsetY: event.target.value })} className="mt-1 h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 text-white" /></label></div>}
+            {selected.coordinateTarget && targetMode === "coordinates" && <div className="grid grid-cols-2 gap-2"><label className="font-mono text-[9px] text-ink-muted">TARGET X<input type="number" min="0" max="1000" value={entry.targetX ?? 500} onChange={(event) => onChange({ ...entry, targetX: event.target.value })} className="mt-1 h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 text-white" /></label><label className="font-mono text-[9px] text-ink-muted">TARGET Y<input type="number" min="0" max="800" value={entry.targetY ?? 400} onChange={(event) => onChange({ ...entry, targetY: event.target.value })} className="mt-1 h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 text-white" /></label></div>}
+            <button type="button" disabled={disabled} onClick={onRemove} className="font-mono text-[9px] text-red-300">REMOVE ACTION</button></div>
+    </section>;
+}
+
+function MovementConfigurationControls({ entry, onChange }) {
+    const mode = entry.movementMode ?? "target";
+    const absolute = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest", "stop"];
+    const relative = [["toward", "Toward"], ["away", "Away"], ["left", "Left perpendicular"], ["right", "Right perpendicular"], ["toward_left", "Toward + left"], ["toward_right", "Toward + right"], ["away_left", "Away + left"], ["away_right", "Away + right"]];
+    return <><select value={mode} onChange={(event) => onChange({ ...entry, movementMode: event.target.value, movementDirection: event.target.value === "absolute" ? "north" : "toward" })} className="h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 font-mono text-[9px] text-white"><option value="target">Relative to target</option><option value="coordinates">Relative to coordinates</option><option value="absolute">Absolute arena direction</option></select><select value={entry.movementDirection ?? (mode === "absolute" ? "north" : "toward")} onChange={(event) => onChange({ ...entry, movementDirection: event.target.value })} className="h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 font-mono text-[9px] text-white">{mode === "absolute" ? absolute.map((direction) => <option key={direction} value={direction}>{direction.replace("stop", "hold ground").replaceAll("_", " ").toUpperCase()}</option>) : relative.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></>;
+}
+
+function PhaseOrientationControls({ entry, onChange }) {
+    return <label className="block font-mono text-[9px] text-ink-muted">LANDING FACING<select value={entry.phaseFacingMode ?? "face_target"} onChange={(event) => onChange({ ...entry, phaseFacingMode: event.target.value })} className="mt-1 h-9 w-full rounded border border-border-lo bg-zinc-900 px-2 text-white"><option value="face_target">Face target after passing through</option><option value="keep">Keep current facing</option><option value="face_origin">Face the position phased from</option><option value="mirror">Mirror facing across the phase line</option></select></label>;
+}
+
+function newTreeBranch(branchType, defaultVariable) {
+    const block = createLogicBlock("always", "none");
+    return {
+        ...block,
+        branchType,
+        createdOrder: Date.now() + Math.random(),
+        conditions: branchType === "else" ? [] : [createExpressionCondition(defaultVariable.id)],
+        actions: [],
+        children: [],
+    };
 }
 
 function LogicBoard({
@@ -628,7 +804,7 @@ function LogicBoard({
         >
             {!hasNodes && (
                 <div className="absolute inset-0 flex items-center justify-center font-mono text-[11px] tracking-widest text-ink-muted">
-                    ADD A LOGIC BLOCK OR CLUSTER TO START
+                    ADD A BRAIN ACTION OR CONDITIONAL TO START
                 </div>
             )}
             <div
@@ -861,17 +1037,31 @@ function LogicBlock({
     onBlockPointerDown = null,
     selectedClass = "melee",
     conditionTypes = CONDITION_TYPES,
-    defaultCondition = CONDITION_TYPES[0],
     stateVariables = STATE_VARIABLES,
     defaultVariable = STATE_VARIABLES[0],
     targetTypes = TARGET_TYPES,
     conditionsOptional = false,
+    branchLabel = null,
+    hidePriority = false,
+    hideConditions = false,
+    hideActions = false,
 }) {
     const updateConditions = (conditions) => onChange({ conditions });
     const conditions = Array.isArray(block.conditions) ? block.conditions : [];
     const actionTypes = actionTypesForCombatClass(ACTION_TYPES, selectedClass);
-    const selectedAction = actionTypes.find((action) => action.id === block.action) ?? actionTypes[0] ?? ACTION_TYPES[0];
-    const isDashVeto = selectedAction.id === "no_dash";
+    const blockActions = Array.isArray(block.actions) && block.actions.length
+        ? block.actions
+        : [{ action: block.action ?? "none", actionTarget: block.actionTarget ?? "opponent" }];
+    const updateActions = (actions) => {
+        const nextActions = actions.length ? actions : [{ action: "none", actionTarget: "opponent" }];
+        onChange({ actions: nextActions, ...nextActions[0] });
+    };
+    const usedHeads = new Set(blockActions
+        .map((entry) => actionTypes.find((action) => action.id === entry.action))
+        .filter(Boolean)
+        .map(actionExecutionHead)
+        .filter((head) => head !== "none"));
+    const canAddAction = ["movement", "rotation", "ability"].some((head) => !usedHeads.has(head));
     return (
         <fieldset
             disabled={disabled}
@@ -887,10 +1077,10 @@ function LogicBlock({
             <div
                 className="flex items-center justify-between font-mono text-[10px] tracking-widest"
             >
-                <strong className="text-cyan-200">IF BLOCK {index + 1}</strong>
+                <strong className="text-cyan-200">{branchLabel ?? `IF BLOCK ${index + 1}`}</strong>
                 <button type="button" disabled={!canRemove} onPointerDown={(event) => event.stopPropagation()} onClick={onRemove} className="text-red-300 disabled:opacity-35">REMOVE</button>
             </div>
-            <label className="mt-3 block font-mono text-[9px] tracking-widest text-ink-muted">PRIORITY</label>
+            {!hidePriority && <><label className="mt-3 block font-mono text-[9px] tracking-widest text-ink-muted">PRIORITY</label>
             <input
                 type="number"
                 min={MIN_PRIORITY}
@@ -898,8 +1088,8 @@ function LogicBlock({
                 value={block.priority ?? 1}
                 onChange={(event) => onChange({ priority: clampNumber(event.target.value, MIN_PRIORITY, MAX_PRIORITY, 1) })}
                 className="mt-1 h-8 w-20 rounded border border-border-lo bg-zinc-900 px-2 font-mono text-[10px] text-ink-white"
-            />
-            <div className="mt-2 grid gap-2">
+            /></>}
+            {!hideConditions && <div className="mt-2 grid gap-2">
                 {conditions.map((condition, conditionIndex) => (
                     <ConditionEditor
                         key={`${conditionIndex}-${condition.type}`}
@@ -915,44 +1105,89 @@ function LogicBlock({
                         targetTypes={targetTypes}
                     />
                 ))}
-            </div>
-            {conditions.length < MAX_CONDITIONS_PER_BLOCK && (
+            </div>}
+            {!hideConditions && conditions.length < MAX_CONDITIONS_PER_BLOCK && (
                 <button
                     type="button"
                     onClick={() => updateConditions([...conditions, createExpressionCondition(defaultVariable.id)])}
                     className="mt-2 font-mono text-[9px] tracking-widest text-cyan-300"
                 >+ CONDITION</button>
             )}
-            <label className="mt-3 block font-mono text-[9px] tracking-widest text-ink-muted">THEN</label>
-            <select
-                value={selectedAction.id}
-                onChange={(event) => onChange({ action: event.target.value })}
-                className="mt-1 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 font-mono text-[10px] text-ink-white"
-            >
-                {actionTypes.map((action) => <option key={action.id} value={action.id}>{action.label}</option>)}
-            </select>
-            {actionSupportsTarget(selectedAction) && (
-                <>
-                    <label className="mt-2 block font-mono text-[9px] tracking-widest text-ink-muted">TARGET</label>
-                    <select
-                        value={block.actionTarget ?? "opponent"}
-                        onChange={(event) => onChange({ actionTarget: event.target.value })}
-                        className="mt-1 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 font-mono text-[10px] text-ink-white"
-                    >
-                        {targetTypes.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
-                    </select>
-                </>
-            )}
-            {isDashVeto ? (
-                <div className="mt-3 rounded border border-border-lo bg-zinc-950 px-2 py-2 font-mono text-[9px] tracking-widest text-ink-muted">
-                    DASH VETO
-                </div>
-            ) : (
-                <div className="mt-3 rounded border border-border-lo bg-zinc-950 px-2 py-2 font-mono text-[9px] tracking-widest text-ink-muted">
-                    PRIORITY ACTION
-                </div>
-            )}
+            {!hideActions && <><label className="mt-3 block font-mono text-[9px] tracking-widest text-ink-muted">THEN</label>
+            <div className="mt-1 space-y-2">
+                {blockActions.map((entry, actionIndex) => {
+                    const selectedAction = actionTypes.find((action) => action.id === entry.action) ?? ACTION_TYPES[0];
+                    const currentHead = actionExecutionHead(selectedAction);
+                    const targetMode = selectedAction.movementConfig ? (entry.movementMode ?? "target") : entry.targetMode === "coordinates"
+                        || (entry.targetMode == null && (entry.targetX != null || entry.targetY != null))
+                        ? "coordinates"
+                        : "target";
+                    const availableActions = actionTypes.filter((action) => {
+                        if (LEGACY_MOVEMENT_ACTION.test(action.id)) return false;
+                        const head = actionExecutionHead(action);
+                        return head === "none" || head === currentHead || !usedHeads.has(head);
+                    });
+                    return <div key={`${actionIndex}-${entry.action}`} className="rounded border border-border-lo bg-zinc-950/70 p-2">
+                        <div className="flex gap-2">
+                            <SearchablePicker
+                                value={selectedAction.id}
+                                onChange={(value) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { action: value, actionTarget: candidate.actionTarget ?? "opponent", movementMode: "target", movementDirection: "toward" } : candidate))}
+                                options={availableActions}
+                                placeholder="Search actions..."
+                            />
+                            {blockActions.length > 1 && <button type="button" onClick={() => updateActions(blockActions.filter((_, index) => index !== actionIndex))} className="px-2 font-mono text-[9px] text-red-300">REMOVE</button>}
+                        </div>
+                        {selectedAction.movementConfig && <><select value={targetMode} onChange={(event) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { ...candidate, movementMode: event.target.value } : candidate))} className="mt-2 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 font-mono text-[10px] text-ink-white"><option value="target">Relative to target</option><option value="coordinates">Relative to coordinates</option><option value="absolute">Absolute arena direction</option></select><select value={entry.movementDirection ?? "toward"} onChange={(event) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { ...candidate, movementDirection: event.target.value } : candidate))} className="mt-2 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 font-mono text-[10px] text-ink-white">{targetMode === "absolute" ? <><option value="north">North</option><option value="northeast">Northeast</option><option value="east">East</option><option value="southeast">Southeast</option><option value="south">South</option><option value="southwest">Southwest</option><option value="west">West</option><option value="northwest">Northwest</option><option value="stop">Hold Ground</option></> : <><option value="toward">Toward</option><option value="away">Away</option><option value="left">Left perpendicular</option><option value="right">Right perpendicular</option><option value="toward_left">Toward + left</option><option value="toward_right">Toward + right</option><option value="away_left">Away + left</option><option value="away_right">Away + right</option></>}</select></>}
+                        {selectedAction.orientationConfig && <PhaseOrientationControls entry={entry} onChange={(nextEntry) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? nextEntry : candidate))} />}
+                        {selectedAction.coordinateTarget && !selectedAction.movementConfig && <select
+                            value={targetMode}
+                            onChange={(event) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { ...candidate, targetMode: event.target.value } : candidate))}
+                            className="mt-2 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 font-mono text-[10px] text-ink-white"
+                        ><option value="target">Target object at execution</option><option value="coordinates">Exact coordinates</option></select>}
+                        {actionSupportsTarget(selectedAction) && (!selectedAction.coordinateTarget || targetMode === "target") && <div className="mt-2"><OrderedTargetPicker value={entry.actionTarget} targetTypes={targetTypes} onChange={(actionTarget) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { ...candidate, actionTarget } : candidate))} /></div>}
+                        {actionSupportsTarget(selectedAction) && (!selectedAction.coordinateTarget || targetMode === "target") && <div className="mt-2 grid grid-cols-2 gap-2"><label className="font-mono text-[9px] text-ink-muted">OFFSET X<input type="number" value={entry.targetOffsetX ?? 0} onChange={(event) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { ...candidate, targetOffsetX: event.target.value } : candidate))} className="mt-1 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 text-ink-white" /></label><label className="font-mono text-[9px] text-ink-muted">OFFSET Y<input type="number" value={entry.targetOffsetY ?? 0} onChange={(event) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { ...candidate, targetOffsetY: event.target.value } : candidate))} className="mt-1 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 text-ink-white" /></label></div>}
+                        {selectedAction.coordinateTarget && targetMode === "coordinates" && <div className="mt-2 grid grid-cols-2 gap-2"><label className="font-mono text-[9px] text-ink-muted">TARGET X<input type="number" min="0" max="1000" value={entry.targetX ?? 500} onChange={(event) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { ...candidate, targetX: event.target.value } : candidate))} className="mt-1 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 text-ink-white" /></label><label className="font-mono text-[9px] text-ink-muted">TARGET Y<input type="number" min="0" max="800" value={entry.targetY ?? 400} onChange={(event) => updateActions(blockActions.map((candidate, index) => index === actionIndex ? { ...candidate, targetY: event.target.value } : candidate))} className="mt-1 h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 text-ink-white" /></label></div>}
+                    </div>;
+                })}
+            </div>
+            <button type="button" disabled={!canAddAction} onClick={() => {
+                const next = actionTypes.find((action) => action.id !== "none" && !usedHeads.has(actionExecutionHead(action)));
+                if (next) updateActions([...blockActions.filter((entry) => entry.action !== "none"), { action: next.id, actionTarget: "opponent" }]);
+            }} className="mt-2 font-mono text-[9px] text-cyan-300 disabled:opacity-35">+ ACTION</button></>}
         </fieldset>
+    );
+}
+
+function SearchablePicker({ value, onChange, options, placeholder = "Search..." }) {
+    const [open, setOpen] = useState(false);
+    const [query, setQuery] = useState("");
+    const rootRef = useRef(null);
+    const selected = options.find((option) => option.id === value);
+    const normalized = query.trim().toLocaleLowerCase();
+    const filtered = normalized
+        ? options.filter((option) => `${option.label} ${option.id}`.toLocaleLowerCase().includes(normalized))
+        : options;
+    useEffect(() => {
+        if (!open) return undefined;
+        const close = (event) => {
+            if (!rootRef.current?.contains(event.target)) setOpen(false);
+        };
+        window.addEventListener("pointerdown", close);
+        return () => window.removeEventListener("pointerdown", close);
+    }, [open]);
+    return (
+        <div ref={rootRef} className="relative min-w-0 flex-1">
+            <button type="button" onClick={() => { setOpen((current) => !current); setQuery(""); }} className="flex h-8 w-full items-center justify-between rounded border border-border-lo bg-zinc-950 px-2 text-left font-mono text-[10px] text-ink-white">
+                <span className="truncate">{selected?.label ?? "Choose..."}</span><span className="text-ink-muted">⌄</span>
+            </button>
+            {open && <div onWheel={(event) => event.stopPropagation()} className="absolute left-0 top-full z-50 mt-1 w-full min-w-56 rounded border border-border-mid bg-zinc-950 p-2 shadow-2xl">
+                <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={placeholder} className="h-8 w-full rounded border border-cyan-900 bg-zinc-900 px-2 font-mono text-[10px] text-white outline-none focus:border-cyan-500" />
+                <div className="mt-1 max-h-52 overflow-y-auto">
+                    {filtered.map((option) => <button key={option.id} type="button" onClick={() => { onChange(option.id); setOpen(false); }} className={`block w-full rounded px-2 py-1.5 text-left font-mono text-[10px] hover:bg-cyan-950 ${option.id === value ? "text-cyan-200" : "text-ink-white"}`}>{option.label}</button>)}
+                    {!filtered.length && <div className="px-2 py-3 font-mono text-[9px] text-ink-muted">NO MATCHES</div>}
+                </div>
+            </div>}
+        </div>
     );
 }
 
@@ -968,7 +1203,7 @@ function ConditionEditor({
     defaultVariable = STATE_VARIABLES[0],
     targetTypes = TARGET_TYPES,
 }) {
-    if (condition?.type === "expression") {
+    if (condition?.type === "expression" || condition?.type === "always") {
         return (
             <ExpressionConditionEditor
                 condition={condition}
@@ -983,7 +1218,7 @@ function ConditionEditor({
             />
         );
     }
-    const visibleConditionTypes = conditionTypes.length ? conditionTypes : CONDITION_TYPES;
+    const visibleConditionTypes = conditionTypes.filter((candidate) => candidate.id === "always");
     const legacyDefinition = CONDITION_DEFINITIONS.find((candidate) => (
         candidate.id === condition.type
         && !CONDITION_TYPES.some((current) => current.id === candidate.id)
@@ -995,13 +1230,14 @@ function ConditionEditor({
     const targetOptions = definition.targetGroup === "objects"
         ? objectTargetTypes(targetTypes)
         : targetTypes;
-    const selectedTarget = targetOptions.some((target) => target.id === condition.target)
+    const selectedTarget = targetOptions.some((target) => target.id === String(condition.target).split(":")[0])
         ? condition.target
         : definition.defaultTarget ?? "opponent";
     const selectType = (type) => {
-        if (type === "expression") {
+        const selectedVariable = stateVariables.find((variable) => variable.id === type);
+        if (selectedVariable) {
             onChange({
-                ...createExpressionCondition(defaultVariable.id),
+                ...createExpressionCondition(selectedVariable.id),
                 ...(condition.join === "or" ? { join: "or" } : {}),
             });
             return;
@@ -1015,7 +1251,7 @@ function ConditionEditor({
         });
     };
     return (
-        <div className="grid grid-cols-[42px_1fr_auto] items-center gap-1">
+        <div className="grid grid-cols-[42px_1fr_auto] items-center gap-1 text-[10px] [&_button]:!text-[10px] [&_input]:!text-[10px] [&_select]:!text-[10px] [&_span]:!text-[10px]">
             <ConditionJoinControl
                 prefix={prefix}
                 canChangeJoin={canChangeJoin}
@@ -1027,9 +1263,12 @@ function ConditionEditor({
                     {!visibleConditionTypes.some((candidate) => candidate.id === definition.id) && (
                         <option value={definition.id}>{definition.label}</option>
                     )}
-                    {groupedConditionTypes(visibleConditionTypes).map(({ group, conditions }) => (
+                    <optgroup label="BASIC">
+                        {visibleConditionTypes.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}
+                    </optgroup>
+                    {groupedStateVariables(stateVariables).map(({ group, variables }) => (
                         <optgroup key={group} label={group}>
-                            {conditions.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.label}</option>)}
+                            {variables.map((variable) => <option key={variable.id} value={variable.id}>{variable.label}</option>)}
                         </optgroup>
                     ))}
                 </select>
@@ -1062,13 +1301,7 @@ function ConditionEditor({
                     </div>
                 )}
                 {definition.supportsTarget && (
-                    <select
-                        value={selectedTarget}
-                        onChange={(event) => onChange({ ...condition, target: event.target.value })}
-                        className="h-8 w-24 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
-                    >
-                        {targetOptions.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
-                    </select>
+                    <div className="min-w-56"><OrderedTargetPicker value={selectedTarget} targetTypes={targetOptions} onChange={(target) => onChange({ ...condition, target })} /></div>
                 )}
             </div>
             {removable ? <button type="button" onClick={onRemove} className="text-red-300">x</button> : <span />}
@@ -1087,6 +1320,7 @@ function ExpressionConditionEditor({
     defaultVariable,
     targetTypes,
 }) {
+    const isAlways = condition?.type === "always";
     const variables = stateVariables.length ? stateVariables : STATE_VARIABLES;
     const leftDefinition = variables.find((variable) => variable.id === condition.left)
         ?? defaultVariable
@@ -1103,18 +1337,28 @@ function ExpressionConditionEditor({
     const numericVariables = variables.filter((variable) => variable.valueType === "number");
     const canUseVariableOperand = valueType === "number" && numericVariables.length > 0;
     const targetGroup = expressionTargetGroup(leftDefinition, rightVariableDefinition);
-    const targetOptions = targetGroup === "objects"
+    const targetOptions = leftDefinition.fighterTargetOnly
+        ? targetTypes.filter((target) => target.id === "opponent")
+        : targetGroup === "objects"
         ? objectTargetTypes(targetTypes)
         : targetTypes;
     const showTarget = leftDefinition.supportsTarget || Boolean(rightVariableDefinition?.supportsTarget);
-    const selectedTarget = targetOptions.some((target) => target.id === condition.target)
+    const selectedTarget = targetOptions.some((target) => target.id === String(condition.target).split(":")[0])
         ? condition.target
         : targetGroup === "objects" ? "object_1" : "opponent";
 
     const changeLeft = (left) => {
+        if (left === "always") {
+            onChange({
+                type: "always",
+                ...(condition.join === "or" ? { join: "or" } : {}),
+            });
+            return;
+        }
         const nextLeft = variables.find((variable) => variable.id === left) ?? variables[0];
         onChange({
             ...createExpressionCondition(nextLeft.id),
+            ...(nextLeft.supportsAbility && nextLeft.abilityOptions?.length ? { ability: nextLeft.abilityOptions[0].id } : {}),
             ...(condition.join === "or" ? { join: "or" } : {}),
         });
     };
@@ -1133,7 +1377,7 @@ function ExpressionConditionEditor({
     };
 
     return (
-        <div className="grid grid-cols-[42px_1fr_auto] items-center gap-1">
+        <div className="grid grid-cols-[42px_1fr_auto] items-center gap-1 text-[10px] [&_button]:!text-[10px] [&_input]:!text-[10px] [&_select]:!text-[10px] [&_span]:!text-[10px]">
             <ConditionJoinControl
                 prefix={prefix}
                 canChangeJoin={canChangeJoin}
@@ -1141,20 +1385,25 @@ function ExpressionConditionEditor({
                 onChange={onChange}
             />
             <div className="grid min-w-0 grid-cols-[1fr_auto_1fr] gap-1">
-                <select
-                    value={leftDefinition.id}
-                    onChange={(event) => changeLeft(event.target.value)}
-                    className="h-8 min-w-0 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
-                >
-                    {groupedStateVariables(variables).map(({ group, variables: groupedVariables }) => (
-                        <optgroup key={group} label={group}>
-                            {groupedVariables.map((variable) => (
-                                <option key={variable.id} value={variable.id}>{variable.label}</option>
-                            ))}
-                        </optgroup>
-                    ))}
-                </select>
-                {valueType === "boolean" ? (
+                <SearchablePicker
+                    value={isAlways ? "always" : leftDefinition.id}
+                    onChange={changeLeft}
+                    options={[{ id: "always", label: "ALWAYS" }, ...variables]}
+                    placeholder="Search conditionals..."
+                />
+                {!isAlways && leftDefinition.supportsAbility && (
+                    <select
+                        aria-label="Selected ability"
+                        value={leftDefinition.abilityOptions?.some((ability) => ability.id === condition.ability) ? condition.ability : leftDefinition.abilityOptions?.[0]?.id ?? ""}
+                        onChange={(event) => onChange({ ...condition, ability: event.target.value })}
+                        className="h-8 min-w-36 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
+                    >
+                        {(leftDefinition.abilityOptions ?? []).map((ability) => <option key={ability.id} value={ability.id}>{ability.label}</option>)}
+                    </select>
+                )}
+                {!isAlways && (leftDefinition.rangeOnly ? (
+                    <span className="flex h-8 items-center rounded border border-border-lo bg-zinc-950 px-2 font-mono text-[9px] text-ink-muted">BETWEEN</span>
+                ) : valueType === "boolean" ? (
                     <span className="flex h-8 items-center rounded border border-border-lo bg-zinc-950 px-2 font-mono text-[9px] text-ink-muted">IS</span>
                 ) : (
                     <select
@@ -1166,8 +1415,33 @@ function ExpressionConditionEditor({
                             <option key={candidate.id} value={candidate.id}>{candidate.label}</option>
                         ))}
                     </select>
-                )}
-                {valueType === "boolean" ? (
+                ))}
+                {!isAlways && (leftDefinition.rangeOnly ? (
+                    <div className="flex min-w-0 items-center gap-1">
+                        <input
+                            aria-label="Minimum target direction"
+                            type="number"
+                            min={leftDefinition.min}
+                            max={leftDefinition.max}
+                            step={1}
+                            value={condition.right?.min ?? leftDefinition.defaultMin}
+                            onChange={(event) => onChange({ ...condition, comparator: "range", right: { type: "range", min: event.target.value, max: condition.right?.max ?? leftDefinition.defaultMax } })}
+                            className="h-8 min-w-0 flex-1 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
+                        />
+                        <span className="font-mono text-[9px] text-ink-muted">° TO</span>
+                        <input
+                            aria-label="Maximum target direction"
+                            type="number"
+                            min={leftDefinition.min}
+                            max={leftDefinition.max}
+                            step={1}
+                            value={condition.right?.max ?? leftDefinition.defaultMax}
+                            onChange={(event) => onChange({ ...condition, comparator: "range", right: { type: "range", min: condition.right?.min ?? leftDefinition.defaultMin, max: event.target.value } })}
+                            className="h-8 min-w-0 flex-1 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
+                        />
+                        <span className="font-mono text-[9px] text-ink-muted">°</span>
+                    </div>
+                ) : valueType === "boolean" ? (
                     <select
                         value={String(condition.right?.value ?? true)}
                         onChange={(event) => onChange({
@@ -1191,22 +1465,15 @@ function ExpressionConditionEditor({
                             {canUseVariableOperand && <option value="variable">VAR</option>}
                         </select>
                         {condition.right?.type === "variable" ? (
-                            <select
+                            <SearchablePicker
                                 value={rightVariableDefinition?.id ?? numericVariables[0]?.id}
-                                onChange={(event) => onChange({
+                                onChange={(value) => onChange({
                                     ...condition,
-                                    right: { type: "variable", value: event.target.value },
+                                    right: { type: "variable", value },
                                 })}
-                                className="h-8 min-w-0 flex-1 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
-                            >
-                                {groupedStateVariables(numericVariables).map(({ group, variables: groupedVariables }) => (
-                                    <optgroup key={group} label={group}>
-                                        {groupedVariables.map((variable) => (
-                                            <option key={variable.id} value={variable.id}>{variable.label}</option>
-                                        ))}
-                                    </optgroup>
-                                ))}
-                            </select>
+                                options={numericVariables}
+                                placeholder="Search variables..."
+                            />
                         ) : (
                             <div className="flex min-w-0 flex-1 items-center gap-1">
                                 <input
@@ -1230,11 +1497,19 @@ function ExpressionConditionEditor({
                                                         leftDefinition.min,
                                                         leftDefinition.max,
                                                         leftDefinition.defaultValue,
+                                                        leftDefinition.step ?? 1,
                                                     ),
                                                 },
                                             });
                                         }
                                     }}
+                                    onBlur={(event) => onChange({
+                                        ...condition,
+                                        right: {
+                                            type: "number",
+                                            value: clampNumber(event.currentTarget.value, leftDefinition.min, leftDefinition.max, leftDefinition.defaultValue, leftDefinition.step ?? 1),
+                                        },
+                                    })}
                                     className="h-8 min-w-0 flex-1 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
                                 />
                                 {leftDefinition.suffix && (
@@ -1243,15 +1518,9 @@ function ExpressionConditionEditor({
                             </div>
                         )}
                     </div>
-                )}
-                {showTarget && (
-                    <select
-                        value={selectedTarget}
-                        onChange={(event) => onChange({ ...condition, target: event.target.value })}
-                        className="col-span-3 h-8 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white"
-                    >
-                        {targetOptions.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
-                    </select>
+                ))}
+                {!isAlways && showTarget && (
+                    <div className="col-span-3"><OrderedTargetPicker value={selectedTarget} targetTypes={targetOptions} onChange={(target) => onChange({ ...condition, target })} /></div>
                 )}
             </div>
             {removable ? <button type="button" onClick={onRemove} className="text-red-300">x</button> : <span />}
@@ -1295,7 +1564,21 @@ function sanitizeConfigurationConditions(configuration, conditionTypes, defaultC
     };
     const sanitizeBlock = (block) => {
         const conditions = sanitizeConditions(block?.conditions);
-        return conditions === block?.conditions ? block : { ...block, conditions };
+        const children = Array.isArray(block?.children) ? sanitizeBranches(block.children) : block?.children;
+        return conditions === block?.conditions && children === block?.children ? block : { ...block, conditions, children };
+    };
+    const sanitizeBranches = (branches) => {
+        let branchChanged = false;
+        const next = branches.map((branch) => {
+            const conditions = sanitizeConditions(branch?.conditions);
+            const children = Array.isArray(branch?.children) ? sanitizeBranches(branch.children) : branch?.children;
+            if (conditions !== branch?.conditions || children !== branch?.children) {
+                branchChanged = true;
+                return { ...branch, conditions, children };
+            }
+            return branch;
+        });
+        return branchChanged ? next : branches;
     };
 
     let changed = false;
@@ -1324,8 +1607,18 @@ function sanitizeConfigurationConditions(configuration, conditionTypes, defaultC
             return cluster;
         })
         : configuration?.clusters;
+    const columns = Array.isArray(configuration?.columns)
+        ? configuration.columns.map((column) => {
+            const branches = sanitizeBranches(column.branches ?? []);
+            if (branches !== column.branches) {
+                changed = true;
+                return { ...column, branches };
+            }
+            return column;
+        })
+        : configuration?.columns;
 
-    return changed ? { ...configuration, blocks, clusters } : configuration;
+    return changed ? { ...configuration, columns, blocks, clusters } : configuration;
 }
 
 function ScoreBox({ label, value, tone }) {
@@ -1335,26 +1628,6 @@ function ScoreBox({ label, value, tone }) {
             <div className={`truncate ${color}`}>{label}</div>
             <div className="mt-1 text-base text-ink-white">{value}</div>
         </div>
-    );
-}
-
-function ClassSelect({ label, value, disabled, onChange, className = "mb-2" }) {
-    return (
-        <label className={`block ${className}`}>
-            <span className="mb-1 block font-mono text-[9px] tracking-widest text-ink-muted">{label}</span>
-            <select
-                value={value}
-                disabled={disabled}
-                onChange={(event) => onChange(event.target.value)}
-                className="h-8 w-full rounded border border-border-lo bg-zinc-950 px-2 font-mono text-[10px] font-bold tracking-widest text-ink-white disabled:cursor-not-allowed disabled:opacity-45"
-            >
-                {Object.values(COMBAT_CLASSES).map((combatClass) => (
-                    <option key={combatClass.id} value={combatClass.id}>
-                        {combatClass.label ?? combatClass.id.toUpperCase()}
-                    </option>
-                ))}
-            </select>
-        </label>
     );
 }
 
@@ -1394,47 +1667,27 @@ function BrainTab({ active, onClick, children }) {
 }
 
 function countLogicBlocks(configuration) {
-    return (configuration.blocks?.length ?? 0)
+    return (configuration.columns ?? []).reduce((total, column) => total + countTreeBranches(column.branches), 0)
+        + (configuration.blocks?.length ?? 0)
         + (configuration.clusters ?? []).reduce((total, cluster) => total + (cluster.blocks?.length ?? 0), 0);
 }
 
-function allLogicBlocks(configuration) {
-    return [
-        ...(configuration?.blocks ?? []),
-        ...(configuration?.clusters ?? []).flatMap((cluster) => cluster.blocks ?? []),
-    ];
+function countLogicConditions(configuration) {
+    const countBranches = (branches = []) => branches.reduce((total, branch) => (
+        total + (branch.conditions?.length ?? 0) + countBranches(branch.children)
+    ), 0);
+    return (configuration.columns ?? []).reduce((total, column) => total + countBranches(column.branches), 0)
+        + (configuration.blocks ?? []).reduce((total, block) => total + (block.conditions?.length ?? 0), 0)
+        + (configuration.clusters ?? []).reduce((total, cluster) => total
+            + (cluster.conditions?.length ?? 0)
+            + (cluster.blocks ?? []).reduce((sum, block) => sum + (block.conditions?.length ?? 0), 0), 0);
 }
 
-function blockIntroductionRounds(roundBrains, configuration, currentRound) {
-    const roundsById = new Map();
-    [...roundBrains]
-        .sort((first, second) => first.roundNumber - second.roundNumber)
-        .forEach((round) => {
-            allLogicBlocks(round.brain).forEach((block) => {
-                if (block?.id && !roundsById.has(block.id)) {
-                    roundsById.set(block.id, round.roundNumber);
-                }
-            });
-        });
-    allLogicBlocks(configuration).forEach((block) => {
-        if (block?.id && !roundsById.has(block.id)) {
-            roundsById.set(block.id, currentRound);
-        }
-    });
-    return roundsById;
-}
-
-function configurationForRound(configuration, roundsById, roundNumber) {
-    return {
-        ...configuration,
-        blocks: (configuration?.blocks ?? []).filter((block) => roundsById.get(block.id) === roundNumber),
-        clusters: (configuration?.clusters ?? [])
-            .map((cluster) => ({
-                ...cluster,
-                blocks: (cluster.blocks ?? []).filter((block) => roundsById.get(block.id) === roundNumber),
-            }))
-            .filter((cluster) => cluster.blocks.length > 0),
-    };
+function countTreeBranches(branches = []) {
+    return branches.reduce((total, branch) => {
+        const actions = Array.isArray(branch.actions) && branch.actions.length ? branch.actions : [branch];
+        return total + actions.filter((entry) => entry.action !== "none").length + countTreeBranches(branch.children);
+    }, 0);
 }
 
 function createDefaultCondition(definition) {
@@ -1448,15 +1701,6 @@ function createDefaultCondition(definition) {
     };
 }
 
-function groupedConditionTypes(conditionTypes = CONDITION_TYPES) {
-    return CONDITION_GROUP_ORDER
-        .map((group) => ({
-            group,
-            conditions: conditionTypes.filter((condition) => (condition.group ?? "General") === group),
-        }))
-        .filter((entry) => entry.conditions.length > 0);
-}
-
 function groupedStateVariables(stateVariables = STATE_VARIABLES) {
     return CONDITION_GROUP_ORDER
         .map((group) => ({
@@ -1466,17 +1710,51 @@ function groupedStateVariables(stateVariables = STATE_VARIABLES) {
         .filter((entry) => entry.variables.length > 0);
 }
 
-function targetTypesForOpponentClass(opponentClass) {
+function abilityIdsForConfiguration(configuration) {
+    const encoded = String(configuration);
+    return encoded.startsWith("sandbox:") ? new Set(decodeSandboxLoadout(encoded).abilities)
+        : encoded.startsWith("custom:") ? new Set(decodeBotLoadout(encoded).abilities) : new Set();
+}
+
+function targetTypesForLoadouts(ownClass, opponentClass) {
+    const ownAbilities = abilityIdsForConfiguration(ownClass), opponentAbilities = abilityIdsForConfiguration(opponentClass);
     return TARGET_TYPES
-        .filter((target) => target.id !== "opponent_grenade" || opponentClass === "ranged")
-        .filter((target) => target.id !== "opponent_fireball" || opponentClass === "mage");
+        .filter((target) => {
+            if (!target.abilityId) return true;
+            return (target.owner === "my" ? ownAbilities : opponentAbilities).has(target.abilityId);
+        });
+}
+
+function OrderedTargetPicker({ value = "opponent", targetTypes = TARGET_TYPES, onChange }) {
+    const [baseValue, encodedOrder, encodedOrdinal] = String(value).split(":");
+    const base = targetTypes.some((target) => target.id === baseValue) ? baseValue : targetTypes[0]?.id ?? "opponent";
+    const order = ["closest", "farthest", "oldest", "newest"].includes(encodedOrder) ? encodedOrder : "closest";
+    const ordinal = Math.max(1, Math.min(100, Number(encodedOrdinal) || 1));
+    const ordered = base !== "opponent";
+    const encode = (nextBase, nextOrder = order, nextOrdinal = ordinal) => nextBase === "opponent"
+        ? "opponent"
+        : `${nextBase}:${nextOrder}:${Math.max(1, Math.min(100, Number(nextOrdinal) || 1))}`;
+    return <div className={`grid gap-1 ${ordered ? "grid-cols-[minmax(0,1fr)_6rem_4rem]" : "grid-cols-1"}`}>
+        <select value={base} onChange={(event) => onChange(encode(event.target.value))} className="h-8 min-w-0 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white">
+            {targetTypes.map((target) => <option key={target.id} value={target.id}>{target.label.replace(/^Closest /, "")}</option>)}
+        </select>
+        {ordered && <select aria-label="Target ordering" value={order} onChange={(event) => onChange(encode(base, event.target.value))} className="h-8 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white">
+            <option value="closest">Closest</option><option value="farthest">Farthest</option><option value="oldest">Oldest</option><option value="newest">Newest</option>
+        </select>}
+        {ordered && <input aria-label="Target ordinal" type="number" min="1" max="100" value={ordinal} onChange={(event) => onChange(encode(base, order, event.target.value))} className="h-8 rounded border border-border-lo bg-zinc-950 px-1 font-mono text-[9px] text-ink-white" />}
+    </div>;
 }
 
 function objectTargetTypes(targetTypes = TARGET_TYPES) {
     return targetTypes.filter((target) => (
+        Boolean(target.abilityId)
+        ||
+        target.id.includes(":")
+        ||
         target.id.startsWith("object_")
-        || target.id === "opponent_grenade"
-        || target.id === "opponent_fireball"
+        || /^p[12]_object_[1-6]$/.test(target.id)
+        || target.id.startsWith("wall_core_")
+        || target.id === "defender_core"
     ));
 }
 

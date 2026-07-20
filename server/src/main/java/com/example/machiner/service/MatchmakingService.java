@@ -17,13 +17,17 @@ import com.example.machiner.repository.MatchRepository;
 import com.example.machiner.repository.ModelSubmissionRepository;
 import com.example.machiner.repository.ProfileRepository;
 import com.example.machiner.repository.UserRepository;
+import com.example.machiner.simulation.ArenaUnits;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.Random;
 import java.util.concurrent.ThreadLocalRandom;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,15 +38,28 @@ import tools.jackson.databind.json.JsonMapper;
 public class MatchmakingService {
 
     private static final int COUNTDOWN_SECONDS = 5;
-    private static final int CLASS_SELECTION_SECONDS = 30;
-    private static final int OBJECT_PLACEMENT_SECONDS = 20;
+    private static final long PLAYBACK_PREP_DELAY_MILLIS = 3_000L;
+    private static final long ROUND_RESULT_HOLD_MILLIS = 3_500L;
+    private static final int CLASS_SELECTION_SECONDS = 60;
     private static final int TRAINING_SECONDS = 600;
-    private static final int OBJECT_PLACEMENT_LIMIT = 3;
-    private static final int MAX_MATCH_OBJECTS = 6;
-    private static final int BUFF_PICKUP_SIZE = 76;
     private static final int RESULT_REVEAL_BUFFER_MS = 250;
     private static final int WINS_REQUIRED = 2;
-    private static final int ROUND_LOGIC_BLOCK_LIMIT = 10;
+    private static final int TOTAL_ROUNDS = 3;
+    private static final Map<Integer, Integer> ROUND_OFFER_COUNTS = Map.of(1, 6, 2, 4, 3, 3);
+    private static final Map<Integer, Integer> ROUND_PICK_COUNTS = Map.of(1, 3, 2, 2, 3, 1);
+    private static final Map<Integer, List<String>> ROUND_ABILITIES = Map.of(
+            1, List.of("swing", "block", "dash", "fire_gun", "throw_grenade", "shoot_fireball", "stun", "heavy_slash", "repulsor_burst", "concussive_shot", "repair_pulse", "proximity_mine", "quick_jab", "pistol_shot"),
+            2, List.of("rail_shot", "gravity_grenade", "silence_pulse", "reactive_armor", "hunter_drone", "thrust", "micro_dash"),
+            3, List.of("temporal_rewind", "orbital_strike", "absolute_guard", "null_zone", "phase_strike"));
+    private static final Map<String, String> ABILITY_CODES = Map.ofEntries(
+            Map.entry("swing", "s"), Map.entry("block", "b"), Map.entry("dash", "d"), Map.entry("fire_gun", "g"),
+            Map.entry("throw_grenade", "r"), Map.entry("shoot_fireball", "f"), Map.entry("stun", "t"), Map.entry("heavy_slash", "h"),
+            Map.entry("repulsor_burst", "u"), Map.entry("concussive_shot", "c"), Map.entry("repair_pulse", "e"), Map.entry("proximity_mine", "m"),
+            Map.entry("quick_jab", "j"), Map.entry("pistol_shot", "p"), Map.entry("rail_shot", "R"), Map.entry("gravity_grenade", "G"),
+            Map.entry("silence_pulse", "S"), Map.entry("reactive_armor", "A"), Map.entry("hunter_drone", "H"), Map.entry("thrust", "T"),
+            Map.entry("micro_dash", "M"), Map.entry("temporal_rewind", "w"), Map.entry("orbital_strike", "o"), Map.entry("absolute_guard", "a"),
+            Map.entry("null_zone", "n"), Map.entry("phase_strike", "P"));
+    private static final int ROUND_LOGIC_BLOCK_LIMIT = 100;
     private static final String COMPLETION_REASON_SIMULATION = "SIMULATION";
     private static final String COMPLETION_REASON_RESIGNATION = "RESIGNATION";
 
@@ -99,26 +116,25 @@ public class MatchmakingService {
         Instant classSelectionEndsAt = Instant.now(clock).plusSeconds(CLASS_SELECTION_SECONDS);
         Match match = createMatch(opponent, player);
         long seed = match.getSimulationSeed();
+        boolean queuedPlayerDefendsFirst = (seed & 1L) == 0L;
+        QueuedPlayer firstDefender = queuedPlayerDefendsFirst ? player : opponent;
+        QueuedPlayer firstAttacker = queuedPlayerDefendsFirst ? opponent : player;
         List<MatchPlayer> players = List.of(
                 new MatchPlayer(
-                        opponent.userId(),
-                        opponent.username(),
-                        opponent.principalName(),
+                        firstDefender.userId(), firstDefender.username(), firstDefender.principalName(),
                         1,
                         false,
                         null,
                         0,
-                        "melee",
+                        "custom::0,0,0,0",
                         false),
                 new MatchPlayer(
-                        player.userId(),
-                        player.username(),
-                        player.principalName(),
+                        firstAttacker.userId(), firstAttacker.username(), firstAttacker.principalName(),
                         2,
                         false,
                         null,
                         0,
-                        "melee",
+                        "custom::0,0,0,0",
                         false));
 
         MatchSession pendingSession = new MatchSession(
@@ -154,9 +170,12 @@ public class MatchmakingService {
             return List.of(eventForPlayer(session, playerForUser(session, userId), "MATCH_COUNTDOWN_READY"));
         }
 
-        MatchSession selectedSession = session.withSelectedClass(userId, normalizeSelectedClass(selectedClass), true);
+        String normalizedLoadout = normalizeSelectedClass(selectedClass);
+        validateRoundLoadoutBudget(normalizedLoadout, session.roundNumber());
+        validateRoundAbilityDraft(session, playerForUser(session, userId), normalizedLoadout);
+        MatchSession selectedSession = session.withSelectedClass(userId, normalizedLoadout, true);
         if (selectedSession.players().stream().allMatch(MatchPlayer::classSelected)) {
-            return startObjectPlacement(selectedSession, "MATCH_OBJECT_PLACEMENT_READY", "Both classes locked.");
+            return startCountdown(selectedSession.withObstacles(List.of()), "MATCH_COUNTDOWN_READY", "Both loadouts locked.");
         }
 
         for (MatchPlayer player : selectedSession.players()) {
@@ -169,7 +188,7 @@ public class MatchmakingService {
                         "MATCH_CLASS_SELECTED",
                         "CLASS_SELECT",
                         null,
-                        playerForUser(selectedSession, userId).username() + " locked a class."))
+                        playerForUser(selectedSession, userId).username() + " locked a loadout."))
                 .toList();
     }
 
@@ -185,7 +204,7 @@ public class MatchmakingService {
         if (session.classSelectionEndsAt() != null && Instant.now(clock).isBefore(session.classSelectionEndsAt())) {
             return List.of();
         }
-        return startObjectPlacement(session.withDefaultClassSelections(), "MATCH_OBJECT_PLACEMENT_READY", "Class selection ended.");
+        return startCountdown(withDefaultAbilitySelections(session).withObstacles(List.of()), "MATCH_COUNTDOWN_READY", "Loadout selection ended.");
     }
 
     @Transactional
@@ -197,6 +216,9 @@ public class MatchmakingService {
             return List.of();
         }
         MatchPlayer submittingPlayer = playerForUser(session, userId);
+        if (submittingPlayer.slot() != 2) {
+            throw new AuthException("only the attacker may place match objects");
+        }
         List<MatchPlaybackDTO.ObstaclePlacementDTO> normalizedObjects =
                 normalizeObjectPlacements(submittingPlayer, objects);
         MatchSession placedSession = session.withObjectPlacements(
@@ -306,11 +328,15 @@ public class MatchmakingService {
         }
 
         ModelSubmission submission = requireValidatedSubmission(userId, modelSubmissionId, session.matchId());
-        validateRoundBrainPolicy(session, userId, submission);
         MatchPlayer submittingPlayer = playerForUser(session, userId);
         String submissionClass = normalizeSelectedClass(submission.getSelectedClass());
-        if (!submissionClass.equals(submittingPlayer.selectedClass())) {
-            throw new AuthException("model submission class does not match the selected match class");
+        String submittedLoadout = submissionLoadoutId(submission);
+        if (submittedLoadout != null && !submittedLoadout.equals(submittingPlayer.selectedClass())) {
+            throw new AuthException("model submission does not match the selected bot loadout");
+        }
+        if (submittedLoadout == null && !"custom:bds:0,0,0,0".equals(submissionClass) && !"custom".equals(submissionClass)
+                && !submissionClass.equals(submittingPlayer.selectedClass())) {
+            throw new AuthException("model submission does not match the selected bot loadout");
         }
         MatchSession updatedSession = session.withFinishedPlayer(userId, submission.getId());
         for (MatchPlayer player : updatedSession.players()) {
@@ -339,10 +365,14 @@ public class MatchmakingService {
                 .add(new RoundSubmissionRecord(
                         session.roundNumber(),
                         playback.winnerUserId(),
-                        Map.copyOf(submissionsByUserId)));
-        boolean seriesComplete = playback.winnerUserId() != null
-                && playerForUser(scoredSession, playback.winnerUserId()).roundWins() >= scoredSession.winsRequired();
+                        Map.copyOf(submissionsByUserId),
+                        roundLossScores(session, playback)));
+        boolean seriesComplete = session.roundNumber() >= TOTAL_ROUNDS
+                || scoredSession.players().stream().anyMatch(player -> player.roundWins() >= WINS_REQUIRED);
         if (seriesComplete) {
+            UUID seriesWinner = seriesWinner(scoredSession);
+            playback = withWinner(playback, seriesWinner,
+                    seriesWinner == null ? "The best-of-three match ended tied." : playerForUser(scoredSession, seriesWinner).username() + " wins the best-of-three match.");
             completeMatch(scoredSession.matchId(), playback);
 
             for (MatchPlayer player : scoredSession.players()) {
@@ -351,9 +381,10 @@ public class MatchmakingService {
         }
         MatchPlaybackDTO replayOnlyPlayback = withoutResult(playback);
         MatchPlaybackDTO resultOnlyPlayback = resultOnly(playback);
-        long resultDelayMillis = resultRevealDelayMillis(playback);
-        Instant playbackStartsAt = Instant.now(clock);
-        Instant resultRevealsAt = playbackStartsAt.plusMillis(resultDelayMillis);
+        long replayDurationMillis = resultRevealDelayMillis(playback);
+        long resultDelayMillis = PLAYBACK_PREP_DELAY_MILLIS + replayDurationMillis;
+        Instant playbackStartsAt = Instant.now(clock).plusMillis(PLAYBACK_PREP_DELAY_MILLIS);
+        Instant resultRevealsAt = playbackStartsAt.plusMillis(replayDurationMillis);
         List<OutboundMatchmakingEvent> events = new ArrayList<>();
         for (MatchPlayer player : scoredSession.players()) {
             events.add(eventForPlayer(
@@ -378,19 +409,19 @@ public class MatchmakingService {
                     resultRevealsAt));
         }
         if (!seriesComplete) {
-            Instant nextCountdownEndsAt = resultRevealsAt.plusSeconds(COUNTDOWN_SECONDS);
-            Instant nextTrainingEndsAt = nextCountdownEndsAt.plusSeconds(TRAINING_SECONDS);
-            MatchSession nextRoundSession = scoredSession.nextRound();
-            nextRoundSession = nextRoundSession.withCountdown(nextCountdownEndsAt, nextTrainingEndsAt);
+            MatchSession nextRoundSession = scoredSession.nextRound()
+                    .withClassSelection(resultRevealsAt
+                            .plusMillis(ROUND_RESULT_HOLD_MILLIS)
+                            .plusSeconds(CLASS_SELECTION_SECONDS));
             for (MatchPlayer player : nextRoundSession.players()) {
                 activeSessionsByUserId.put(player.userId(), nextRoundSession);
                 events.add(eventForPlayer(
                         nextRoundSession,
                         player,
                         "MATCH_ROUND_READY",
-                        "COUNTDOWN",
+                        "CLASS_SELECT",
                         null,
-                        "Round " + nextRoundSession.roundNumber() + " ready.",
+                        "Round " + nextRoundSession.roundNumber() + " loadout ready.",
                         resultDelayMillis,
                         playbackStartsAt,
                         resultRevealsAt));
@@ -426,31 +457,47 @@ public class MatchmakingService {
                 playback.message());
     }
 
+    private MatchPlaybackDTO withWinner(MatchPlaybackDTO playback, UUID winnerUserId, String message) {
+        return new MatchPlaybackDTO(playback.matchId(), playback.rulesetVersion(), playback.status(),
+                playback.initialState(), playback.frames(), winnerUserId == null ? "DRAW" : "FIGHTER_WIN",
+                winnerUserId, message);
+    }
+
+    private Map<UUID, Double> roundLossScores(MatchSession session, MatchPlaybackDTO playback) {
+        Map<UUID, Double> scores = new HashMap<>();
+        session.players().forEach(player -> scores.put(player.userId(), 0.0));
+        if (playback.winnerUserId() == null) return Map.copyOf(scores);
+        MatchPlayer winner = playerForUser(session, playback.winnerUserId());
+        MatchPlayer loser = session.players().stream().filter(player -> !player.userId().equals(winner.userId())).findFirst().orElseThrow();
+        if (loser.slot() == 2) {
+            int finalCoreHp = playback.frames().isEmpty() ? 250 : playback.frames().get(playback.frames().size() - 1).obstacles().stream()
+                    .filter(obstacle -> "core".equals(obstacle.type())).mapToInt(MatchPlaybackDTO.ObstaclePlacementDTO::hp).findFirst().orElse(250);
+            scores.put(loser.userId(), Math.max(0.0, Math.min(1.0, (250.0 - finalCoreHp) / 250.0)));
+        } else {
+            int elapsedMs = playback.frames().isEmpty() ? 0 : playback.frames().get(playback.frames().size() - 1).elapsedMs();
+            scores.put(loser.userId(), Math.max(0.0, Math.min(1.0, elapsedMs / 60_000.0)));
+        }
+        return Map.copyOf(scores);
+    }
+
+    private UUID seriesWinner(MatchSession session) {
+        MatchPlayer first = session.players().get(0);
+        MatchPlayer second = session.players().get(1);
+        if (first.roundWins() != second.roundWins()) return first.roundWins() > second.roundWins() ? first.userId() : second.userId();
+        Map<UUID, Double> totals = new HashMap<>();
+        roundHistoryByMatchId.getOrDefault(session.matchId(), List.of()).forEach(round ->
+                round.lossScores().forEach((userId, score) -> totals.merge(userId, score, Double::sum)));
+        double firstScore = totals.getOrDefault(first.userId(), 0.0);
+        double secondScore = totals.getOrDefault(second.userId(), 0.0);
+        if (Math.abs(firstScore - secondScore) < 0.000001) return null;
+        return firstScore > secondScore ? first.userId() : second.userId();
+    }
+
     private long resultRevealDelayMillis(MatchPlaybackDTO playback) {
         int finalElapsedMs = playback.frames() == null || playback.frames().isEmpty()
                 ? 0
                 : playback.frames().get(playback.frames().size() - 1).elapsedMs();
         return Math.max(RESULT_REVEAL_BUFFER_MS, (long) finalElapsedMs + RESULT_REVEAL_BUFFER_MS);
-    }
-
-    private List<OutboundMatchmakingEvent> startObjectPlacement(MatchSession session, String type, String message) {
-        Instant objectPlacementEndsAt = Instant.now(clock).plusSeconds(OBJECT_PLACEMENT_SECONDS);
-        MatchSession timedPlacementSession = session.withObjectPlacement(objectPlacementEndsAt);
-        MatchSession placementSession = timedPlacementSession.withObstacles(
-                matchSimulationService.buildMatchObstacles(timedPlacementSession));
-        for (MatchPlayer player : placementSession.players()) {
-            activeSessionsByUserId.put(player.userId(), placementSession);
-            updateParticipantSelectedClass(placementSession.matchId(), player);
-        }
-        return placementSession.players().stream()
-                .map(player -> eventForPlayer(
-                        placementSession,
-                        player,
-                        type,
-                        "OBJECT_PLACEMENT",
-                        null,
-                        message))
-                .toList();
     }
 
     private List<OutboundMatchmakingEvent> startCountdown(MatchSession session, String type, String message) {
@@ -475,79 +522,11 @@ public class MatchmakingService {
     private List<MatchPlaybackDTO.ObstaclePlacementDTO> normalizeObjectPlacements(
             MatchPlayer player,
             List<MatchPlaybackDTO.ObstaclePlacementDTO> objects) {
-        if (objects == null) return List.of();
-        return objects.stream()
-                .filter(object -> object != null && isPlaceableObjectType(object.type()))
-                .limit(OBJECT_PLACEMENT_LIMIT)
-                .map(object -> normalizeObjectPlacement(player, object))
-                .toList();
-    }
-
-    private MatchPlaybackDTO.ObstaclePlacementDTO normalizeObjectPlacement(
-            MatchPlayer player,
-            MatchPlaybackDTO.ObstaclePlacementDTO object) {
-        String type = object.type();
-        int defaultSize = "healthPack".equals(type) ? 42 : isBuffPickupType(type) ? BUFF_PICKUP_SIZE : 120;
-        int size = (int) Math.max(16, Math.min(240, object.size() > 0 ? object.size() : defaultSize));
-        double radius = size / 2.0;
-        double minY = player.slot() == 1 ? radius : 800.0 * 2.0 / 3.0 + radius;
-        double maxY = player.slot() == 1 ? 800.0 / 3.0 - radius : 800.0 - radius;
-        return new MatchPlaybackDTO.ObstaclePlacementDTO(
-                object.id(),
-                type,
-                clamp(object.x(), radius, 800.0 - radius),
-                clamp(object.y(), minY, Math.max(minY, maxY)),
-                size,
-                isWallType(type) ? snapWallRotation(object.rotation()) : 0.0);
+        return List.of();
     }
 
     private List<MatchPlaybackDTO.ObstaclePlacementDTO> combinedObjectPlacements(MatchSession session) {
-        List<MatchPlaybackDTO.ObstaclePlacementDTO> matchObjects = session.obstacles() == null
-                ? List.of()
-                : session.obstacles();
-        List<MatchPlaybackDTO.ObstaclePlacementDTO> orderedObjects = session.players().stream()
-                .flatMap(player -> session.objectPlacementsByUserId()
-                        .getOrDefault(player.userId(), List.of())
-                        .stream())
-                .limit(MAX_MATCH_OBJECTS)
-                .toList();
-        List<MatchPlaybackDTO.ObstaclePlacementDTO> labeledObjects = new ArrayList<>(
-                matchObjects != null ? matchObjects : List.of());
-        for (int index = 0; index < orderedObjects.size(); index += 1) {
-            MatchPlaybackDTO.ObstaclePlacementDTO object = orderedObjects.get(index);
-            labeledObjects.add(new MatchPlaybackDTO.ObstaclePlacementDTO(
-                    "object_" + (index + 1),
-                    object.type(),
-                    object.x(),
-                    object.y(),
-                    object.size(),
-                    object.rotation(),
-                    object.hp()));
-        }
-        return labeledObjects;
-    }
-
-    private boolean isPlaceableObjectType(String type) {
-        return "healthPack".equals(type)
-                || "projectileWall".equals(type)
-                || "bouncyWall".equals(type);
-    }
-
-    private boolean isWallType(String type) {
-        return "projectileWall".equals(type) || "bouncyWall".equals(type);
-    }
-
-    private boolean isBuffPickupType(String type) {
-        return "overdrive".equals(type) || "barrier".equals(type) || "inhibition".equals(type);
-    }
-
-    private double snapWallRotation(double rotation) {
-        return ((Math.round(rotation / 45.0) * 45.0) % 360.0 + 360.0) % 360.0;
-    }
-
-    private double clamp(double value, double min, double max) {
-        if (!Double.isFinite(value)) return min;
-        return Math.max(min, Math.min(max, value));
+        return List.of();
     }
 
     private OutboundMatchmakingEvent waitingEvent(UUID userId, String username, String principalName) {
@@ -578,13 +557,111 @@ public class MatchmakingService {
                         List.of(),
                         List.of(),
                         null,
+                        List.of(),
                         ROUND_LOGIC_BLOCK_LIMIT));
     }
 
     private String normalizeSelectedClass(String selectedClass) {
+        if (selectedClass != null && selectedClass.matches("custom:[A-Za-z0-9]{0,6}:(?:[0-9]|1[0-2])(?:,(?:[0-9]|1[0-2])){3}")) return selectedClass;
+        if ("custom".equals(selectedClass)) return "custom";
         if ("ranged".equals(selectedClass)) return "ranged";
         if ("mage".equals(selectedClass)) return "mage";
         return "melee";
+    }
+
+    private String submissionLoadoutId(ModelSubmission submission) {
+        if (submission == null || submission.getModelArtifacts() == null) return null;
+        try {
+            JsonNode loadout = jsonMapper.readTree(submission.getModelArtifacts()).path("loadout");
+            if (!loadout.isObject()) return null;
+            List<String> selectedCodes = new ArrayList<>();
+            loadout.path("abilities").forEach(ability -> {
+                String code = ABILITY_CODES.get(ability.asText());
+                if (code != null) selectedCodes.add(code);
+            });
+            selectedCodes.sort(String::compareTo);
+            JsonNode stats = loadout.path("statPoints");
+            String points = stats.path("maxHp").asInt(0)
+                    + "," + stats.path("moveSpeed").asInt(0)
+                    + "," + stats.path("attackDamage").asInt(0)
+                    + "," + stats.path("attackSpeed").asInt(0);
+            return "custom:" + String.join("", selectedCodes) + ":" + points;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private void validateRoundLoadoutBudget(String loadout, int roundNumber) {
+        if (loadout == null || !loadout.startsWith("custom:")) return;
+        String[] parts = loadout.split(":", -1);
+        String[] points = parts.length == 3 ? parts[2].split(",", -1) : new String[0];
+        int total = 0;
+        try {
+            for (String point : points) total += Integer.parseInt(point);
+        } catch (NumberFormatException ex) {
+            throw new AuthException("bot loadout stat points are invalid");
+        }
+        if (points.length != 4 || total > Math.min(TOTAL_ROUNDS, Math.max(1, roundNumber)) * 4) {
+            throw new AuthException("bot loadout exceeds this round's stat point budget");
+        }
+    }
+
+    private void validateRoundAbilityDraft(MatchSession session, MatchPlayer player, String nextLoadout) {
+        if (nextLoadout == null || !nextLoadout.startsWith("custom:")) return;
+        int roundNumber = session.roundNumber();
+        String nextCodes = nextLoadout.split(":", -1)[1];
+        String previousLoadout = player.selectedClass();
+        String previousCodes = previousLoadout != null && previousLoadout.startsWith("custom:")
+                ? previousLoadout.split(":", -1)[1]
+                : "";
+        Set<Integer> previous = previousCodes.chars().boxed().collect(java.util.stream.Collectors.toSet());
+        Set<Integer> next = nextCodes.chars().boxed().collect(java.util.stream.Collectors.toSet());
+        Set<Integer> offered = abilityOffers(session).stream()
+                .map(ABILITY_CODES::get)
+                .filter(java.util.Objects::nonNull)
+                .map(code -> (int) code.charAt(0))
+                .collect(java.util.stream.Collectors.toSet());
+        Set<Integer> drafted = new java.util.HashSet<>(next);
+        drafted.removeAll(previous);
+        int requiredPicks = ROUND_PICK_COUNTS.getOrDefault(roundNumber, 0);
+        if (!next.containsAll(previous) || drafted.size() != requiredPicks
+                || !offered.containsAll(drafted) || next.size() > 6) {
+            throw new AuthException("bot loadout must retain prior abilities and choose exactly " + requiredPicks + " abilities from this round's offers");
+        }
+    }
+
+    private List<String> abilityOffers(MatchSession session) {
+        List<String> offers = new ArrayList<>(ROUND_ABILITIES.getOrDefault(session.roundNumber(), List.of()));
+        long seed = session.simulationSeed() ^ (0x9E3779B97F4A7C15L * session.roundNumber());
+        Collections.shuffle(offers, new Random(seed));
+        return List.copyOf(offers.subList(0, Math.min(ROUND_OFFER_COUNTS.getOrDefault(session.roundNumber(), 0), offers.size())));
+    }
+
+    private MatchSession withDefaultAbilitySelections(MatchSession session) {
+        MatchSession result = session;
+        for (MatchPlayer player : session.players()) {
+            if (player.classSelected()) continue;
+            String current = player.selectedClass() != null && player.selectedClass().startsWith("custom:")
+                    ? player.selectedClass() : "custom::0,0,0,0";
+            String[] parts = current.split(":", -1);
+            String additions = automaticAbilityPicks(session, player).stream()
+                    .map(ABILITY_CODES::get)
+                    .sorted()
+                    .collect(java.util.stream.Collectors.joining());
+            String abilities = (parts[1] + additions).chars().sorted()
+                    .mapToObj(value -> Character.toString((char) value))
+                    .collect(java.util.stream.Collectors.joining());
+            result = result.withSelectedClass(player.userId(), "custom:" + abilities + ":" + parts[2], true);
+        }
+        return result;
+    }
+
+    private List<String> automaticAbilityPicks(MatchSession session, MatchPlayer player) {
+        List<String> picks = new ArrayList<>(abilityOffers(session));
+        long seed = session.simulationSeed() ^ player.userId().getMostSignificantBits()
+                ^ player.userId().getLeastSignificantBits() ^ (0xD1B54A32D192ED03L * session.roundNumber());
+        Collections.shuffle(picks, new Random(seed));
+        return picks.subList(0, Math.min(ROUND_PICK_COUNTS.getOrDefault(session.roundNumber(), 0), picks.size()));
     }
 
     private Match createMatch(QueuedPlayer firstPlayer, QueuedPlayer secondPlayer) {
@@ -734,6 +811,13 @@ public class MatchmakingService {
             return;
         }
 
+        if (session.roundNumber() == 3) {
+            if (currentBlocks.size() > ROUND_LOGIC_BLOCK_LIMIT) {
+                throw new AuthException("round 3 exceeds the per-round logic block limit");
+            }
+            return;
+        }
+
         Map<Integer, Map<String, String>> blocksByRound = new HashMap<>();
         Map<String, Integer> introducedRoundById = new HashMap<>();
         for (RoundSubmissionRecord round : history) {
@@ -767,9 +851,9 @@ public class MatchmakingService {
                         && (!currentlyPresent || !currentBlocks.get(id).equals(previousBlocks.get(id)))) {
                     throw new AuthException("logic blocks from two or more rounds ago are locked");
                 }
-            } else if (previousWinner && presentLastRound && currentlyPresent
+            } else if (presentLastRound && currentlyPresent
                     && !currentBlocks.get(id).equals(previousBlocks.get(id))) {
-                throw new AuthException("the previous round winner may only delete prior-round logic blocks");
+                throw new AuthException("previous-round logic blocks may only be deleted");
             }
         }
     }
@@ -804,6 +888,14 @@ public class MatchmakingService {
 
     private Map<String, String> blockFingerprints(JsonNode brain) {
         Map<String, String> fingerprints = new HashMap<>();
+        JsonNode columns = brain != null ? brain.get("columns") : null;
+        if (columns != null && columns.isArray()) {
+            columns.forEach(column -> addTreeFingerprints(
+                    fingerprints,
+                    column.get("branches"),
+                    "column:" + fieldText(column, "id") + ":" + fieldText(column, "createdOrder")));
+            return fingerprints;
+        }
         JsonNode blocks = brain != null ? brain.get("blocks") : null;
         if (blocks != null && blocks.isArray()) {
             blocks.forEach(block -> addBlockFingerprint(fingerprints, block, "root"));
@@ -822,6 +914,15 @@ public class MatchmakingService {
             });
         }
         return fingerprints;
+    }
+
+    private void addTreeFingerprints(Map<String, String> fingerprints, JsonNode branches, String context) {
+        if (branches == null || !branches.isArray()) return;
+        branches.forEach(branch -> {
+            String branchContext = context + ":" + fieldText(branch, "branchType") + ":" + fieldText(branch, "createdOrder");
+            addBlockFingerprint(fingerprints, branch, branchContext);
+            addTreeFingerprints(fingerprints, branch.get("children"), branchContext + ":" + fieldText(branch, "id"));
+        });
     }
 
     private void addBlockFingerprint(Map<String, String> fingerprints, JsonNode block, String context) {
@@ -979,6 +1080,7 @@ public class MatchmakingService {
                         session.obstacles(),
                         roundBrainsForPlayer(session.matchId(), player.userId()),
                         previousRoundWon(session.matchId(), player.userId()),
+                        abilityOffers(session),
                         ROUND_LOGIC_BLOCK_LIMIT),
                 delayMillis);
     }
@@ -996,7 +1098,8 @@ public class MatchmakingService {
     private record RoundSubmissionRecord(
             int roundNumber,
             UUID winnerUserId,
-            Map<UUID, ModelSubmission> submissionsByUser) {
+            Map<UUID, ModelSubmission> submissionsByUser,
+            Map<UUID, Double> lossScores) {
     }
 
     public record MatchPlayer(
@@ -1123,7 +1226,7 @@ public class MatchmakingService {
                                     null,
                                     player.roundWins(),
                                     player.selectedClass(),
-                                    player.classSelected()))
+                                    false))
                             .toList(),
                     classSelectionEndsAt,
                     null,
@@ -1131,8 +1234,13 @@ public class MatchmakingService {
                     null,
                     roundNumber + 1,
                     winsRequired,
-                    obstacles,
-                    objectPlacementsByUserId);
+                    List.of(),
+                    Map.of());
+        }
+
+        MatchSession withClassSelection(Instant deadline) {
+            return new MatchSession(matchId, simulationSeed, players, deadline, null, null, null,
+                    roundNumber, winsRequired, List.of(), Map.of());
         }
 
         MatchSession withSelectedClass(UUID userId, String selectedClass, boolean classSelected) {
@@ -1176,7 +1284,7 @@ public class MatchmakingService {
                                     player.finished(),
                                     player.modelSubmissionId(),
                                     player.roundWins(),
-                                    player.selectedClass() != null ? player.selectedClass() : "melee",
+                                    player.selectedClass() != null ? player.selectedClass() : "custom::0,0,0,0",
                                     true))
                             .toList(),
                     classSelectionEndsAt,
