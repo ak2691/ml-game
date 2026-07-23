@@ -1,13 +1,5 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
-
-function websocketUrl() {
-    const apiUrl = new URL(API_BASE_URL);
-    apiUrl.protocol = apiUrl.protocol === "https:" ? "wss:" : "ws:";
-    apiUrl.pathname = "/ws";
-    apiUrl.search = "";
-    apiUrl.hash = "";
-    return apiUrl.toString();
-}
+import { API_BASE_URL, websocketUrl } from "../config/api";
+import { ensureCsrfHeaders } from "../security/csrf";
 
 function frame(command, headers = {}, body = "") {
     const headerLines = Object.entries(headers).map(([key, value]) => `${key}:${value}`);
@@ -33,7 +25,7 @@ export function createMatchmakingClient({ onEvent, onStatus }) {
     let socket = null;
     let connected = false;
     let subscriptionId = 0;
-    const websocketHost = new URL(API_BASE_URL).host;
+    const websocketHost = new URL(websocketUrl()).host;
 
     const sendFrame = (command, headers = {}, body = "") => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
@@ -41,15 +33,25 @@ export function createMatchmakingClient({ onEvent, onStatus }) {
     };
 
     return {
-        connect() {
-            socket = new WebSocket(websocketUrl());
+        async connect() {
             onStatus?.("CONNECTING");
+
+            let csrfHeaders;
+            try {
+                csrfHeaders = await ensureCsrfHeaders("POST", API_BASE_URL);
+            } catch {
+                onStatus?.("ERROR");
+                return;
+            }
+
+            socket = new WebSocket(websocketUrl());
 
             socket.addEventListener("open", () => {
                 sendFrame("CONNECT", {
                     "accept-version": "1.2",
                     host: websocketHost,
                     "heart-beat": "0,0",
+                    ...csrfHeaders,
                 });
             });
 

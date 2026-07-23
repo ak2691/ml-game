@@ -17,7 +17,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 @Entity
-@Table(name = "validation_results")
+@Table(name = "bot_brain_validation_results")
 public class ValidationResult {
 
     @Id
@@ -25,7 +25,7 @@ public class ValidationResult {
     private UUID id;
 
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "model_submission_id", nullable = false)
+    @JoinColumn(name = "bot_brain_submission_id", nullable = false)
     private ModelSubmission modelSubmission;
 
     @Enumerated(EnumType.STRING)

@@ -96,20 +96,26 @@ public record MatchPlaybackDTO(
             int slotOneCaptureMs,
             int slotTwoCaptureMs,
             Boolean armed,
-            Integer timerMs) {
+            Integer timerMs,
+            Double velocityX,
+            Double velocityY,
+            Integer shotVisualMs) {
+        public ObstaclePlacementDTO(String id, String type, double x, double y, int size, double rotation, int hp, int slotOneCaptureMs, int slotTwoCaptureMs, Boolean armed, Integer timerMs) {
+            this(id, type, x, y, size, rotation, hp, slotOneCaptureMs, slotTwoCaptureMs, armed, timerMs, null, null, null);
+        }
         public ObstaclePlacementDTO(String id, String type, double x, double y, int size, double rotation, int hp, int slotOneCaptureMs, int slotTwoCaptureMs) {
-            this(id, type, x, y, size, rotation, hp, slotOneCaptureMs, slotTwoCaptureMs, null, null);
+            this(id, type, x, y, size, rotation, hp, slotOneCaptureMs, slotTwoCaptureMs, null, null, null, null, null);
         }
         public ObstaclePlacementDTO(String id, String type, double x, double y, int size) {
-            this(id, type, x, y, size, 0.0, 0, 0, 0, null, null);
+            this(id, type, x, y, size, 0.0, 0, 0, 0, null, null, null, null, null);
         }
 
         public ObstaclePlacementDTO(String id, String type, double x, double y, int size, double rotation) {
-            this(id, type, x, y, size, rotation, 0, 0, 0, null, null);
+            this(id, type, x, y, size, rotation, 0, 0, 0, null, null, null, null, null);
         }
 
         public ObstaclePlacementDTO(String id, String type, double x, double y, int size, double rotation, int hp) {
-            this(id, type, x, y, size, rotation, hp, 0, 0, null, null);
+            this(id, type, x, y, size, rotation, hp, 0, 0, null, null, null, null, null);
         }
     }
 

@@ -1,17 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AuthContext } from "./auth-context";
-import { csrfHeaders } from "../security/csrf";
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
+import { ensureCsrfHeaders } from "../security/csrf";
+import { apiUrl } from "../config/api";
 
 async function authFetch(path, options = {}) {
     const method = options.method ?? "GET";
-    const response = await fetch(`${API_BASE_URL}${path}`, {
+    const response = await fetch(apiUrl(path), {
         ...options,
         credentials: "include",
         headers: {
             "Content-Type": "application/json",
-            ...csrfHeaders(method),
+            ...(await ensureCsrfHeaders(method)),
             ...(options.headers ?? {}),
         },
     });

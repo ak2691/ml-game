@@ -4,6 +4,7 @@ import {
     FIREBALL_CHARGES_MAX,
 } from "../combat/Moves.js";
 import { DEFAULT_BOT_LOADOUT, botStatsForLoadout, botStatsForSandboxLoadout, decodeBotLoadout, decodeSandboxLoadout, normalizedBotLoadout } from "../loadout/BotLoadout.js";
+import { withoutFighterStatuses } from "../combat/DefensiveState.js";
 import {
     ARENA_HEIGHT_UNITS,
     ARENA_WIDTH_UNITS,
@@ -15,6 +16,7 @@ import {
 
 export const MAIN_SHAPE = {
     id: "main",
+    username: "Player",
     type: "circle",
     slot: 1,
     x: ARENA_WIDTH_UNITS / 2,
@@ -71,6 +73,7 @@ export function buildOpponentShape(opponent) {
     const slot = Number(opponent?.slot) === 1 ? 1 : 2;
     return {
         id: "opponent-model",
+        username: opponent?.username ?? "Opponent",
         type: "opponentModel",
         slot,
         x: DUEL_SLOT_TWO_X,
@@ -124,7 +127,7 @@ export function buildOpponentShape(opponent) {
         velocityX: 0,
         velocityY: 0,
         slowedMs: 0,
-        opponentUsername: opponent?.username,
+        opponentUsername: opponent?.username ?? "Opponent",
     };
 }
 
@@ -149,6 +152,7 @@ export function buildMatchSpawnShapes(matchContext) {
             y: playerSlot === 1 ? DUEL_SLOT_ONE_Y : DUEL_SLOT_TWO_Y,
             rotation: playerSlot === 1 ? 90 : 270,
             slot: playerSlot,
+            username: matchContext?.player?.username ?? "Player",
         }),
         resetFighterShape({
             ...buildOpponentShape(matchContext?.opponent),
@@ -158,6 +162,7 @@ export function buildMatchSpawnShapes(matchContext) {
             y: opponentSlot === 1 ? DUEL_SLOT_ONE_Y : DUEL_SLOT_TWO_Y,
             rotation: opponentSlot === 1 ? 90 : 270,
             slot: opponentSlot,
+            username: matchContext?.opponent?.username ?? "Opponent",
         }),
     ];
     return fighters;
@@ -181,7 +186,7 @@ export function resetFighterShape(shape) {
         ?? (String(shape.combatClass).startsWith("custom:") ? decodeBotLoadout(shape.combatClass) : DEFAULT_BOT_LOADOUT));
     const abilities = loadout.abilities;
     const stats = sandbox ? botStatsForSandboxLoadout(loadout) : botStatsForLoadout(loadout);
-    return {
+    return withoutFighterStatuses({
         ...shape,
         combatClass: sandbox ? shape.combatClass : "custom",
         loadout,
@@ -193,6 +198,8 @@ export function resetFighterShape(shape) {
         moveSpeed: stats.moveSpeed,
         attackDamageMultiplier: stats.attackDamagePercent / 100,
         attackSpeedMultiplier: stats.attackSpeedPercent / 100,
+        matchElapsedMs: 0,
+        customVariables: {},
         swingCooldownMs: 0,
         swingActiveMs: 0,
         blockCooldownMs: 0,
@@ -238,7 +245,7 @@ export function resetFighterShape(shape) {
         velocityY: 0,
         slowedMs: 0,
         silencedMs: 0,
-    };
+    });
 }
 
 export function buildAutoPlayStartShapes(currentShapes, matchContext, isMatchTraining) {

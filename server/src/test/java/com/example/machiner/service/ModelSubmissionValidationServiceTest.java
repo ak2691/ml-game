@@ -25,9 +25,8 @@ class ModelSubmissionValidationServiceTest {
 
         assertThat(result.isAccepted()).isTrue();
         assertThat(result.getStatus()).isEqualTo("ACCEPTED");
-        assertThat(result.getComputedModelHash()).startsWith("sha256:");
+        assertThat(result.getComputedModelHash()).isNull();
         assertThat(result.getWarnings()).contains(
-                "modelHash was not provided; server computed one from submitted brain",
                 "trainingDurationMs will be computed from the server-owned training session");
     }
 
@@ -35,7 +34,7 @@ class ModelSubmissionValidationServiceTest {
     void acceptsEmptyLogicBlockList() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setBrain(jsonMapper.readTree("""
-                {"version":"melee-strategy-v1","blocks":[]}
+                {"version":"melee-logic-tree-v1","blocks":[]}
                 """));
 
         var result = service.validate(payload);
@@ -48,7 +47,7 @@ class ModelSubmissionValidationServiceTest {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-strategy-v1",
+                  "version":"melee-logic-tree-v1",
                   "loadout":{
                     "abilities":["swing","block","rail_shot","micro_dash","orbital_strike","null_zone"],
                     "statPoints":{"maxHp":3,"moveSpeed":3,"attackDamage":3,"attackSpeed":3}
@@ -66,7 +65,7 @@ class ModelSubmissionValidationServiceTest {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[],
                   "clusters":[
                     {
@@ -133,7 +132,7 @@ class ModelSubmissionValidationServiceTest {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {
                       "id":"block-1",
@@ -181,7 +180,7 @@ class ModelSubmissionValidationServiceTest {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {
                       "id":"block-1",
@@ -226,7 +225,7 @@ class ModelSubmissionValidationServiceTest {
         payload.setSelectedClass("ranged");
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {
                       "id":"block-1",
@@ -256,31 +255,30 @@ class ModelSubmissionValidationServiceTest {
     }
 
     @Test
-    void acceptsClientHashMismatchButWarnsThatServerHashIsAuthoritative() throws Exception {
+    void ignoresLegacyClientModelHash() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setModelHash("sha256:tampered");
 
         var result = service.validate(payload);
 
         assertThat(result.isAccepted()).isTrue();
-        assertThat(result.getComputedModelHash()).isNotEqualTo(payload.getModelHash());
-        assertThat(result.getWarnings()).contains(
-                "submitted modelHash does not match server-computed hash; server hash is authoritative");
+        assertThat(result.getComputedModelHash()).isNull();
+        assertThat(result.getWarnings()).noneMatch(warning -> warning.contains("modelHash"));
     }
 
     @Test
-    void rejectsUnsupportedContractVersions() throws Exception {
+    void rejectsUnsupportedBrainSchemaVersion() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
-        payload.setFeatureSchemaVersion("combat-features-v2");
+        ((tools.jackson.databind.node.ObjectNode) payload.getBrain()).put("version", "future-brain-v2");
 
         var result = service.validate(payload);
 
         assertThat(result.isAccepted()).isFalse();
-        assertThat(result.getErrors()).contains("featureSchemaVersion must be duel-logic-features-v1");
+        assertThat(result.getErrors()).contains("brain.version must be melee-logic-tree-v1");
     }
 
     @Test
-    void rejectsTrainingFieldsForDeterministicBrains() throws Exception {
+    void ignoresLegacyTrainingFields() throws Exception {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setTrainingSteps(1);
         payload.setTrainingMetrics(jsonMapper.readTree("""
@@ -289,11 +287,8 @@ class ModelSubmissionValidationServiceTest {
 
         var result = service.validate(payload);
 
-        assertThat(result.isAccepted()).isFalse();
-        assertThat(result.getErrors()).contains(
-                "trainingSteps must be 0 for deterministic bot brains",
-                "trainingMetrics.trainingSamples must be 0 for deterministic bot brains",
-                "trainingMetrics.epochsCompleted must be 0 for deterministic bot brains");
+        assertThat(result.isAccepted()).isTrue();
+        assertThat(result.getErrors()).isEmpty();
     }
 
     @Disabled("Actions are loadout-gated instead of class-gated")
@@ -303,7 +298,7 @@ class ModelSubmissionValidationServiceTest {
         payload.setSelectedClass("ranged");
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {"id":"block-1","priority":1,"action":"dash","conditions":[{"type":"my_dash_ready"}]}
                   ]
@@ -324,7 +319,7 @@ class ModelSubmissionValidationServiceTest {
         payload.setSelectedClass("melee");
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {"id":"block-1","priority":1,"action":"dash","conditions":[{"type":"my_dash_ready"}]}
                   ]
@@ -342,7 +337,7 @@ class ModelSubmissionValidationServiceTest {
         payload.setSelectedClass("ranged");
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {"id":"block-1","priority":1,"action":"move_outward","conditions":[{"type":"opponent_shield_up"}]}
                   ]
@@ -361,7 +356,7 @@ class ModelSubmissionValidationServiceTest {
         rangedPayload.setSelectedClass("ranged");
         rangedPayload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {"id":"block-1","priority":1,"action":"throw_grenade","conditions":[{"type":"my_grenade_ready"}]}
                   ]
@@ -376,7 +371,7 @@ class ModelSubmissionValidationServiceTest {
         meleePayload.setSelectedClass("melee");
         meleePayload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {"id":"block-1","priority":1,"action":"throw_grenade","conditions":[{"type":"my_grenade_ready"}]}
                   ]
@@ -396,7 +391,7 @@ class ModelSubmissionValidationServiceTest {
         ModelSubmissionPayloadDTO payload = validPayload();
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {"id":"block-1","priority":1,"action":"move_north","conditions":[{"type":"always"}]}
                   ]
@@ -414,7 +409,7 @@ class ModelSubmissionValidationServiceTest {
         payload.setSelectedClass("melee");
         payload.setBrain(jsonMapper.readTree("""
                 {
-                  "version":"melee-logic-blocks-v2",
+                  "version":"melee-logic-tree-v1",
                   "blocks":[
                     {"id":"block-1","priority":1,"action":"dash_north","conditions":[{"type":"always"}]}
                   ]
@@ -546,6 +541,53 @@ class ModelSubmissionValidationServiceTest {
                 .contains("brain.columns[0].branches[0].actions[0].action requires equipped ability phase_strike");
     }
 
+    @Test
+    void acceptsBoundedCustomVariableConditionAndMutationNode() throws Exception {
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("""
+                {"version":"melee-logic-tree-v1","customVariables":[{"id":"custom.counter","name":"Counter","valueType":"number","initialValue":0}],
+                 "columns":[{"branches":[{"branchType":"if","conditions":[{"type":"expression","left":"custom.counter","comparator":"lt","right":{"type":"number","value":10}}],"actions":[{"action":"variable","variableId":"custom.counter","operation":"add","value":1}],"children":[]}]}]}
+                """));
+
+        assertThat(service.validate(payload).getErrors()).isEmpty();
+    }
+
+    @Test
+    void rejectsCustomVariablesWhoseDerivedConditionsExceedSlotBudget() throws Exception {
+        String variables = java.util.stream.IntStream.range(0, 51)
+                .mapToObj(index -> "{\"id\":\"custom.v" + index + "\",\"name\":\"Variable " + index + "\",\"valueType\":\"boolean\",\"initialValue\":false,\"conditions\":[{\"type\":\"always\"}]}")
+                .collect(java.util.stream.Collectors.joining(","));
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("{\"version\":\"melee-logic-tree-v1\",\"customVariables\":[" + variables + "],\"columns\":[]}"));
+
+        assertThat(service.validate(payload).getErrors()).contains("brain.customVariables exceeds the 100 variable-slot limit");
+    }
+
+    @Test
+    void rejectsMoreThanOneHundredEmptyBrainNodes() throws Exception {
+        String columns = java.util.stream.IntStream.range(0, 101)
+                .mapToObj(index -> "{\"id\":\"column-" + index + "\",\"name\":\"Node " + index + "\",\"branches\":[]}")
+                .collect(java.util.stream.Collectors.joining(","));
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("{\"version\":\"melee-logic-tree-v1\",\"customVariables\":[],\"columns\":[" + columns + "]}"));
+
+        assertThat(service.validate(payload).getErrors()).contains("brain.columns exceeds the column limit");
+    }
+
+    @Test
+    void derivedVariableUsesChargeTheirFullCostToTheConditionBudget() throws Exception {
+        String derived = java.util.stream.IntStream.range(0, 99)
+                .mapToObj(index -> "{\"type\":\"always\"}")
+                .collect(java.util.stream.Collectors.joining(","));
+        String uses = java.util.stream.IntStream.range(0, 3)
+                .mapToObj(index -> "{\"branchType\":\"" + (index == 0 ? "if" : "else_if") + "\",\"conditions\":[{\"type\":\"expression\",\"left\":\"custom.derived\",\"comparator\":\"eq\",\"right\":{\"type\":\"boolean\",\"value\":true}}],\"actions\":[],\"children\":[]}")
+                .collect(java.util.stream.Collectors.joining(","));
+        ModelSubmissionPayloadDTO payload = validPayload();
+        payload.setBrain(jsonMapper.readTree("{\"version\":\"melee-logic-tree-v1\",\"customVariables\":[{\"id\":\"custom.derived\",\"name\":\"Derived\",\"valueType\":\"boolean\",\"initialValue\":false,\"conditions\":[" + derived + "]}],\"columns\":[{\"branches\":[" + uses + "]}]}"));
+
+        assertThat(service.validate(payload).getErrors()).contains("brain exceeds the total condition limit including derived custom variables");
+    }
+
     private ModelSubmissionPayloadDTO validPayload() throws Exception {
         ModelSubmissionPayloadDTO payload = new ModelSubmissionPayloadDTO();
         payload.setArchitectureVersion("deterministic-logic-v1");
@@ -562,7 +604,7 @@ class ModelSubmissionValidationServiceTest {
 
         JsonNode brain = jsonMapper.readTree("""
                 {
-                  "version": "melee-strategy-v1",
+                  "version": "melee-logic-tree-v1",
                   "blocks": [
                     {"id":"block-1","action":"move_inward","conditions":[]}
                   ]

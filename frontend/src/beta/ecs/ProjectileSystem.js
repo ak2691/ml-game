@@ -14,7 +14,7 @@ import { GRENADE_EXPLOSION_RADIUS } from "../combat/Abilities.js";
 import { clamp } from "../combat/geometry.js";
 import { abilityContract, EFFECT_TYPES } from "../combat/AbilityContracts.js";
 import { resolveShieldInteraction } from "../combat/ShieldSystem.js";
-import { ignoresHostileEffects } from "../combat/DefensiveState.js";
+import { ignoresHostileEffects, isProjectileHittable } from "../combat/DefensiveState.js";
 
 export function createGrenadeEntity(fighter, damageMultiplier = 1) {
     const angle = Number(fighter.rotation ?? 0) * Math.PI / 180;
@@ -89,7 +89,8 @@ function tickGrenades(grenades, fighters, world, combat) {
             continue;
         }
         const next = advanceGrenade(grenade, world);
-        const touchedFighter = fighters.some((fighter) => (fighter.id !== next.ownerId || next.reflected) && overlapsEntity(fighter, next));
+        const touchedFighter = fighters.some((fighter) => isProjectileHittable(fighter)
+            && (fighter.id !== next.ownerId || next.reflected) && overlapsEntity(fighter, next));
         const stoppedLongEnough = Math.hypot(next.velocityX ?? 0, next.velocityY ?? 0) <= 0.001
             && Number(next.stoppedMs ?? 0) >= GRENADE_STOP_FUSE_MS;
         if (touchedFighter || stoppedLongEnough) explosions.push(createGrenadeExplosion(next));
@@ -120,7 +121,8 @@ function tickFireballs(fireballs, fighters, world, combat) {
             y: fireball.y + Number(fireball.velocityY ?? 0),
             traveled: Number(fireball.traveled ?? 0) + Math.hypot(Number(fireball.velocityX ?? 0), Number(fireball.velocityY ?? 0)),
         };
-        const hit = nextFighters.find((fighter) => (fighter.id !== next.ownerId || next.reflected) && overlapsEntity(fighter, next));
+        const hit = nextFighters.find((fighter) => isProjectileHittable(fighter)
+            && (fighter.id !== next.ownerId || next.reflected) && overlapsEntity(fighter, next));
         if (hit) {
             const damageMultiplier = Number(next.damageMultiplier ?? 1);
             nextFighters = nextFighters.map((fighter) => {
@@ -128,8 +130,10 @@ function tickFireballs(fireballs, fighters, world, combat) {
                 if (ignoresHostileEffects(fighter)) return fighter;
                 const shield = resolveShieldInteraction(fighter, next, abilityContract("shoot_fireball").shieldInteraction);
                 if (shield.preventedEffects.has(EFFECT_TYPES.DAMAGE)) return shield.fighter;
+                const damaged = combat.applyDamageToShape(shield.fighter, FIREBALL_DAMAGE * damageMultiplier);
+                if (ignoresHostileEffects(damaged)) return damaged;
                 return {
-                    ...combat.applyDamageToShape(shield.fighter, FIREBALL_DAMAGE * damageMultiplier),
+                    ...damaged,
                     burnRemainingMs: FIREBALL_BURN_DURATION_MS,
                     // Refreshing burn extends its lifetime without postponing an
                     // already-running damage tick.

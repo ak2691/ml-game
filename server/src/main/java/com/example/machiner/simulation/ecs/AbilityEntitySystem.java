@@ -132,15 +132,17 @@ public final class AbilityEntitySystem {
         double current = Math.toDegrees(Math.atan2(entity.velocityY(), entity.velocityX()));
         double rotation = normalizeDegrees(current + clamp(angleDelta(current, desired), -8, 8));
         double directionX = Math.cos(Math.toRadians(rotation)), directionY = Math.sin(Math.toRadians(rotation));
-        if (ageMs % 1000 < stepMs && rayIntersectsCircle(x, y, directionX, directionY, 200,
-                target.entityX(), target.entityY(), target.entitySize() / 2.0)) {
+        boolean fired = ageMs % 1000 < stepMs && rayIntersectsCircle(x, y, directionX, directionY, 200,
+                target.entityX(), target.entityY(), target.entitySize() / 2.0);
+        if (fired) {
             if (!target.ignoresHostileEffects()
                     && !combat.shield(target, x, y, "hunter_drone").prevents(EffectType.DAMAGE)) {
                 combat.damageFromOwner(fighters, entity.ownerSlot(), target, 3);
             }
         }
         next.add(new ArenaEntity(entity.id(), entity.type(), entity.ownerSlot(), x, y, entity.size(),
-                directionX, directionY, entity.traveled(), ageMs, true, hp));
+                directionX, directionY, entity.traveled(), ageMs, true, hp,
+                fired ? 300 : Math.max(0, entity.shotVisualMs() - stepMs)));
     }
 
     private static <F extends AbilityEntityCombatant> void tickMines(

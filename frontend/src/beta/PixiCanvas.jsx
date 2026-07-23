@@ -6,7 +6,7 @@ import { MOVE_STATS } from "./combat/Moves.js";
 import { combatVisualRemainingMs, gunRayOpacity, healthBarPercent, prototypeVisualOpacity, swordSweepAngle, visualProgress } from "./combat/visualState.js";
 import { ARENA_HEIGHT_UNITS, ARENA_WIDTH_UNITS } from "./modelPayloads/arenaConstants.js";
 import { interpolatePosition } from "./pixi/snapshotInterpolation.js";
-import { activeFighterVisual, entityCaption, fighterStatusLabels, isFighterShape, pixiLayerForShape, shapeInterpolationMs } from "./pixi/pixiVisualState.js";
+import { activeFighterVisual, entityCaption, fighterStatusLabels, isFighterShape, pixiLayerForShape, projectileTrailStyle, shapeInterpolationMs } from "./pixi/pixiVisualState.js";
 import { centeredTextureFrame, createArenaTextureCache } from "./pixi/arenaTextureCache.js";
 import "./PixiCanvas.css";
 
@@ -36,7 +36,7 @@ export default function PixiCanvas({
     showEmptyAbilitySlot = false,
     measurementEnabled = false,
     measurementPoints = [],
-    onMeasurementPointsChange = () => {},
+    onMeasurementPointsChange = () => { },
 }) {
     const hostRef = useRef(null);
     const runtimeRef = useRef(null);
@@ -158,6 +158,7 @@ function createArenaRuntime(app, optionsRef) {
     let drag = null;
     let pan = null;
     let measurementSignature = null;
+    let measurementHoverPoint = null;
 
     function updateCamera() {
         const baseScale = Math.min(app.screen.width / ARENA_WIDTH_UNITS, app.screen.height / ARENA_HEIGHT_UNITS);
@@ -180,16 +181,10 @@ function createArenaRuntime(app, optionsRef) {
         baseSprite.eventMode = "none";
         const cachedEffects = new Map();
         const graphics = new Graphics();
-        const glyph = new Text({
-            text: isFighterShape(shape) ? (shape.id === "main" ? "M" : "OP") : "",
-            style: { fill: shape.id === "main" ? COLORS.player : COLORS.opponent, fontFamily: "monospace", fontSize: 13, fontWeight: "bold" },
-        });
-        glyph.anchor.set(0.5);
-        glyph.eventMode = "none";
-        const caption = new Text({ text: "", style: { fill: COLORS.white, fontFamily: "monospace", fontSize: 8, fontWeight: "bold", align: "center" } });
+        const caption = new Text({ text: "", style: { fill: COLORS.white, fontFamily: "monospace", fontSize: 13, fontWeight: "bold", align: "center" } });
         caption.anchor.set(0.5);
         caption.eventMode = "none";
-        container.addChild(baseSprite, graphics, glyph, caption);
+        container.addChild(baseSprite, graphics, caption);
         container.eventMode = "static";
         container.cursor = shape.locked || !optionsRef.current.editable ? "default" : "grab";
         container.hitArea = new Circle(0, 0, Math.max(12, Number(shape.size ?? (isFighterShape(shape) ? FIGHTER_SIZE : 30)) / 2 + 6));
@@ -198,7 +193,6 @@ function createArenaRuntime(app, optionsRef) {
             baseSprite,
             cachedEffects,
             graphics,
-            glyph,
             caption,
             shape,
             motion: { from: { x: shape.x, y: shape.y }, to: { x: shape.x, y: shape.y }, startedAt: performance.now(), durationMs: 0 },
@@ -290,10 +284,12 @@ function createArenaRuntime(app, optionsRef) {
         }
         drawPlacementOverlay(overlay, optionsRef.current.placementSide);
         const points = optionsRef.current.measurementPoints ?? [];
-        const nextMeasurementSignature = JSON.stringify(points);
+        if (!optionsRef.current.measurementEnabled) measurementHoverPoint = null;
+        const hoverPoint = measurementHoverPoint;
+        const nextMeasurementSignature = JSON.stringify({ points, hoverPoint });
         if (nextMeasurementSignature !== measurementSignature) {
             measurementSignature = nextMeasurementSignature;
-            drawMeasurements(measurementLayer, points);
+            drawMeasurements(measurementLayer, points, hoverPoint);
         }
     }
 
@@ -348,6 +344,12 @@ function createArenaRuntime(app, optionsRef) {
             const scale = camera.scale.x || 1;
             viewCenter = { x: pan.center.x - (event.global.x - pan.x) / scale, y: pan.center.y - (event.global.y - pan.y) / scale };
             updateCamera();
+        } else if (optionsRef.current.measurementEnabled) {
+            const point = camera.toLocal(event.global);
+            measurementHoverPoint = {
+                x: Math.round(clamp(point.x, 0, ARENA_WIDTH_UNITS)),
+                y: Math.round(clamp(point.y, 0, ARENA_HEIGHT_UNITS)),
+            };
         }
     });
     const endPointer = () => {
@@ -374,8 +376,12 @@ function createArenaRuntime(app, optionsRef) {
         updateCamera();
     };
     const preventContextMenu = (event) => event.preventDefault();
+    const clearMeasurementHover = () => {
+        measurementHoverPoint = null;
+    };
     app.canvas.addEventListener("wheel", handleWheel, { passive: false });
     app.canvas.addEventListener("contextmenu", preventContextMenu);
+    app.canvas.addEventListener("pointerleave", clearMeasurementHover);
     app.ticker.add(tick);
 
     return {
@@ -384,6 +390,7 @@ function createArenaRuntime(app, optionsRef) {
             app.ticker.remove(tick);
             app.canvas.removeEventListener("wheel", handleWheel);
             app.canvas.removeEventListener("contextmenu", preventContextMenu);
+            app.canvas.removeEventListener("pointerleave", clearMeasurementHover);
             textureCache.destroy();
         },
     };
@@ -403,7 +410,7 @@ function drawArena(graphics) {
 }
 
 function drawFighter(view, position, selected, effects, textureCache) {
-    const { shape, baseSprite, graphics, glyph, caption } = view;
+    const { shape, baseSprite, graphics, caption } = view;
     const opponent = shape.type === "opponentModel";
     const tone = opponent ? COLORS.opponent : COLORS.player;
     const radius = Number(shape.size ?? FIGHTER_SIZE) / 2;
@@ -415,16 +422,17 @@ function drawFighter(view, position, selected, effects, textureCache) {
 
     baseSprite.texture = fighterTexture(textureCache, opponent, radius, tone);
     baseSprite.rotation = rotation;
-    baseSprite.alpha = slowed ? 0.7 : 1;
+    const dead = Number(shape.hp ?? 0) <= 0;
+    baseSprite.alpha = dead ? 0.45 : slowed ? 0.7 : 1;
     if (dashing) showCachedEffect(view, "dash", dashTexture(textureCache, radius, tone), { rotation });
     if (selected) graphics.circle(0, 0, radius + 7).stroke({ color: COLORS.white, alpha: 0.72, width: 2 });
 
     if (shape.hp != null) {
         const width = 80;
-        graphics.roundRect(-width / 2, -radius - 24, width, 8, 2).fill(0x09090b).stroke({ color: 0x3f3f46, width: 1 });
-        graphics.rect(-width / 2 + 1, -radius - 23, (width - 2) * healthBarPercent(shape.hp, shape.maxHp) / 100, 6).fill(COLORS.hp);
+        graphics.roundRect(-width / 2, -radius - 16, width, 8, 2).fill(0x09090b).stroke({ color: 0x3f3f46, width: 1 });
+        graphics.rect(-width / 2 + 1, -radius - 15, (width - 2) * healthBarPercent(shape.hp, shape.maxHp) / 100, 6).fill(COLORS.hp);
     }
-    if (shape.preparingAbility) {
+    if (!dead && shape.preparingAbility) {
         const pulse = 0.55 + Math.sin(performance.now() / 85) * 0.25;
         graphics.circle(0, 0, radius + 12).stroke({ color: 0xfde68a, alpha: pulse, width: 3 });
     }
@@ -439,11 +447,29 @@ function drawFighter(view, position, selected, effects, textureCache) {
     }
     drawStatusIcons(graphics, shape, radius);
     drawStatusAnimations(graphics, shape, radius);
+    if (dead) drawDeadMarker(graphics);
 
-    glyph.visible = true;
-    glyph.style.fill = tone;
-    caption.visible = false;
+    caption.text = fighterDisplayName(shape);
+    caption.style.fill = tone;
+    caption.position.set(0, -radius - 29);
+    caption.visible = true;
     drawFighterWorldEffects(shape, position, effects, view, textureCache);
+}
+
+function fighterDisplayName(shape) {
+    return String(shape.username ?? shape.opponentUsername ?? (shape.id === "main" ? "Player" : "Opponent"));
+}
+
+function drawDeadMarker(graphics) {
+    const color = 0xf8fafc;
+    graphics.circle(0, -3, 15).fill({ color: 0x09090b, alpha: 0.9 }).stroke({ color, width: 2 });
+    graphics.circle(-5, -5, 3).fill(color);
+    graphics.circle(5, -5, 3).fill(color);
+    graphics.poly([-4, 2, 0, 6, 4, 2]).fill(color);
+    graphics.roundRect(-10, 8, 20, 8, 2).fill(color);
+    graphics.moveTo(-5, 9).lineTo(-5, 15).stroke({ color: 0x09090b, width: 2 });
+    graphics.moveTo(0, 9).lineTo(0, 15).stroke({ color: 0x09090b, width: 2 });
+    graphics.moveTo(5, 9).lineTo(5, 15).stroke({ color: 0x09090b, width: 2 });
 }
 
 function fighterTexture(textureCache, opponent, radius, tone) {
@@ -557,7 +583,7 @@ function drawStatusIcons(graphics, shape, radius) {
     const gap = 4;
     const totalWidth = statuses.length * tileSize + (statuses.length - 1) * gap;
     const startX = -totalWidth / 2;
-    const y = -radius - 54;
+    const y = -radius - 64;
     statuses.forEach((status, index) => {
         const x = startX + index * (tileSize + gap);
         const style = STATUS_ICON_STYLE[status];
@@ -720,7 +746,7 @@ function drawMeleeLine(graphics, angle, length, color, width) {
 }
 
 function drawEntity(view, selected, effects, textureCache) {
-    const { shape, baseSprite, graphics, glyph, caption } = view;
+    const { shape, baseSprite, graphics, caption } = view;
     const size = Math.max(2, Number(shape.size ?? 30));
     const radius = size / 2;
     const rotation = radians(shape.rotation);
@@ -729,21 +755,23 @@ function drawEntity(view, selected, effects, textureCache) {
     baseSprite.texture = entityTexture(textureCache, shape, size, radius);
     baseSprite.rotation = shape.type === "silenceWave" ? rotation : 0;
     baseSprite.alpha = 1;
-    glyph.visible = false;
     caption.text = entityCaption(shape);
     caption.visible = Boolean(caption.text);
     caption.position.set(0, shape.type === "nullZone" ? 0 : -radius - 10);
 
-    if (shape.type === "grenade") {
-        drawVelocityTrail(graphics, shape, 0xbeF264);
-    } else if (shape.type === "fireball") {
-        drawVelocityTrail(graphics, shape, 0xfb923c, 44, 9);
-    } else if (shape.type === "orbitalExplosion") {
+    const trailStyle = projectileTrailStyle(shape);
+    if (trailStyle) drawVelocityTrail(graphics, shape, trailStyle.color, trailStyle.length, trailStyle.width);
+
+    if (shape.type === "orbitalExplosion") {
         effects.moveTo(shape.x, shape.y - radius * 1.8).lineTo(shape.x, shape.y + radius * 1.8).stroke({ color: 0xffffff, alpha: 0.92, width: 24 });
     } else if (shape.type === "gravityField") {
         if (shape.armed) graphics.circle(0, 0, radius * (0.72 + Math.sin(performance.now() / 100) * 0.08)).stroke({ color: 0xddd6fe, alpha: 0.5, width: 3 });
     } else if (shape.type === "hunterDrone") {
-        if (Number(shape.shotVisualMs ?? 0) > 0) drawRay(effects, shape.x, shape.y, rotation, 200, 0xa7f3d0, clamp(Number(shape.shotVisualMs) / 300, 0, 1), 3);
+        if (Number(shape.shotVisualMs ?? 0) > 0) {
+            const alpha = clamp(Number(shape.shotVisualMs) / 300, 0.2, 1);
+            drawRay(effects, shape.x, shape.y, rotation, 200, 0x10b981, alpha * 0.4, 10);
+            drawRay(effects, shape.x, shape.y, rotation, 200, 0xecfdf5, alpha, 4);
+        }
     } else if (shape.type === "temporalRewindZone") {
         const remaining = Number(shape.remainingMs ?? 0);
         const winding = remaining > 0 && remaining <= 1000;
@@ -806,9 +834,38 @@ function drawStaticEntity(graphics, type, size, radius, state) {
 function drawVelocityTrail(graphics, shape, color, length = 28, width = 5) {
     const speed = Math.hypot(Number(shape.velocityX ?? 0), Number(shape.velocityY ?? 0));
     if (speed <= 0.01) return;
-    const x = -Number(shape.velocityX) / speed * length;
-    const y = -Number(shape.velocityY) / speed * length;
-    graphics.moveTo(0, 0).lineTo(x, y).stroke({ color, alpha: 0.48, width });
+    const backwardX = -Number(shape.velocityX) / speed;
+    const backwardY = -Number(shape.velocityY) / speed;
+    const perpendicularX = -backwardY;
+    const perpendicularY = backwardX;
+    const phase = performance.now() / 115;
+    const segmentCount = 8;
+    let previous = { x: 0, y: 0 };
+
+    for (let index = 1; index <= segmentCount; index += 1) {
+        const progress = index / segmentCount;
+        const taper = 1 - progress;
+        const flutter = Math.sin(phase - index * 0.82) * width * 0.3 * progress;
+        const current = {
+            x: backwardX * length * progress + perpendicularX * flutter,
+            y: backwardY * length * progress + perpendicularY * flutter,
+        };
+        graphics.moveTo(previous.x, previous.y).lineTo(current.x, current.y).stroke({
+            color,
+            alpha: 0.12 + taper * 0.52,
+            width: Math.max(0.8, width * taper),
+            cap: "round",
+        });
+        previous = current;
+    }
+
+    const pulse = 0.12 + ((performance.now() / 420) % 1) * 0.68;
+    const pulseFlutter = Math.sin(phase - pulse * segmentCount * 0.82) * width * 0.3 * pulse;
+    graphics.circle(
+        backwardX * length * pulse + perpendicularX * pulseFlutter,
+        backwardY * length * pulse + perpendicularY * pulseFlutter,
+        Math.max(1, width * (1 - pulse) * 0.24),
+    ).fill({ color, alpha: 0.65 * (1 - pulse) });
 }
 
 function drawPlacementOverlay(graphics, side) {
@@ -824,19 +881,30 @@ function drawPlacementOverlay(graphics, side) {
     }
 }
 
-function drawMeasurements(layer, points) {
+function drawMeasurements(layer, points, hoverPoint = null) {
     layer.removeChildren().forEach((child) => child.destroy());
-    if (!points.length) return;
     const graphics = new Graphics();
     if (points.length === 2) graphics.moveTo(points[0].x, points[0].y).lineTo(points[1].x, points[1].y).stroke({ color: 0x67e8f9, width: 3 });
     points.forEach((point) => graphics.circle(point.x, point.y, 7).fill(0x22d3ee).stroke({ color: COLORS.white, width: 2 }));
-    layer.addChild(graphics);
+    if (points.length || hoverPoint) layer.addChild(graphics);
     if (points.length === 2) {
         const distance = Math.hypot(points[1].x - points[0].x, points[1].y - points[0].y);
         const label = new Text({ text: `${distance.toFixed(1)} units`, style: { fill: COLORS.white, fontFamily: "monospace", fontSize: 12, fontWeight: "bold" } });
         label.anchor.set(0.5);
         label.position.set((points[0].x + points[1].x) / 2, (points[0].y + points[1].y) / 2 - 12);
         layer.addChild(label);
+    }
+    if (hoverPoint) {
+        graphics.moveTo(hoverPoint.x - 5, hoverPoint.y).lineTo(hoverPoint.x + 5, hoverPoint.y)
+            .moveTo(hoverPoint.x, hoverPoint.y - 5).lineTo(hoverPoint.x, hoverPoint.y + 5)
+            .stroke({ color: 0xf8fafc, alpha: 0.8, width: 1 });
+        const coordinateLabel = new Text({
+            text: `x: ${hoverPoint.x}, y: ${hoverPoint.y}`,
+            style: { fill: COLORS.white, fontFamily: "monospace", fontSize: 12, fontWeight: "bold" },
+        });
+        coordinateLabel.anchor.set(hoverPoint.x > ARENA_WIDTH_UNITS - 150 ? 1 : 0, hoverPoint.y < 30 ? 0 : 1);
+        coordinateLabel.position.set(hoverPoint.x + (hoverPoint.x > ARENA_WIDTH_UNITS - 150 ? -8 : 8), hoverPoint.y + (hoverPoint.y < 30 ? 8 : -8));
+        layer.addChild(coordinateLabel);
     }
 }
 

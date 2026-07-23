@@ -103,6 +103,19 @@ class DuelSimulationServiceTest {
     }
 
     @Test
+    void targetRelativeRetreatUsesOppositeFacingWhenFightersOverlapExactly() {
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(100, List.of()),
+                fighter("fighter-1", "One", 1, 500, 500, brain("""
+                        [{"priority":1,"conditions":[{"type":"always"}],"action":"move_outward"}]
+                        """)),
+                fighter("fighter-2", "Two", 2, 500, 500, idleBrain)));
+
+        assertThat(result.frames().getFirst().fighters().getFirst().x()).isLessThan(500);
+        assertThat(result.frames().getFirst().fighters().getFirst().y()).isEqualTo(500);
+    }
+
+    @Test
     void expressionConditionsSelectBlocksFromStateVariables() {
         MatchPlaybackDTO result = service.simulate(request(
                 arena(100, List.of()),
@@ -146,6 +159,29 @@ class DuelSimulationServiceTest {
                 fighter("fighter-2", "Two", 2, 700, 400, idleBrain)));
 
         assertThat(result.frames().getFirst().fighters().getFirst().x()).isGreaterThan(115);
+    }
+
+    @Test
+    void shortestTargetBearingDifferenceIsNeverNegative() {
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(100, List.of()),
+                fighter("fighter-1", "One", 1, 500, 500, brain("""
+                        [
+                          {
+                            "priority":1,
+                            "conditions":[{
+                              "type":"expression",
+                              "left":"target.relativeBearing",
+                              "comparator":"lt",
+                              "right":{"type":"number","value":10}
+                            }],
+                            "action":"move_west"
+                          }
+                        ]
+                        """)),
+                fighter("fighter-2", "Two", 2, 500, 400, idleBrain)));
+
+        assertThat(result.frames().getFirst().fighters().getFirst().x()).isEqualTo(500);
     }
 
     @Test
@@ -380,6 +416,31 @@ class DuelSimulationServiceTest {
                 .findFirst()
                 .orElseThrow();
         assertThat(explosionFrame.fighters().get(1).hp()).isEqualTo(90);
+        MatchPlaybackDTO.ObstaclePlacementDTO movingGrenade = result.frames().stream()
+                .flatMap(frame -> frame.obstacles().stream())
+                .filter(obstacle -> "grenade".equals(obstacle.type()))
+                .filter(obstacle -> Math.hypot(obstacle.velocityX(), obstacle.velocityY()) > 0)
+                .findFirst()
+                .orElseThrow();
+        assertThat(movingGrenade.velocityX()).isNotZero();
+    }
+
+    @Test
+    void replayFireballFramesIncludeVelocityForProjectileTrails() {
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(100, List.of()),
+                fighter("mage", "Mage", 1, 100, 400, "mage", brain("""
+                        [{"conditions":[{"type":"my_fireball_ready"}],"action":"shoot_fireball"}]
+                        """)),
+                fighter("target", "Target", 2, 700, 400, idleBrain)));
+
+        MatchPlaybackDTO.ObstaclePlacementDTO fireball = result.frames().stream()
+                .flatMap(frame -> frame.obstacles().stream())
+                .filter(obstacle -> "fireball".equals(obstacle.type()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(fireball.velocityX()).isNotZero();
+        assertThat(fireball.velocityY()).isZero();
     }
 
     @Test
@@ -1066,6 +1127,61 @@ class DuelSimulationServiceTest {
 
         assertThat(afterConcussive.frames()).anyMatch(frame -> "concussive_shot".equals(frame.fighters().getFirst().preparingAbility()));
         assertThat(afterConcussive.frames().getLast().fighters().getFirst().fireballCharges()).isEqualTo(3);
+    }
+
+    @Test
+    void authoritativeSimulatorExecutesAndClampsCustomVariableNodes() throws Exception {
+        JsonNode variableBrain = jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "customVariables":[{"id":"custom.counter","name":"Counter","valueType":"number","initialValue":99990}],
+                  "columns":[
+                    {"createdOrder":0,"branches":[{"branchType":"if","createdOrder":0,"conditions":[{"type":"always"}],"actions":[{"action":"variable","variableId":"custom.counter","operation":"add","value":50}],"children":[]}]},
+                    {"createdOrder":1,"branches":[{"branchType":"if","createdOrder":0,"conditions":[{"type":"expression","left":"custom.counter","comparator":"eq","right":{"type":"number","value":99999}}],"actions":[{"action":"move_walk","movementMode":"absolute","movementDirection":"east"}],"children":[]}]}
+                  ]
+                }
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(400, List.of()),
+                fighter("variables", "Variables", 1, 100, 400, "custom", variableBrain),
+                fighter("idle", "Idle", 2, 700, 400, "custom", customBrain("[]", "[]"))));
+
+        assertThat(result.frames().getLast().fighters().getFirst().x()).isGreaterThan(100);
+    }
+
+    @Test
+    void authoritativeSimulatorActivatesAbilityFromIncrementedCustomVariable() throws Exception {
+        JsonNode variableBrain = jsonMapper.readTree("""
+                {
+                  "version":"melee-logic-tree-v1",
+                  "loadout":{"abilities":["swing"],"statPoints":{"maxHp":0,"moveSpeed":0,"attackDamage":0,"attackSpeed":0}},
+                  "customVariables":[{"id":"custom.counter","name":"Counter","valueType":"number","initialValue":0}],
+                  "columns":[
+                    {"createdOrder":0,"branches":[{"branchType":"if","createdOrder":0,"conditions":[{"type":"always"}],"actions":[{"action":"variable","variableId":"custom.counter","terms":[{"operator":"add","operand":{"type":"number","value":1}}]}],"children":[]}]},
+                    {"createdOrder":1,"branches":[{"branchType":"if","createdOrder":0,"conditions":[{"type":"expression","left":"custom.counter","comparator":"gte","right":{"type":"number","value":2}}],"actions":[{"action":"swing"}],"children":[]}]}
+                  ]
+                }
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(1_000, List.of()),
+                fighter("variables-ability", "Variables", 1, 100, 400, "custom", variableBrain),
+                fighter("idle-ability", "Idle", 2, 180, 400, "custom", customBrain("[]", "[]"))));
+
+        assertThat(result.frames()).anyMatch(frame -> frame.fighters().getFirst().swingActive());
+        assertThat(result.frames().getLast().fighters().get(1).hp()).isLessThan(100);
+    }
+
+    @Test
+    void authoritativeSimulatorExposesElapsedMatchSeconds() {
+        JsonNode timedBrain = customBrain("[]", """
+                [{"priority":1,"conditions":[{"type":"expression","left":"match.elapsedSeconds","comparator":"gte","right":{"type":"number","value":0.2}}],"action":"move_west"}]
+                """);
+        MatchPlaybackDTO result = service.simulate(request(
+                arena(500, List.of()),
+                fighter("timer", "Timer", 1, 500, 400, "custom", timedBrain),
+                fighter("idle-timer", "Idle", 2, 700, 400, "custom", customBrain("[]", "[]"))));
+
+        assertThat(result.frames().getLast().fighters().getFirst().x()).isLessThan(500);
     }
 
     private JsonNode customBrain(String abilitiesJson, String blocksJson) {

@@ -86,11 +86,11 @@ public class MatchSimulationService {
     }
 
     private JsonNode readBrain(ModelSubmission submission) {
-        if (submission == null || submission.getModelArtifacts() == null || submission.getModelArtifacts().isBlank()) {
+        if (submission == null || submission.getBrainPayload() == null || submission.getBrainPayload().isBlank()) {
             return jsonMapper.createObjectNode();
         }
         try {
-            return jsonMapper.readTree(submission.getModelArtifacts());
+            return jsonMapper.readTree(submission.getBrainPayload());
         } catch (Exception ex) {
             return jsonMapper.createObjectNode();
         }

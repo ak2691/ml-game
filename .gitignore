@@ -1,7 +1,5 @@
-AGENTS.md
 artifacts/
 **/__pycache__/
 **/.pytest_cache/
 *.pyc
-
 

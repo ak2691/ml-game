@@ -4,6 +4,7 @@ import { PROJECTILE_WALL_LENGTH, PROJECTILE_WALL_TYPE } from "../beta/ArenaObjec
 import { decodeBotLoadout } from "../beta/loadout/BotLoadout";
 import { DEFENSE_WALL_TYPE, ARENA_WIDTH_UNITS } from "../beta/modelPayloads/arenaConstants";
 import { GUN_RANGE, MOVE_STATS } from "../beta/combat/Moves.js";
+import { replayProjectileVelocity } from "../beta/pixi/pixiVisualState.js";
 
 export default function SimulationReplay({ playback }) {
     const frames = playback.frames ?? [];
@@ -87,18 +88,26 @@ function replayArenaShapes(fighters, obstacles, recentFrames = [], entranceProgr
         }
     }
     const fighterShapes = fighters.map((fighter) => fighterReplayShape(fighter, recentlyDamagedIds, entranceProgress, frames, frameIndex));
-    const obstacleShapes = obstacles.map((obstacle) => ({
-        ...obstacle,
-        size: obstacle.size ?? 60,
-        rotation: obstacle.rotation ?? 0,
-        armed: obstacle.armed,
-        fuseMs: obstacle.timerMs,
-        remainingMs: obstacle.timerMs,
-        captureBySlot: { 1: obstacle.slotOneCaptureMs ?? 0, 2: obstacle.slotTwoCaptureMs ?? 0 },
-        locked: true,
-        interpolationMs: 50,
-        hitFlashMs: recentlyDamagedIds.has(String(obstacle.id)) ? 200 : 0,
-    }));
+    const previousFrame = frames[Math.max(0, frameIndex - 1)];
+    const previousObstaclesById = new Map((previousFrame?.obstacles ?? [])
+        .map((obstacle) => [String(obstacle.id), obstacle]));
+    const obstacleShapes = obstacles.map((obstacle) => {
+        const previous = previousObstaclesById.get(String(obstacle.id));
+        const velocity = replayProjectileVelocity(obstacle, previous);
+        return {
+            ...obstacle,
+            ...velocity,
+            size: obstacle.size ?? 60,
+            rotation: obstacle.rotation ?? 0,
+            armed: obstacle.armed,
+            fuseMs: obstacle.timerMs,
+            remainingMs: obstacle.timerMs,
+            captureBySlot: { 1: obstacle.slotOneCaptureMs ?? 0, 2: obstacle.slotTwoCaptureMs ?? 0 },
+            locked: true,
+            interpolationMs: 50,
+            hitFlashMs: recentlyDamagedIds.has(String(obstacle.id)) ? 200 : 0,
+        };
+    });
     return [
         ...fighterShapes.map((fighter) => ({
             ...fighter,
@@ -155,6 +164,7 @@ function fighterReplayShape(fighter, recentlyDamagedIds, entranceProgress, frame
         blockActiveMs: fighter.blockActive ? 100 : 0,
         locked: true,
         interpolationMs: entranceProgress < 1 ? 0 : 50,
+        username: fighter.username,
         opponentUsername: fighter.username,
         hitFlashMs: recentlyDamagedIds.has(String(fighter.userId)) ? 200 : 0,
         ...visualOrigin,

@@ -42,6 +42,7 @@ public class MatchmakingService {
     private static final long ROUND_RESULT_HOLD_MILLIS = 3_500L;
     private static final int CLASS_SELECTION_SECONDS = 60;
     private static final int TRAINING_SECONDS = 600;
+    private static final int DISCONNECT_GRACE_SECONDS = 30;
     private static final int RESULT_REVEAL_BUFFER_MS = 250;
     private static final int WINS_REQUIRED = 2;
     private static final int TOTAL_ROUNDS = 3;
@@ -62,6 +63,7 @@ public class MatchmakingService {
     private static final int ROUND_LOGIC_BLOCK_LIMIT = 100;
     private static final String COMPLETION_REASON_SIMULATION = "SIMULATION";
     private static final String COMPLETION_REASON_RESIGNATION = "RESIGNATION";
+    private static final String COMPLETION_REASON_DISCONNECTION = "DISCONNECTION";
 
     private final MatchSimulationService matchSimulationService;
     private final MatchRepository matchRepository;
@@ -72,6 +74,8 @@ public class MatchmakingService {
     private final Clock clock;
     private final List<QueuedPlayer> queue = new ArrayList<>();
     private final Map<UUID, MatchSession> activeSessionsByUserId = new HashMap<>();
+    private final Map<UUID, Instant> disconnectDeadlinesByUserId = new HashMap<>();
+    private final Map<UUID, ReplayResumeState> replayResumeByUserId = new HashMap<>();
     private final Map<UUID, List<RoundSubmissionRecord>> roundHistoryByMatchId = new HashMap<>();
     private final JsonMapper jsonMapper = new JsonMapper();
 
@@ -97,9 +101,31 @@ public class MatchmakingService {
             UUID userId,
             String username,
             String principalName) {
+        ReplayResumeState replayResume = replayResumeByUserId.get(userId);
+        if (replayResume != null) {
+            List<OutboundMatchmakingEvent> replayEvents = replayEventsForReconnect(userId, replayResume);
+            if (!replayEvents.isEmpty()) return replayEvents;
+            replayResumeByUserId.remove(userId);
+        }
         if (activeSessionsByUserId.containsKey(userId)) {
             MatchSession session = activeSessionsByUserId.get(userId);
-            return List.of(eventForPlayer(session, playerForUser(session, userId), "MATCH_FOUND"));
+            MatchPlayer reconnectingPlayer = playerForUser(session, userId);
+            Instant disconnectDeadline = disconnectDeadlinesByUserId.remove(userId);
+            if (disconnectDeadline == null) {
+                return List.of(eventForPlayer(session, reconnectingPlayer, "MATCH_FOUND"));
+            }
+            List<OutboundMatchmakingEvent> events = new ArrayList<>();
+            events.add(eventForPlayer(session, reconnectingPlayer, "MATCH_FOUND"));
+            events.addAll(session.players().stream()
+                    .map(player -> disconnectEventForPlayer(
+                            session,
+                            player,
+                            reconnectingPlayer,
+                            "PLAYER_RECONNECTED",
+                            null,
+                            reconnectingPlayer.username() + " reconnected."))
+                    .toList());
+            return events;
         }
 
         if (queue.stream().anyMatch(player -> player.userId().equals(userId))) {
@@ -268,6 +294,97 @@ public class MatchmakingService {
         queue.removeIf(player -> player.userId().equals(userId));
     }
 
+    public synchronized List<OutboundMatchmakingEvent> markDisconnected(String principalName) {
+        if (principalName == null || principalName.isBlank()) {
+            return List.of();
+        }
+        queue.removeIf(player -> player.principalName().equals(principalName));
+        MatchSession session = activeSessionsByUserId.values().stream()
+                .distinct()
+                .filter(candidate -> candidate.players().stream()
+                        .anyMatch(player -> player.principalName().equals(principalName)))
+                .findFirst()
+                .orElse(null);
+        if (session == null) {
+            return List.of();
+        }
+
+        MatchPlayer disconnectedPlayer = session.players().stream()
+                .filter(player -> player.principalName().equals(principalName))
+                .findFirst()
+                .orElseThrow();
+        Instant deadline = Instant.now(clock).plusSeconds(DISCONNECT_GRACE_SECONDS);
+        disconnectDeadlinesByUserId.put(disconnectedPlayer.userId(), deadline);
+        return session.players().stream()
+                .map(player -> disconnectEventForPlayer(
+                        session,
+                        player,
+                        disconnectedPlayer,
+                        "PLAYER_DISCONNECTED",
+                        deadline,
+                        disconnectedPlayer.username() + " disconnected. The match ends in 30 seconds unless they return."))
+                .toList();
+    }
+
+    @Transactional
+    public synchronized List<OutboundMatchmakingEvent> resolveDisconnectTimeout(
+            String principalName,
+            Instant expectedDeadline) {
+        MatchSession session = activeSessionsByUserId.values().stream()
+                .distinct()
+                .filter(candidate -> candidate.players().stream()
+                        .anyMatch(player -> player.principalName().equals(principalName)))
+                .findFirst()
+                .orElse(null);
+        if (session == null) {
+            return List.of();
+        }
+        MatchPlayer disconnectedPlayer = session.players().stream()
+                .filter(player -> player.principalName().equals(principalName))
+                .findFirst()
+                .orElseThrow();
+        Instant currentDeadline = disconnectDeadlinesByUserId.get(disconnectedPlayer.userId());
+        if (currentDeadline == null
+                || !currentDeadline.equals(expectedDeadline)
+                || Instant.now(clock).isBefore(currentDeadline)) {
+            return List.of();
+        }
+        MatchPlayer winner = session.players().stream()
+                .filter(player -> !player.userId().equals(disconnectedPlayer.userId()))
+                .findFirst()
+                .orElseThrow(() -> new AuthException("opponent was not found"));
+
+        completeMatchByForfeit(
+                session.matchId(),
+                disconnectedPlayer,
+                winner,
+                COMPLETION_REASON_DISCONNECTION);
+        clearSession(session);
+
+        MatchPlaybackDTO result = new MatchPlaybackDTO(
+                session.matchId(),
+                MatchSimulationService.DUEL_RULESET_VERSION,
+                "COMPLETED",
+                null,
+                List.of(),
+                "DISCONNECTION_WIN",
+                winner.userId(),
+                winner.username() + " wins because the opponent did not reconnect.");
+        Instant now = Instant.now(clock);
+        return session.players().stream()
+                .map(player -> eventForPlayer(
+                        session,
+                        player,
+                        "MATCH_RESULT_READY",
+                        "RESULT_READY",
+                        result,
+                        result.message(),
+                        0,
+                        now,
+                        now))
+                .toList();
+    }
+
     public synchronized void requireActiveMatchForUser(UUID userId, UUID matchId) {
         MatchSession session = activeSessionsByUserId.get(userId);
         if (session == null || matchId == null || !session.matchId().equals(matchId)) {
@@ -290,10 +407,12 @@ public class MatchmakingService {
                 .findFirst()
                 .orElseThrow(() -> new AuthException("opponent was not found"));
 
-        completeMatchByResignation(session.matchId(), resigningPlayer, winner);
-        for (MatchPlayer player : session.players()) {
-            activeSessionsByUserId.remove(player.userId());
-        }
+        completeMatchByForfeit(
+                session.matchId(),
+                resigningPlayer,
+                winner,
+                COMPLETION_REASON_RESIGNATION);
+        clearSession(session);
 
         MatchPlaybackDTO result = new MatchPlaybackDTO(
                 session.matchId(),
@@ -327,8 +446,15 @@ public class MatchmakingService {
             return List.of();
         }
 
-        ModelSubmission submission = requireValidatedSubmission(userId, modelSubmissionId, session.matchId());
         MatchPlayer submittingPlayer = playerForUser(session, userId);
+        if (submittingPlayer.finished()) {
+            if (!java.util.Objects.equals(submittingPlayer.modelSubmissionId(), modelSubmissionId)) {
+                throw new AuthException("this player already finished with a different model submission");
+            }
+            return List.of();
+        }
+
+        ModelSubmission submission = requireValidatedSubmission(userId, modelSubmissionId, session.matchId());
         String submissionClass = normalizeSelectedClass(submission.getSelectedClass());
         String submittedLoadout = submissionLoadoutId(submission);
         if (submittedLoadout != null && !submittedLoadout.equals(submittingPlayer.selectedClass())) {
@@ -385,6 +511,7 @@ public class MatchmakingService {
         long resultDelayMillis = PLAYBACK_PREP_DELAY_MILLIS + replayDurationMillis;
         Instant playbackStartsAt = Instant.now(clock).plusMillis(PLAYBACK_PREP_DELAY_MILLIS);
         Instant resultRevealsAt = playbackStartsAt.plusMillis(replayDurationMillis);
+        Instant roundReadyAt = resultRevealsAt.plusMillis(ROUND_RESULT_HOLD_MILLIS);
         List<OutboundMatchmakingEvent> events = new ArrayList<>();
         for (MatchPlayer player : scoredSession.players()) {
             events.add(eventForPlayer(
@@ -408,8 +535,9 @@ public class MatchmakingService {
                     playbackStartsAt,
                     resultRevealsAt));
         }
+        MatchSession nextRoundSession = null;
         if (!seriesComplete) {
-            MatchSession nextRoundSession = scoredSession.nextRound()
+            nextRoundSession = scoredSession.nextRound()
                     .withClassSelection(resultRevealsAt
                             .plusMillis(ROUND_RESULT_HOLD_MILLIS)
                             .plusSeconds(CLASS_SELECTION_SECONDS));
@@ -427,10 +555,48 @@ public class MatchmakingService {
                         resultRevealsAt));
             }
         }
+        ReplayResumeState replayResume = new ReplayResumeState(
+                scoredSession,
+                nextRoundSession,
+                replayOnlyPlayback,
+                resultOnlyPlayback,
+                playbackStartsAt,
+                resultRevealsAt,
+                roundReadyAt,
+                playback.message(),
+                seriesComplete);
+        for (MatchPlayer player : scoredSession.players()) {
+            replayResumeByUserId.put(player.userId(), replayResume);
+        }
         if (seriesComplete) {
             roundHistoryByMatchId.remove(session.matchId());
         }
         return events;
+    }
+
+    private List<OutboundMatchmakingEvent> replayEventsForReconnect(UUID userId, ReplayResumeState resume) {
+        Instant now = Instant.now(clock);
+        MatchPlayer replayPlayer = playerForUser(resume.replaySession(), userId);
+        if (now.isBefore(resume.resultRevealsAt())) {
+            return List.of(eventForPlayer(
+                    resume.replaySession(), replayPlayer, "MATCH_PLAYBACK_READY", "READY_FOR_PLAYBACK",
+                    resume.replayPlayback(), "Replay ready.", 0, resume.playbackStartsAt(), resume.resultRevealsAt()));
+        }
+        if (resume.seriesComplete()) return List.of();
+        if (!now.isBefore(resume.roundReadyAt()) || resume.nextRoundSession() == null) return List.of();
+
+        MatchPlayer nextRoundPlayer = playerForUser(resume.nextRoundSession(), userId);
+        return List.of(
+                eventForPlayer(
+                        resume.replaySession(), replayPlayer, "MATCH_PLAYBACK_READY", "READY_FOR_PLAYBACK",
+                        resume.replayPlayback(), "Replay ready.", 0, resume.playbackStartsAt(), resume.resultRevealsAt()),
+                eventForPlayer(
+                        resume.replaySession(), replayPlayer, "MATCH_RESULT_READY", "RESULT_READY",
+                        resume.resultPlayback(), resume.message(), 0, resume.playbackStartsAt(), resume.resultRevealsAt()),
+                eventForPlayer(
+                        resume.nextRoundSession(), nextRoundPlayer, "MATCH_ROUND_READY", "CLASS_SELECT",
+                        null, "Round " + resume.nextRoundSession().roundNumber() + " loadout ready.",
+                        0, resume.playbackStartsAt(), resume.resultRevealsAt()));
     }
 
     private MatchPlaybackDTO withoutResult(MatchPlaybackDTO playback) {
@@ -570,9 +736,9 @@ public class MatchmakingService {
     }
 
     private String submissionLoadoutId(ModelSubmission submission) {
-        if (submission == null || submission.getModelArtifacts() == null) return null;
+        if (submission == null || submission.getBrainPayload() == null) return null;
         try {
-            JsonNode loadout = jsonMapper.readTree(submission.getModelArtifacts()).path("loadout");
+            JsonNode loadout = jsonMapper.readTree(submission.getBrainPayload()).path("loadout");
             if (!loadout.isObject()) return null;
             List<String> selectedCodes = new ArrayList<>();
             loadout.path("abilities").forEach(ability -> {
@@ -736,6 +902,9 @@ public class MatchmakingService {
     private void completeMatch(UUID matchId, MatchPlaybackDTO playback) {
         Match match = matchRepository.findById(matchId)
                 .orElseThrow(() -> new AuthException("match was not found"));
+        if (match.getStatus() != MatchStatus.RUNNING) {
+            return;
+        }
         List<MatchParticipant> participants = matchParticipantRepository.findByMatchId(matchId);
 
         if ("FAILED".equals(playback.status()) || "ERROR".equals(playback.result())) {
@@ -766,18 +935,25 @@ public class MatchmakingService {
         matchParticipantRepository.saveAll(participants);
     }
 
-    private void completeMatchByResignation(UUID matchId, MatchPlayer resigningPlayer, MatchPlayer winner) {
+    private void completeMatchByForfeit(
+            UUID matchId,
+            MatchPlayer forfeitingPlayer,
+            MatchPlayer winner,
+            String completionReason) {
         Match match = matchRepository.findById(matchId)
                 .orElseThrow(() -> new AuthException("match was not found"));
+        if (match.getStatus() != MatchStatus.RUNNING) {
+            return;
+        }
         List<MatchParticipant> participants = matchParticipantRepository.findByMatchId(matchId);
 
         match.setStatus(MatchStatus.COMPLETED);
-        match.setCompletionReason(COMPLETION_REASON_RESIGNATION);
+        match.setCompletionReason(completionReason);
         match.setCompletedAt(Instant.now(clock));
         match.setWinnerUser(userRepository.getReferenceById(winner.userId()));
 
         for (MatchParticipant participant : participants) {
-            if (participant.getUser().getId().equals(resigningPlayer.userId())) {
+            if (participant.getUser().getId().equals(forfeitingPlayer.userId())) {
                 participant.setResult(MatchResult.FORFEIT);
             } else if (participant.getUser().getId().equals(winner.userId())) {
                 participant.setResult(MatchResult.WIN);
@@ -787,6 +963,15 @@ public class MatchmakingService {
 
         matchRepository.save(match);
         matchParticipantRepository.saveAll(participants);
+    }
+
+    private void clearSession(MatchSession session) {
+        for (MatchPlayer player : session.players()) {
+            activeSessionsByUserId.remove(player.userId());
+            replayResumeByUserId.remove(player.userId());
+            disconnectDeadlinesByUserId.remove(player.userId());
+        }
+        roundHistoryByMatchId.remove(session.matchId());
     }
 
     private void incrementMatchesPlayed(AppUser user) {
@@ -880,7 +1065,7 @@ public class MatchmakingService {
 
     private JsonNode readSubmissionBrain(ModelSubmission submission) {
         try {
-            return jsonMapper.readTree(submission.getModelArtifacts());
+            return jsonMapper.readTree(submission.getBrainPayload());
         } catch (Exception exception) {
             throw new AuthException("submitted brain could not be read");
         }
@@ -935,6 +1120,59 @@ public class MatchmakingService {
     private static String fieldText(JsonNode node, String field) {
         JsonNode value = node != null ? node.get(field) : null;
         return value != null ? value.asText() : "";
+    }
+
+    private OutboundMatchmakingEvent disconnectEventForPlayer(
+            MatchSession session,
+            MatchPlayer recipient,
+            MatchPlayer disconnectedPlayer,
+            String type,
+            Instant deadline,
+            String message) {
+        MatchPlayer opponent = session.players().stream()
+                .filter(candidate -> !candidate.userId().equals(recipient.userId()))
+                .findFirst()
+                .orElse(null);
+        String status = session.countdownEndsAt() != null
+                ? "COUNTDOWN"
+                : session.objectPlacementEndsAt() != null
+                        ? "OBJECT_PLACEMENT"
+                        : session.trainingEndsAt() != null ? "TRAINING" : "CLASS_SELECT";
+        return new OutboundMatchmakingEvent(
+                recipient.principalName(),
+                new MatchmakingEventDTO(
+                        type,
+                        session.matchId(),
+                        session.simulationSeed(),
+                        status,
+                        recipient.toDto(session.objectPlacementsByUserId().containsKey(recipient.userId())),
+                        opponent == null ? null : opponent.toDto(
+                                session.objectPlacementsByUserId().containsKey(opponent.userId())),
+                        session.players().stream()
+                                .map(player -> player.toDto(
+                                        session.objectPlacementsByUserId().containsKey(player.userId())))
+                                .toList(),
+                        Instant.now(clock),
+                        session.classSelectionEndsAt(),
+                        session.objectPlacementEndsAt(),
+                        session.countdownEndsAt(),
+                        session.trainingEndsAt(),
+                        null,
+                        null,
+                        MatchSimulationService.DUEL_RULESET_VERSION,
+                        null,
+                        session.roundNumber(),
+                        session.winsRequired(),
+                        message,
+                        null,
+                        List.of(),
+                        session.obstacles(),
+                        roundBrainsForPlayer(session.matchId(), recipient.userId()),
+                        previousRoundWon(session.matchId(), recipient.userId()),
+                        abilityOffers(session),
+                        ROUND_LOGIC_BLOCK_LIMIT,
+                        disconnectedPlayer.userId(),
+                        deadline));
     }
 
     private OutboundMatchmakingEvent eventForPlayer(MatchSession session, MatchPlayer player, String type) {
@@ -1100,6 +1338,18 @@ public class MatchmakingService {
             UUID winnerUserId,
             Map<UUID, ModelSubmission> submissionsByUser,
             Map<UUID, Double> lossScores) {
+    }
+
+    private record ReplayResumeState(
+            MatchSession replaySession,
+            MatchSession nextRoundSession,
+            MatchPlaybackDTO replayPlayback,
+            MatchPlaybackDTO resultPlayback,
+            Instant playbackStartsAt,
+            Instant resultRevealsAt,
+            Instant roundReadyAt,
+            String message,
+            boolean seriesComplete) {
     }
 
     public record MatchPlayer(

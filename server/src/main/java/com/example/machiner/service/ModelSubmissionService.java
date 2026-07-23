@@ -13,6 +13,9 @@ import com.example.machiner.repository.TrainingSessionRepository;
 import com.example.machiner.repository.ValidationResultRepository;
 import java.time.Duration;
 import java.time.Instant;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.LinkedHashMap;
@@ -22,18 +25,16 @@ import java.util.UUID;
 import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 @Service
 public class ModelSubmissionService {
 
-    private static final String FALLBACK_ACTION_SCHEMA_VERSION = "melee-logic-actions-v1";
     private static final int MAX_VERSION_LENGTH = 50;
     private static final int MAX_TRAINING_SESSION_ID_LENGTH = 100;
     private static final int MAX_CLIENT_BUILD_VERSION_LENGTH = 100;
-    private static final int MAX_MODEL_HASH_LENGTH = 128;
     private static final int MAX_SELECTED_CLASS_LENGTH = 40;
-    private static final int MAX_BASE_MODEL_ARTIFACT_ID_LENGTH = 100;
     private static final String VALIDATOR_VERSION = "model-submission-stub-v1";
 
     private final ModelSubmissionValidationService validationService;
@@ -67,17 +68,55 @@ public class ModelSubmissionService {
     @Transactional
     public ModelSubmissionValidationResponseDTO submit(ModelSubmissionPayloadDTO payload, Authentication authentication) {
         AppUser user = currentUserService.requireCurrentUser(authentication);
-        rateLimiter.requireAllowed(user.getId());
         ModelSubmissionValidationResponseDTO validation = validateSafely(payload);
         Integer trustedTrainingDurationMs = validateOwnedTrainingSession(payload, user, validation);
         validateMatchBinding(payload, user, validation);
+        String requestFingerprint = requestFingerprint(payload);
+        Optional<ModelSubmission> existingSubmission = findExistingSubmission(payload, user);
+        if (existingSubmission.isPresent()) {
+            return existingSubmissionResponse(existingSubmission.get(), requestFingerprint, validation);
+        }
+
+        rateLimiter.requireAllowed(user.getId());
         rejectDuplicateFinalHash(payload, validation);
-        ModelSubmission submission = toSubmission(payload, validation, user, trustedTrainingDurationMs);
+        ModelSubmission submission = toSubmission(
+                payload,
+                validation,
+                user,
+                trustedTrainingDurationMs,
+                requestFingerprint);
 
         ModelSubmission savedSubmission = modelSubmissionRepository.save(submission);
         validationResultRepository.save(toValidationResult(savedSubmission, validation));
         validation.setModelSubmissionId(savedSubmission.getId());
 
+        return validation;
+    }
+
+    private Optional<ModelSubmission> findExistingSubmission(ModelSubmissionPayloadDTO payload, AppUser user) {
+        if (payload == null || !hasText(payload.getTrainingSessionId())) {
+            return Optional.empty();
+        }
+        return modelSubmissionRepository.findByUserIdAndTrainingSessionIdAndRequestFingerprintIsNotNull(
+                user.getId(),
+                submissionTrainingSessionKey(payload));
+    }
+
+    private ModelSubmissionValidationResponseDTO existingSubmissionResponse(
+            ModelSubmission existing,
+            String requestFingerprint,
+            ModelSubmissionValidationResponseDTO validation) {
+        if (existing.getRequestFingerprint() == null
+                || !existing.getRequestFingerprint().equals(requestFingerprint)) {
+            throw new SubmissionConflictException(
+                    "This training session already has a different model submission");
+        }
+
+        boolean accepted = existing.getStatus() == ModelSubmissionStatus.VALIDATED;
+        validation.setModelSubmissionId(existing.getId());
+        validation.setAccepted(accepted);
+        validation.setStatus(accepted ? "ACCEPTED" : "REJECTED");
+        validation.setMessage(accepted ? "Bot brain passed validation" : "Bot brain failed validation");
         return validation;
     }
 
@@ -96,8 +135,6 @@ public class ModelSubmissionService {
             response.setStatus("ERROR");
             response.setMessage("Bot brain validation failed unexpectedly");
             response.setValidatorVersion(VALIDATOR_VERSION);
-            response.setSubmittedModelHash(payload == null ? null : payload.getModelHash());
-            response.setComputedModelHash(null);
             response.setTrainingDurationTrusted(false);
             response.setErrors(List.of("validator error: " + ex.getClass().getSimpleName()));
             response.setWarnings(List.of());
@@ -109,42 +146,54 @@ public class ModelSubmissionService {
             ModelSubmissionPayloadDTO payload,
             ModelSubmissionValidationResponseDTO validation,
             AppUser user,
-            Integer trustedTrainingDurationMs) {
+            Integer trustedTrainingDurationMs,
+            String requestFingerprint) {
         ModelSubmission submission = new ModelSubmission();
         submission.setUser(user);
+        submission.setRequestFingerprint(requestFingerprint);
 
         if (payload != null) {
-            submission.setArchitectureVersion(cleanText(
-                    payload.getArchitectureVersion(), "missing-architecture", MAX_VERSION_LENGTH));
             submission.setMatchId(payload.getMatchId());
-            submission.setFeatureSchemaVersion(cleanText(
-                    payload.getFeatureSchemaVersion(), "missing-features", MAX_VERSION_LENGTH));
-            submission.setActionSchemaVersion(cleanText(
-                    payload.getActionSchemaVersion(), FALLBACK_ACTION_SCHEMA_VERSION, MAX_VERSION_LENGTH));
-            submission.setTrainingSessionId(cleanNullableText(
-                    payload.getTrainingSessionId(), MAX_TRAINING_SESSION_ID_LENGTH));
-            submission.setTrainingDurationMs(cleanNonNegative(trustedTrainingDurationMs));
-            submission.setTrainingSteps(cleanNonNegative(payload.getTrainingSteps()));
+            submission.setTrainingSessionId(submissionTrainingSessionKey(payload));
             submission.setSelectedClass(cleanNullableText(
                     payload.getSelectedClass(), MAX_SELECTED_CLASS_LENGTH));
-            submission.setBaseModelArtifactId(cleanNullableText(
-                    payload.getBaseModelArtifactId(), MAX_BASE_MODEL_ARTIFACT_ID_LENGTH));
-            submission.setTrainingMetrics(toJson(payload.getTrainingMetrics(), "{}"));
             submission.setClientBuildVersion(cleanNullableText(
                     payload.getClientBuildVersion(), MAX_CLIENT_BUILD_VERSION_LENGTH));
-            submission.setModelArtifacts(toJson(payload.getBrain() != null ? payload.getBrain() : payload.getModel(), "{}"));
+            JsonNode brain = payload.getBrain();
+            submission.setBrainSchemaVersion(cleanText(
+                    brain != null ? brain.path("version").asText(null) : null,
+                    "missing-brain-schema",
+                    MAX_VERSION_LENGTH));
+            submission.setBrainPayload(toJson(brain, "{}"));
         } else {
-            submission.setArchitectureVersion("missing-payload");
-            submission.setFeatureSchemaVersion("missing-payload");
-            submission.setActionSchemaVersion(FALLBACK_ACTION_SCHEMA_VERSION);
-            submission.setModelArtifacts("{}");
+            submission.setBrainSchemaVersion("missing-payload");
+            submission.setBrainPayload("{}");
         }
 
-        submission.setModelHash(cleanNullableText(validation.getComputedModelHash(), MAX_MODEL_HASH_LENGTH));
         submission.setStatus(validation.isAccepted()
                 ? ModelSubmissionStatus.VALIDATED
                 : ModelSubmissionStatus.REJECTED);
         return submission;
+    }
+
+    private String requestFingerprint(ModelSubmissionPayloadDTO payload) {
+        try {
+            byte[] serializedPayload = jsonMapper.writeValueAsString(payload)
+                    .getBytes(StandardCharsets.UTF_8);
+            return java.util.HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256").digest(serializedPayload));
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 is unavailable", ex);
+        } catch (Exception ex) {
+            throw new IllegalArgumentException("Model submission payload could not be fingerprinted", ex);
+        }
+    }
+
+    private String submissionTrainingSessionKey(ModelSubmissionPayloadDTO payload) {
+        if (payload == null || !hasText(payload.getTrainingSessionId())) {
+            return null;
+        }
+        return truncate(payload.getTrainingSessionId().trim(), MAX_TRAINING_SESSION_ID_LENGTH);
     }
 
     private void validateMatchBinding(
@@ -195,7 +244,7 @@ public class ModelSubmissionService {
             ModelSubmissionPayloadDTO payload,
             AppUser user,
             ModelSubmissionValidationResponseDTO validation) {
-        if (payload == null || "ERROR".equals(validation.getStatus()) || !hasText(payload.getTrainingSessionId())) {
+        if (payload == null || !hasText(payload.getTrainingSessionId())) {
             return null;
         }
 
@@ -207,9 +256,13 @@ public class ModelSubmissionService {
             return null;
         }
 
-        Optional<TrainingSession> session = trainingSessionRepository.findByIdAndUserId(trainingSessionId, user.getId());
+        Optional<TrainingSession> session = trainingSessionRepository.findByIdAndUserIdForSubmission(
+                trainingSessionId,
+                user.getId());
         if (session.isEmpty()) {
-            rejectValidation(validation, "trainingSessionId was not found for this user");
+            if (!"ERROR".equals(validation.getStatus())) {
+                rejectValidation(validation, "trainingSessionId was not found for this user");
+            }
             return null;
         }
 
@@ -258,8 +311,6 @@ public class ModelSubmissionService {
 
         Map<String, Object> details = new LinkedHashMap<>();
         details.put("message", validation.getMessage());
-        details.put("submittedModelHash", validation.getSubmittedModelHash());
-        details.put("computedModelHash", validation.getComputedModelHash());
         details.put("trainingDurationTrusted", validation.isTrainingDurationTrusted());
         details.put("errors", validation.getErrors());
         details.put("warnings", validation.getWarnings());

@@ -35,10 +35,10 @@ import {
 } from "../beta/modelPayloads/arenaConstants";
 import { MAIN_SHAPE, buildCoreShapes } from "../beta/modelPayloads/arenaShapes";
 import { createMatchmakingClient } from "../matchmaking/stompClient";
+import { apiUrl } from "../config/api";
 
 const SimulationReplay = lazy(() => import("../replay/SimulationReplay"));
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 const ROUND_RESULT_HOLD_MS = 3500;
 const MATCH_COUNTDOWN_SECONDS = 5;
 
@@ -58,7 +58,7 @@ function secondsRemaining(countdownEndsAt, maximum = Number.POSITIVE_INFINITY) {
 async function estimateServerClockOffset() {
     try {
         const startedAtMs = Date.now();
-        const response = await fetch(`${API_BASE_URL}/api/time`, {
+        const response = await fetch(apiUrl("/api/time"), {
             credentials: "include",
         });
         const receivedAtMs = Date.now();
@@ -129,6 +129,12 @@ function normalizeEventTimes(event, serverClockOffsetMs) {
             receivedAtMs,
             serverClockOffsetMs
         ),
+        disconnectEndsAtMs: toLocalDeadlineMs(
+            event.disconnectEndsAt,
+            event.serverNow,
+            receivedAtMs,
+            serverClockOffsetMs
+        ),
     };
 }
 
@@ -147,6 +153,15 @@ function wasObjectPlacementSubmittedByCurrentPlayer(event) {
         && String(event.objectPlacementUserId) === String(event.player.userId);
 }
 
+function isSeriesComplete(event, currentPlayback) {
+    if (!currentPlayback?.result) return false;
+    if (currentPlayback.result === "RESIGNATION_WIN") return true;
+    const winsRequired = Math.max(1, Number(event?.winsRequired ?? 2));
+    const players = Array.isArray(event?.players) ? event.players : [event?.player, event?.opponent].filter(Boolean);
+    return Number(event?.roundNumber ?? 1) >= 3
+        || players.some((player) => Number(player?.roundWins ?? 0) >= winsRequired);
+}
+
 export default function MatchmakingPage() {
     const navigate = useNavigate();
     const clientRef = useRef(null);
@@ -156,6 +171,7 @@ export default function MatchmakingPage() {
     const roundReadyTimeoutRef = useRef(null);
     const placementSubmittedRef = useRef(false);
     const placementSubmitPendingRef = useRef(false);
+    const classSelectionSyncRequestedRef = useRef(false);
     const queueStatusRef = useRef("CONNECTING");
     const [socketStatus, setSocketStatus] = useState("IDLE");
     const [queueStatus, setQueueStatus] = useState("CONNECTING");
@@ -165,6 +181,8 @@ export default function MatchmakingPage() {
     const [hasFinished, setHasFinished] = useState(false);
     const [hasSurrendered, setHasSurrendered] = useState(false);
     const [finishError, setFinishError] = useState(null);
+    const [disconnectNotice, setDisconnectNotice] = useState(null);
+    const [disconnectRemaining, setDisconnectRemaining] = useState(0);
     const [placementSubmitPending, setPlacementSubmitPending] = useState(false);
     const [confirmedPlacementObjects, setConfirmedPlacementObjects] = useState([]);
     const [loadoutChoice, setLoadoutChoice] = useState(() => normalizedBotLoadout(DEFAULT_BOT_LOADOUT));
@@ -181,6 +199,15 @@ export default function MatchmakingPage() {
         matchEventRef.current = event;
         setMatchEvent(event);
     };
+    const exitToHome = () => {
+        const currentEvent = matchEventRef.current;
+        navigate("/home", {
+            state: {
+                activeMatch: Boolean(currentEvent?.matchId)
+                    && !isSeriesComplete(currentEvent, playbackRef.current),
+            },
+        });
+    };
 
     useEffect(() => {
         let cancelled = false;
@@ -195,6 +222,15 @@ export default function MatchmakingPage() {
                     if (status === "ERROR" || status === "CLOSED") {
                         placementSubmitPendingRef.current = false;
                         setPlacementSubmitPending(false);
+                        if (matchEventRef.current?.matchId) {
+                            const endsAtMs = Date.now() + 30_000;
+                            setDisconnectNotice({
+                                endsAtMs,
+                                message: "Connection lost. Reconnect within 30 seconds or the match will be forfeited.",
+                                self: true,
+                            });
+                            setDisconnectRemaining(30);
+                        }
                     }
                 },
                 onEvent: (rawEvent) => {
@@ -203,6 +239,7 @@ export default function MatchmakingPage() {
                         updateQueueStatus("WAITING");
                     }
                     if (event.type === "MATCH_FOUND") {
+                        classSelectionSyncRequestedRef.current = false;
                         if (roundReadyTimeoutRef.current != null) {
                             clearTimeout(roundReadyTimeoutRef.current);
                             roundReadyTimeoutRef.current = null;
@@ -229,6 +266,7 @@ export default function MatchmakingPage() {
                         setRemaining(secondsRemaining(event.classSelectionEndsAtMs));
                     }
                     if (event.type === "MATCH_COUNTDOWN_READY") {
+                        classSelectionSyncRequestedRef.current = false;
                         setCurrentMatchEvent(event);
                         updateQueueStatus("COUNTDOWN");
                         setRemaining(secondsRemaining(event.countdownEndsAtMs, MATCH_COUNTDOWN_SECONDS));
@@ -258,6 +296,7 @@ export default function MatchmakingPage() {
                     }
                     if (event.type === "MATCH_ROUND_READY") {
                         const showNextRound = () => {
+                            classSelectionSyncRequestedRef.current = false;
                             roundReadyTimeoutRef.current = null;
                             setCurrentMatchEvent(event);
                             playbackRef.current = null;
@@ -279,7 +318,11 @@ export default function MatchmakingPage() {
                             if (roundReadyTimeoutRef.current != null) {
                                 clearTimeout(roundReadyTimeoutRef.current);
                             }
-                            roundReadyTimeoutRef.current = setTimeout(showNextRound, ROUND_RESULT_HOLD_MS);
+                            const holdEndsAtMs = Number(event.resultRevealsAtMs ?? 0) + ROUND_RESULT_HOLD_MS;
+                            const remainingHoldMs = event.resultRevealsAtMs == null
+                                ? ROUND_RESULT_HOLD_MS
+                                : Math.max(0, holdEndsAtMs - Date.now());
+                            roundReadyTimeoutRef.current = setTimeout(showNextRound, remainingHoldMs);
                         } else {
                             showNextRound();
                         }
@@ -287,6 +330,24 @@ export default function MatchmakingPage() {
                     if (event.type === "PLAYER_FINISHED") {
                         setCurrentMatchEvent(event);
                         updateQueueStatus(event.status);
+                    }
+                    if (event.type === "PLAYER_DISCONNECTED") {
+                        const disconnectedUserId = event.disconnectedUserId;
+                        const self = Boolean(disconnectedUserId && event.player?.userId)
+                            && String(disconnectedUserId) === String(event.player.userId);
+                        const endsAtMs = event.disconnectEndsAtMs ?? Date.now() + 30_000;
+                        setDisconnectNotice({
+                            endsAtMs,
+                            message: self
+                                ? "Connection lost. Reconnect within 30 seconds or the match will be forfeited."
+                                : `${event.opponent?.username ?? "Your opponent"} disconnected. They have 30 seconds to return.`,
+                            self,
+                        });
+                        setDisconnectRemaining(secondsRemaining(endsAtMs, 30));
+                    }
+                    if (event.type === "PLAYER_RECONNECTED") {
+                        setDisconnectNotice(null);
+                        setDisconnectRemaining(0);
                     }
                     if (event.type === "MATCH_ERROR") {
                         setHasFinished(false);
@@ -354,6 +415,14 @@ export default function MatchmakingPage() {
     }, [socketStatus]);
 
     useEffect(() => {
+        if (!disconnectNotice?.endsAtMs) return;
+        const update = () => setDisconnectRemaining(secondsRemaining(disconnectNotice.endsAtMs, 30));
+        update();
+        const interval = setInterval(update, 250);
+        return () => clearInterval(interval);
+    }, [disconnectNotice]);
+
+    useEffect(() => {
         const deadlineMs = queueStatus === "CLASS_SELECT"
             ? matchEvent?.classSelectionEndsAtMs
             : queueStatus === "OBJECT_PLACEMENT"
@@ -371,6 +440,11 @@ export default function MatchmakingPage() {
             setRemaining(nextRemaining);
             if (queueStatus === "COUNTDOWN" && nextRemaining === 0) {
                 updateQueueStatus("PREP");
+            }
+            if (queueStatus === "CLASS_SELECT" && nextRemaining === 0
+                && !classSelectionSyncRequestedRef.current) {
+                classSelectionSyncRequestedRef.current = true;
+                clientRef.current?.joinQueue();
             }
             if (queueStatus === "OBJECT_PLACEMENT" && nextRemaining === 0) {
                 if (!placementSubmittedRef.current && !placementSubmitPendingRef.current) {
@@ -459,7 +533,7 @@ export default function MatchmakingPage() {
     if (playback) {
         return (
             <main className="min-h-screen bg-arena-deep text-ink-hi font-ui">
-                <MatchHeader onExit={() => navigate("/home")} socketStatus={socketStatus} />
+                <MatchHeader onExit={exitToHome} socketStatus={socketStatus} disconnectNotice={disconnectNotice} disconnectRemaining={disconnectRemaining} />
                 <Suspense fallback={<ReplayLoadingFallback />}>
                     <SimulationReplay playback={playback} />
                 </Suspense>
@@ -470,7 +544,7 @@ export default function MatchmakingPage() {
     if (queueStatus === "CLASS_SELECT") {
         return (
             <main className="min-h-screen bg-arena-deep text-ink-hi font-ui">
-                <MatchHeader onExit={() => navigate("/home")} socketStatus={socketStatus} />
+                <MatchHeader onExit={exitToHome} socketStatus={socketStatus} disconnectNotice={disconnectNotice} disconnectRemaining={disconnectRemaining} />
                 <ClassSelectScreen
                     loadout={loadoutChoice}
                     onChange={setLoadoutChoice}
@@ -488,7 +562,7 @@ export default function MatchmakingPage() {
     if (queueStatus === "OBJECT_PLACEMENT") {
         return (
             <main className="min-h-screen bg-arena-deep text-ink-hi font-ui">
-                <MatchHeader onExit={() => navigate("/home")} socketStatus={socketStatus} />
+                <MatchHeader onExit={exitToHome} socketStatus={socketStatus} disconnectNotice={disconnectNotice} disconnectRemaining={disconnectRemaining} />
                 <ObjectPlacementScreen
                     key={`${matchEvent?.matchId ?? "match"}-${matchEvent?.roundNumber ?? 1}-${matchEvent?.player?.slot ?? 1}`}
                     player={matchEvent?.player}
@@ -506,19 +580,23 @@ export default function MatchmakingPage() {
 
     if (queueStatus === "PREP" || queueStatus === "WAITING_FOR_FINISH" || queueStatus === "READY_FOR_PLAYBACK") {
         return (
-            <BetaModel
-                matchContext={matchContext}
-                finishStatus={hasSurrendered ? "SURRENDERED" : hasFinished ? "FINISHED" : "TRAINING"}
-                finishError={finishError}
-                onFinishMatch={finishMatch}
-                onSurrenderMatch={surrenderMatch}
-            />
+            <>
+                <BetaModel
+                    matchContext={matchContext}
+                    finishStatus={hasSurrendered ? "SURRENDERED" : hasFinished ? "FINISHED" : "TRAINING"}
+                    finishError={finishError}
+                    onFinishMatch={finishMatch}
+                    onSurrenderMatch={surrenderMatch}
+                    onExit={exitToHome}
+                />
+                <DisconnectNotice notice={disconnectNotice} remaining={disconnectRemaining} />
+            </>
         );
     }
 
     return (
         <main className="min-h-screen bg-arena-deep text-ink-hi font-ui">
-            <MatchHeader onExit={() => navigate("/home")} socketStatus={socketStatus} />
+            <MatchHeader onExit={exitToHome} socketStatus={socketStatus} disconnectNotice={disconnectNotice} disconnectRemaining={disconnectRemaining} />
             <section className="relative flex min-h-[calc(100vh-52px)] items-center justify-center px-6">
                 {queueStatus === "COUNTDOWN" ? (
                     <div className="text-center">
@@ -860,8 +938,9 @@ function isNeutralMatchObject(object) {
     return object?.id === "object_center"
         || object?.type === VANGUARD_BEACON_TYPE;
 }
-function MatchHeader({ onExit, socketStatus }) {
+function MatchHeader({ onExit, socketStatus, disconnectNotice, disconnectRemaining }) {
     return (
+        <>
         <header className="flex h-[52px] items-center justify-between border-b border-border-lo bg-arena-panel px-6">
             <button
                 type="button"
@@ -882,5 +961,29 @@ function MatchHeader({ onExit, socketStatus }) {
                 </button>
             </div>
         </header>
+        <DisconnectNotice notice={disconnectNotice} remaining={disconnectRemaining} />
+        </>
+    );
+}
+
+function DisconnectNotice({ notice, remaining }) {
+    if (!notice) return null;
+    return (
+        <aside role="alert" className="fixed inset-x-4 top-16 z-[100] mx-auto max-w-xl rounded-xl border border-amber-400/60 bg-[#171208f2] px-5 py-4 shadow-[0_18px_60px_rgba(0,0,0,.5)] backdrop-blur">
+            <div className="flex items-center gap-4">
+                <div className="grid h-11 w-11 flex-none place-items-center rounded-full border border-amber-400/50 font-mono text-lg font-bold text-amber-300">
+                    {remaining}
+                </div>
+                <div className="min-w-0 flex-1">
+                    <p className="font-mono text-[10px] font-bold tracking-[.18em] text-amber-300">CONNECTION INTERRUPTED</p>
+                    <p className="mt-1 text-sm leading-5 text-slate-200">{notice.message}</p>
+                </div>
+                {notice.self && (
+                    <button type="button" onClick={() => window.location.reload()} className="flex-none border border-cyan-400/50 bg-cyan-950/30 px-3 py-2 text-xs font-bold text-cyan-200">
+                        Reconnect
+                    </button>
+                )}
+            </div>
+        </aside>
     );
 }

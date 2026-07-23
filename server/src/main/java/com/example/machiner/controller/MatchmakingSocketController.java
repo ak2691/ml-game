@@ -6,10 +6,8 @@ import com.example.machiner.DTO.MatchObjectPlacementDTO;
 import com.example.machiner.DTO.MatchPlaybackDTO;
 import com.example.machiner.DTO.MatchmakingEventDTO;
 import com.example.machiner.domain.AppUser;
-import com.example.machiner.repository.UserRepository;
 import com.example.machiner.service.AuthException;
-import com.example.machiner.DTO.MatchmakingEventDTO;
-import java.time.Instant;
+import com.example.machiner.service.CurrentUserService;
 import com.example.machiner.service.MatchmakingService;
 import com.example.machiner.service.MatchmakingService.OutboundMatchmakingEvent;
 import java.security.Principal;
@@ -18,26 +16,32 @@ import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.context.event.EventListener;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.handler.annotation.MessageExceptionHandler;
 import org.springframework.messaging.handler.annotation.Payload;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Controller;
+import org.springframework.web.socket.messaging.SessionDisconnectEvent;
 
 @Controller
 public class MatchmakingSocketController {
 
+    private static final Logger log = LoggerFactory.getLogger(MatchmakingSocketController.class);
     private final MatchmakingService matchmakingService;
     private final SimpMessagingTemplate messagingTemplate;
-    private final UserRepository userRepository;
+    private final CurrentUserService currentUserService;
 
     public MatchmakingSocketController(
             MatchmakingService matchmakingService,
             SimpMessagingTemplate messagingTemplate,
-            UserRepository userRepository) {
+            CurrentUserService currentUserService) {
         this.matchmakingService = matchmakingService;
         this.messagingTemplate = messagingTemplate;
-        this.userRepository = userRepository;
+        this.currentUserService = currentUserService;
     }
 
     @MessageMapping("/matchmaking.join")
@@ -65,7 +69,19 @@ public class MatchmakingSocketController {
 
     @MessageExceptionHandler(AuthException.class)
     public void handleMatchmakingError(AuthException exception, Principal principal) {
-        if (principal == null) return;
+        sendError(principal, exception.getMessage());
+    }
+
+    @MessageExceptionHandler(Exception.class)
+    public void handleUnexpectedMatchmakingError(Exception exception, Principal principal) {
+        log.error("Unexpected matchmaking command failure", exception);
+        sendError(principal, "The matchmaking command could not be processed");
+    }
+
+    private void sendError(Principal principal, String message) {
+        if (principal == null) {
+            return;
+        }
         messagingTemplate.convertAndSendToUser(
                 principal.getName(),
                 "/queue/matchmaking",
@@ -88,7 +104,7 @@ public class MatchmakingSocketController {
                         null,
                         null,
                         null,
-                        exception.getMessage(),
+                        message,
                         null,
                         List.of(),
                         List.of(),
@@ -122,12 +138,32 @@ public class MatchmakingSocketController {
         publish(matchmakingService.surrender(user.getId()));
     }
 
+    @EventListener
+    public void handleDisconnect(SessionDisconnectEvent event) {
+        Principal principal = event.getUser();
+        if (principal == null) {
+            return;
+        }
+        List<OutboundMatchmakingEvent> events = matchmakingService.markDisconnected(principal.getName());
+        publish(events);
+        events.stream()
+                .map(OutboundMatchmakingEvent::event)
+                .filter(matchEvent -> "PLAYER_DISCONNECTED".equals(matchEvent.type()))
+                .map(MatchmakingEventDTO::disconnectEndsAt)
+                .filter(java.util.Objects::nonNull)
+                .findFirst()
+                .ifPresent(deadline -> CompletableFuture
+                        .delayedExecutor(delayUntil(deadline), TimeUnit.MILLISECONDS)
+                        .execute(() -> publish(matchmakingService.resolveDisconnectTimeout(
+                                principal.getName(),
+                                deadline))));
+    }
+
     private AppUser requireUser(Principal principal) {
-        if (principal == null || principal.getName() == null) {
+        if (!(principal instanceof Authentication authentication)) {
             throw new AuthException("authentication is required");
         }
-        return userRepository.findByNormalizedEmail(principal.getName().trim().toLowerCase())
-                .orElseThrow(() -> new AuthException("authenticated user was not found"));
+        return currentUserService.requireCurrentUser(authentication);
     }
 
     private List<MatchPlaybackDTO.ObstaclePlacementDTO> toPlaybackObjects(MatchObjectPlacementDTO payload) {
@@ -170,7 +206,7 @@ public class MatchmakingSocketController {
                 .forEach((matchId, event) -> {
                     long delayMillis = event.classSelectionEndsAt() == null
                             ? TimeUnit.SECONDS.toMillis(60)
-                            : Math.max(0, Duration.between(Instant.now(), event.classSelectionEndsAt()).toMillis());
+                            : delayUntil(event.classSelectionEndsAt());
                     CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS)
                         .execute(() -> {
                             List<OutboundMatchmakingEvent> timeoutEvents = matchmakingService.resolveClassSelectionTimeout(matchId);
@@ -188,10 +224,17 @@ public class MatchmakingSocketController {
                 .forEach(event -> {
                     long delayMillis = event.objectPlacementEndsAt() == null
                             ? TimeUnit.SECONDS.toMillis(20)
-                            : Math.max(0, Duration.between(Instant.now(), event.objectPlacementEndsAt()).toMillis());
+                            : delayUntil(event.objectPlacementEndsAt());
                     CompletableFuture.delayedExecutor(delayMillis, TimeUnit.MILLISECONDS)
                             .execute(() -> publish(matchmakingService.resolveObjectPlacementTimeout(event.matchId())));
                 });
+    }
+
+    private static long delayUntil(Instant deadline) {
+        Duration remaining = Duration.between(Instant.now(), deadline);
+        if (remaining.isNegative() || remaining.isZero()) return 0;
+        long wholeMillis = remaining.toMillis();
+        return remaining.compareTo(Duration.ofMillis(wholeMillis)) > 0 ? wholeMillis + 1 : wholeMillis;
     }
 
     private void publish(OutboundMatchmakingEvent event) {

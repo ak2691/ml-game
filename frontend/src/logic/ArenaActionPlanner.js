@@ -28,11 +28,12 @@ export function buildDeterministicLogicAction(configuration, stateSnapshot) {
             targetX: specialTarget?.x ?? abilityBlock.targetX,
             targetY: specialTarget?.y ?? abilityBlock.targetY,
         } : null,
+        customVariables: { ...(stateSnapshot.playerModel.customVariables ?? {}) },
     };
 }
 
 export function idleAction() {
-    return { dx: 0, dy: 0, dRot: 0, dashAction: null, abilityAction: null };
+    return { dx: 0, dy: 0, dRot: 0, dashAction: null, abilityAction: null, customVariables: {} };
 }
 
 function configuredMovementAction(block) {
@@ -80,7 +81,11 @@ function movementVector(action, player, target) {
     if (absolute[action]) return { dx: absolute[action][0], dy: absolute[action][1] };
     if (action === "move_center") return { dx: ARENA_WIDTH_UNITS / 2 - player.x, dy: ARENA_HEIGHT_UNITS / 2 - player.y };
     if (!target) return { dx: 0, dy: 0 };
-    const inward = { dx: target.x - player.x, dy: target.y - player.y };
+    let inward = { dx: target.x - player.x, dy: target.y - player.y };
+    if (Math.hypot(inward.dx, inward.dy) <= 0.001) {
+        const facingRadians = Number(player.rotation ?? 0) * Math.PI / 180;
+        inward = { dx: Math.cos(facingRadians), dy: Math.sin(facingRadians) };
+    }
     const outward = { dx: -inward.dx, dy: -inward.dy };
     const left = { dx: inward.dy, dy: -inward.dx };
     const right = { dx: -inward.dy, dy: inward.dx };

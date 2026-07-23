@@ -263,7 +263,7 @@ function tickHunterDrone(entity, world, combat) {
             else if (targetIndex >= 0) fighters[targetIndex] = combat.applyDamageToShape(fighters[targetIndex], 3);
             drone = withComponentState(drone, {
                 shotCooldownMs: Number(PROTOTYPE_ABILITY_STATS.hunter_drone.shotCooldownMs ?? 1000),
-                shotVisualMs: 120,
+                shotVisualMs: 300,
             });
         }
     }

@@ -7,6 +7,8 @@ import {
     STATE_VARIABLES,
     TARGET_TYPES,
     actionSupportsTarget,
+    countVariableSlots,
+    countConditionSlots,
     createDefaultMeleeStrategyConfiguration,
     hasMeleeStrategyActions,
     moveLogicColumnPriority,
@@ -24,11 +26,41 @@ import {
     validateMeleeStrategyConfiguration,
 } from "./BotBrain.js";
 import { buildStatePayload } from "../beta/modelPayloads/strategyStatePayload.js";
+import { buildDeterministicLogicAction } from "./ArenaActionPlanner.js";
+import { getTutorialScenario } from "../tutorial/TutorialPresets.js";
 
 test("opponent condition and variable labels contain only one ordinal", () => {
     for (const definition of [...CONDITION_DEFINITIONS, ...STATE_VARIABLES]) {
         assert.doesNotMatch(definition.label, /Opponent 1 1\b/, definition.id);
     }
+});
+
+test("expression condition factory preserves a supplied custom variable definition", () => {
+    assert.deepEqual(createExpressionCondition({
+        id: "custom.counter",
+        label: "Counter",
+        valueType: "number",
+        defaultValue: 7,
+        min: -100,
+        max: 100,
+    }), {
+        type: "expression",
+        left: "custom.counter",
+        comparator: "lt",
+        right: { type: "number", value: 7 },
+    });
+
+    assert.deepEqual(createExpressionCondition({
+        id: "custom.ready",
+        label: "Ready",
+        valueType: "boolean",
+        defaultValue: false,
+    }), {
+        type: "expression",
+        left: "custom.ready",
+        comparator: "eq",
+        right: { type: "boolean", value: true },
+    });
 });
 
 function payload(overrides = {}) {
@@ -88,6 +120,36 @@ test("Bot Room resolves Opponent 1 by fighter id for Walk, Dash, and Micro Dash"
     assert.equal(plan.movement?.action, "move_walk");
     assert.equal(plan.dash?.action, "dash");
     assert.equal(plan.ability?.action, "micro_dash");
+});
+
+test("target-relative Away uses opposite facing when fighters occupy the same position", () => {
+    const action = buildDeterministicLogicAction({
+        version: "melee-logic-tree-v1",
+        blocks: [{
+            id: "overlap-retreat",
+            priority: 1,
+            conditions: [{ type: "always" }],
+            actions: [{ action: "move_walk", movementMode: "target", movementDirection: "away", actionTarget: "opponent" }],
+        }],
+    }, {
+        playerModel: { id: "main", x: 500, y: 500, rotation: 90, hp: 20, abilities: [] },
+        objects: [{ id: "opponent-model", type: "opponentModel", x: 500, y: 500, rotation: 270, hp: 1000, abilities: [] }],
+    });
+
+    assert.ok(Math.abs(action.dx) < 0.001);
+    assert.ok(action.dy < 0);
+});
+
+test("step seven solution stops approaching inside Sword Swing range", () => {
+    const configuration = getTutorialScenario(6).solution;
+    const action = buildDeterministicLogicAction(configuration, {
+        playerModel: { id: "main", x: 500, y: 480, rotation: 90, hp: 100, abilities: ["swing"], swingAvailable: true },
+        objects: [{ id: "opponent-model", type: "opponentModel", x: 500, y: 560, rotation: 270, hp: 1000, abilities: ["swing"] }],
+    });
+
+    assert.equal(action.dx, 0);
+    assert.equal(action.dy, 0);
+    assert.equal(action.abilityAction?.action, "swing");
 });
 
 test("normalizes deterministic logic blocks without training knobs", () => {
@@ -675,6 +737,26 @@ test("opponent fireball target resolves the closest opponent fireball", () => {
     }, "opponent_fireball")?.id, closeFireball.id);
 });
 
+test("a dead opponent remains targetable while Target Alive reports false", () => {
+    const statePayload = payload({ opponent: { hp: 0, alive: false, hittable: false } });
+    const state = { player: statePayload.playerModel, opponent: statePayload.objects[0], objects: statePayload.objects, obstacles: [] };
+    const target = resolveMeleeStrategyTarget(state, "opponent");
+    const deadTargetRule = {
+        ...createLogicBlock("always", "move_stop"),
+        conditions: [{
+            type: "expression",
+            left: "target.alive",
+            comparator: "eq",
+            target: "opponent",
+            right: { type: "boolean", value: false },
+        }],
+    };
+
+    assert.equal(target?.id, "opponent-model");
+    assert.equal(target?.hp, 0);
+    assert.equal(selectMeleeStrategyBlock({ blocks: [deadTargetRule] }, statePayload)?.id, deadTargetRule.id);
+});
+
 test("ordered entity selectors require the requested ordinal and target count sees the full type", () => {
     const objects = [
         { id: "fireball-001", type: "fireball", ownerId: "opponent-model", x: 430, y: 400, size: 20, createdOrder: 1 },
@@ -709,7 +791,7 @@ test("rotation variables use north-zero clockwise bearings and fighter-only faci
 
 test("relative bearing offers shortest, clockwise, and counterclockwise angle choices", () => {
     const rules = [
-        ["target.relativeBearing", -90],
+        ["target.relativeBearing", 90],
         ["target.relativeBearingClockwise", 270],
         ["target.relativeBearingCounterclockwise", 90],
     ].map(([left, value], index) => ({
@@ -719,6 +801,25 @@ test("relative bearing offers shortest, clockwise, and counterclockwise angle ch
     }));
     const state = payload({ playerModel: { x: 400, y: 400, rotation: 90 }, opponentModel: { x: 500, y: 400 } });
     for (const rule of rules) assert.equal(selectMeleeStrategyBlock({ blocks: [rule] }, state)?.id, rule.id);
+});
+
+test("shortest target bearing difference is never negative", () => {
+    const facingToleranceRule = {
+        ...createLogicBlock("always", "shoot_gun"),
+        conditions: [{
+            type: "expression",
+            left: "target.relativeBearing",
+            comparator: "lt",
+            target: "opponent",
+            right: { type: "number", value: 10 },
+        }],
+    };
+    const targetWestWhileFacingNorth = payload({
+        playerModel: { x: 400, y: 400, rotation: -90 },
+        opponentModel: { x: 300, y: 400 },
+    });
+
+    assert.equal(selectMeleeStrategyBlock({ blocks: [facingToleranceRule] }, targetWestWhileFacingNorth), null);
 });
 
 test("edge-distance conditionals replace cornered rules with less-than and greater-than options", () => {
@@ -853,21 +954,6 @@ test("removed object-type, danger-zone, and legacy effect conditions stay hidden
     }
 });
 
-test("boost count variables track each fighter's permanent boosts", () => {
-    const rule = {
-        ...createLogicBlock("always", "move_center"),
-        conditions: [{
-            type: "expression",
-            left: "my.assaultBoostCount",
-            comparator: "gte",
-            right: { type: "number", value: 2 },
-        }],
-    };
-    assert.equal(selectMeleeStrategyBlock({ blocks: [rule] }, payload({
-        playerModel: { assaultBoostStacks: 2 },
-    }))?.id, rule.id);
-});
-
 test("cooldown expression variables use seconds and behavior shortcuts stay hidden", () => {
     const visibleConditionIds = new Set(CONDITION_TYPES.map((condition) => condition.id));
     assert.equal(visibleConditionIds.has("expression"), false);
@@ -919,6 +1005,44 @@ test("generic selected-ability variables replace per-ability condition menu entr
     };
     assert.equal(selectMeleeStrategyBlock({ blocks: [ready] }, payload({ playerModel: { abilityCooldowns: { null_zone: 0 } } }))?.id, ready.id);
     assert.equal(selectMeleeStrategyBlock({ blocks: [ready] }, payload({ playerModel: { abilityCooldowns: { null_zone: 500 } } })), null);
+});
+
+test("expression variable operands can resolve different targets", () => {
+    const rule = {
+        ...createLogicBlock("always", "move_inward"),
+        conditions: [{
+            type: "expression",
+            left: "target.distance",
+            leftTarget: "opponent_grenade",
+            comparator: "lt",
+            right: { type: "variable", value: "target.distance" },
+            rightTarget: "opponent",
+        }],
+    };
+    const state = payload({ objects: [{ id: "grenade-opponent-model-1", type: "grenade", ownerId: "opponent-model", x: 450, y: 400, size: 12 }] });
+
+    const normalized = normalizeMeleeStrategyConfiguration({ blocks: [rule] });
+    assert.equal(normalized.blocks[0].conditions[0].leftTarget, "opponent_grenade");
+    assert.equal(normalized.blocks[0].conditions[0].rightTarget, "opponent");
+    assert.equal(selectMeleeStrategyBlock({ blocks: [rule] }, state).id, rule.id);
+});
+
+test("tick damage, net hp change, target direction, and velocity are expression variables", () => {
+    const state = payload({
+        playerModel: { damageTakenLastTick: 30, hpNetChangeLastTick: -15 },
+        opponent: { velocityX: 3, velocityY: -4 },
+    });
+    const matches = (left, comparator, right) => selectMeleeStrategyBlock({
+        blocks: [{
+            ...createLogicBlock("always", "move_stop"),
+            conditions: [{ type: "expression", left, comparator, leftTarget: "opponent", right }],
+        }],
+    }, state);
+
+    assert.ok(matches("my.damageTakenLastTick", "eq", { type: "number", value: 30 }));
+    assert.ok(matches("my.hpNetChangeLastTick", "eq", { type: "number", value: -15 }));
+    assert.ok(matches("target.velocity", "eq", { type: "number", value: 5 }));
+    assert.ok(matches("target.movementDirection", "range", { type: "range", min: 30, max: 40 }));
 });
 
 test("target direction uses an inclusive signed range", () => {
@@ -1066,4 +1190,217 @@ test("normalization keeps only one action per execution category", () => {
     });
 
     assert.deepEqual(normalized.blocks[0].actions.map((entry) => entry.action), ["move_walk", "swing"]);
+});
+
+test("custom integer variable nodes persist and saturate at the hard limit", () => {
+    const state = payload();
+    state.playerModel.customVariables = {};
+    const configuration = {
+        version: "melee-logic-tree-v1",
+        customVariables: [{ id: "custom.counter", name: "Counter", valueType: "number", initialValue: 99_990 }],
+        columns: [{ id: "column", createdOrder: 0, branches: [{
+            id: "branch", branchType: "if", createdOrder: 0, conditions: [{ type: "always" }],
+            actions: [{ action: "variable", variableId: "custom.counter", operation: "add", value: 50 }], children: [],
+        }] }],
+    };
+
+    selectMeleeStrategyActionPlan(configuration, state);
+
+    assert.equal(state.playerModel.customVariables["custom.counter"], 99_999);
+});
+
+test("custom variable increments persist across ticks and gate later actions", () => {
+    const state = payload({ playerModel: { customVariables: {} } });
+    const configuration = {
+        version: "melee-logic-tree-v1",
+        customVariables: [{ id: "custom.counter", name: "Counter", valueType: "number", initialValue: 0 }],
+        columns: [
+            { id: "increment", createdOrder: 0, branches: [{
+                id: "increment-always", branchType: "if", createdOrder: 0,
+                conditions: [{ type: "always" }],
+                actions: [{ action: "variable", variableId: "custom.counter", operation: "add", value: 1 }], children: [],
+            }] },
+            { id: "gate", createdOrder: 1, branches: [{
+                id: "move-after-five", branchType: "if", createdOrder: 0,
+                conditions: [{ type: "expression", left: "custom.counter", comparator: "gt", right: { type: "number", value: 5 } }],
+                actions: [{ action: "move_walk", movementMode: "target", movementDirection: "toward", actionTarget: "opponent" }], children: [],
+            }] },
+        ],
+    };
+
+    for (let tick = 0; tick < 6; tick += 1) selectMeleeStrategyActionPlan(configuration, state);
+    assert.equal(state.playerModel.customVariables["custom.counter"], 6);
+    assert.equal(selectMeleeStrategyActionPlan(configuration, state).movement?.action, "move_walk");
+});
+
+test("normalization restores declared custom-variable metadata for variable action references", () => {
+    const normalized = normalizeMeleeStrategyConfiguration({
+        version: "melee-logic-tree-v1",
+        columns: [{
+            branches: [{
+                branchType: "if",
+                conditions: [{ type: "always" }],
+                actions: [
+                    { action: "variable", variableId: "custom.counter", operation: "add", value: 1 },
+                    { action: "variable", variableId: "custom.enabled", operation: "set", value: true },
+                ],
+                children: [],
+            }],
+        }],
+    });
+
+    assert.deepEqual(normalized.customVariables, [
+        { id: "custom.counter", name: "Variable 1", valueType: "number", initialValue: 0 },
+        { id: "custom.enabled", name: "Variable 2", valueType: "boolean", initialValue: false },
+    ]);
+    assert.equal(normalized.columns[0].branches[0].variableId, "custom.counter");
+});
+
+test("normalization restores metadata for custom variables referenced only by conditions", () => {
+    const normalized = normalizeMeleeStrategyConfiguration({
+        columns: [{ branches: [{
+            branchType: "if",
+            conditions: [
+                { type: "expression", left: "custom.ready", comparator: "eq", right: { type: "boolean", value: true } },
+                { type: "expression", left: "my.hp", comparator: "gt", right: { type: "variable", value: "custom.threshold" } },
+            ],
+            actions: [{ action: "move_stop" }],
+            children: [],
+        }] }],
+    });
+
+    assert.deepEqual(normalized.customVariables, [
+        { id: "custom.ready", name: "Variable 1", valueType: "boolean", initialValue: false },
+        { id: "custom.threshold", name: "Variable 2", valueType: "number", initialValue: 0 },
+    ]);
+});
+
+test("integer variable expressions chain state variables, custom variables, and literals", () => {
+    const state = payload({ playerModel: { customVariables: { "custom.first": 40, "custom.second": 7 } } });
+    state.objects[0].hp = 30;
+    const configuration = {
+        customVariables: [
+            { id: "custom.first", name: "First", valueType: "number", initialValue: 0 },
+            { id: "custom.second", name: "Second", valueType: "number", initialValue: 0 },
+        ],
+        columns: [{ id: "column", createdOrder: 0, branches: [{ id: "branch", branchType: "if", createdOrder: 0, conditions: [{ type: "always" }], actions: [{
+            action: "variable", variableId: "custom.first", terms: [
+                { operator: "add", operand: { type: "variable", value: "opponent.hp" } },
+                { operator: "subtract", operand: { type: "variable", value: "custom.second" } },
+                { operator: "add", operand: { type: "number", value: 2 } },
+            ],
+        }], children: [] }] }],
+    };
+    selectMeleeStrategyActionPlan(configuration, state);
+    assert.equal(state.playerModel.customVariables["custom.first"], 65);
+});
+
+test("equals evaluates from zero on every execution without charging unrelated variable slots", () => {
+    const state = payload({ playerModel: { customVariables: {} } });
+    const action = { action: "variable", variableId: "custom.total", terms: [
+        { operator: "set", operand: { type: "number", value: 5 } },
+        { operator: "add", operand: { type: "number", value: 3 } },
+    ] };
+    const configuration = { customVariables: [{ id: "custom.total", name: "Total", valueType: "number", initialValue: 99 }], columns: [{ id: "column", createdOrder: 0, branches: [{ id: "branch", branchType: "if", createdOrder: 0, conditions: [{ type: "expression", left: "my.hp", comparator: "gt", right: { type: "number", value: 0 } }], actions: [action], children: [] }] }] };
+    selectMeleeStrategyActionPlan(configuration, state);
+    selectMeleeStrategyActionPlan(configuration, state);
+    assert.equal(state.playerModel.customVariables["custom.total"], 8);
+    assert.equal(countVariableSlots(configuration), 1);
+    assert.equal(countConditionSlots(configuration), 1);
+});
+
+test("arena planner returns updated custom variables without mutating its source shape", () => {
+    const fighter = { id: "main", x: 400, y: 400, hp: 100, customVariables: { "custom.counter": 2 } };
+    const opponent = { id: "opponent-model", x: 600, y: 400, hp: 100 };
+    const configuration = {
+        version: "melee-logic-tree-v1",
+        customVariables: [{ id: "custom.counter", name: "Counter", valueType: "number", initialValue: 0 }],
+        columns: [{ id: "increment", createdOrder: 0, branches: [{
+            id: "increment-always", branchType: "if", createdOrder: 0,
+            conditions: [{ type: "always" }],
+            actions: [{ action: "variable", variableId: "custom.counter", operation: "add", value: 1 }], children: [],
+        }] }],
+    };
+
+    const action = buildDeterministicLogicAction(configuration, buildStatePayload([fighter, opponent], "custom"));
+
+    assert.equal(action.customVariables["custom.counter"], 3);
+    assert.equal(fighter.customVariables["custom.counter"], 2);
+});
+
+test("legacy variable action with an empty id modifies the visually selected first variable", () => {
+    const state = payload({ playerModel: { customVariables: {} } });
+    const configuration = {
+        version: "melee-logic-tree-v1",
+        customVariables: [{ id: "custom.variable_1", name: "Variable 1", valueType: "number", initialValue: 0 }],
+        columns: [{ id: "increment", createdOrder: 0, branches: [{
+            id: "increment-always", branchType: "if", createdOrder: 0,
+            conditions: [{ type: "always" }],
+            actions: [{ action: "variable", variableId: "", operation: "add", value: 1 }], children: [],
+        }] }],
+    };
+
+    selectMeleeStrategyActionPlan(configuration, state);
+
+    assert.equal(state.playerModel.customVariables["custom.variable_1"], 1);
+});
+
+test("derived booleans consume variable slots and can gate combat actions", () => {
+    const configuration = {
+        version: "melee-logic-tree-v1",
+        customVariables: [{
+            id: "custom.low_hp", name: "Low HP", valueType: "boolean", initialValue: false,
+            conditions: [{ type: "expression", left: "my.hp", comparator: "lt", right: { type: "number", value: 50 } }],
+        }],
+        columns: [{ id: "column", createdOrder: 0, branches: [{
+            id: "branch", branchType: "if", createdOrder: 0,
+            conditions: [{ type: "expression", left: "custom.low_hp", comparator: "eq", right: { type: "boolean", value: true } }],
+            actions: [{ action: "move_walk", movementMode: "target", movementDirection: "away", actionTarget: "opponent" }], children: [],
+        }] }],
+    };
+    const state = payload({ playerModel: { hp: 25 } });
+
+    assert.equal(selectMeleeStrategyActionPlan(configuration, state).movement?.action, "move_walk");
+    assert.equal(countVariableSlots(configuration), 2);
+    assert.equal(countConditionSlots(configuration), 3); // one derivation plus the derived variable's two-slot use cost
+    const tooExpensive = { ...configuration, customVariables: Array.from({ length: 51 }, (_, index) => ({ ...configuration.customVariables[0], id: `custom.v${index}`, name: `Variable ${index}` })) };
+    assert.match(validateMeleeStrategyConfiguration(tooExpensive).errors.join(" "), /variable slots/i);
+});
+
+test("custom variables inside derivations do not recursively increase variable cost", () => {
+    const configuration = {
+        customVariables: [
+            { id: "custom.source", name: "Source", valueType: "boolean", initialValue: false },
+            { id: "custom.derived", name: "Derived", valueType: "boolean", initialValue: false, conditions: [
+                { type: "expression", left: "custom.source", comparator: "eq", right: { type: "boolean", value: true } },
+            ] },
+        ],
+        columns: [{ id: "column", branches: [{ id: "branch", conditions: [
+            { type: "expression", left: "custom.derived", comparator: "eq", right: { type: "boolean", value: true } },
+        ], actions: [], children: [] }] }],
+    };
+
+    assert.equal(countVariableSlots(configuration), 3);
+    assert.equal(countConditionSlots(configuration), 3);
+});
+
+test("a custom variable used as the right conditional operand charges its definition cost", () => {
+    const configuration = {
+        customVariables: [{ id: "custom.threshold", name: "Threshold", valueType: "number", initialValue: 10 }],
+        columns: [{ id: "column", branches: [{ id: "branch", conditions: [
+            { type: "expression", left: "my.hp", comparator: "gt", right: { type: "variable", value: "custom.threshold" } },
+        ], actions: [], children: [] }] }],
+    };
+
+    assert.equal(countVariableSlots(configuration), 1);
+    assert.equal(countConditionSlots(configuration), 1);
+});
+
+test("elapsed match time is a non-negative expression variable measured in seconds", () => {
+    const rule = {
+        ...createLogicBlock("always", "move_center"),
+        conditions: [{ type: "expression", left: "match.elapsedSeconds", comparator: "gte", right: { type: "number", value: 2.5 } }],
+    };
+    assert.equal(selectMeleeStrategyBlock({ blocks: [rule] }, payload({ playerModel: { matchElapsedMs: 2_500 } }))?.id, rule.id);
+    assert.equal(selectMeleeStrategyBlock({ blocks: [rule] }, payload({ playerModel: { matchElapsedMs: 2_400 } })), null);
 });

@@ -16,12 +16,18 @@ public record ArenaEntity(
         double traveled,
         int timerMs,
         boolean armed,
-        int hp) {
+        int hp,
+        int shotVisualMs) {
+
+    public ArenaEntity(String id, String type, int ownerSlot, double x, double y, int size,
+                       double velocityX, double velocityY, double traveled, int timerMs, boolean armed, int hp) {
+        this(id, type, ownerSlot, x, y, size, velocityX, velocityY, traveled, timerMs, armed, hp, 0);
+    }
 
     public ArenaEntity(String id, String type, int ownerSlot, double x, double y, int size,
                        double velocityX, double velocityY, double traveled, int timerMs, boolean armed) {
         this(id, type, ownerSlot, x, y, size, velocityX, velocityY, traveled, timerMs, armed,
-                "hunterDrone".equals(type) ? 50 : 0);
+                "hunterDrone".equals(type) ? 50 : 0, 0);
     }
 
     public Components components() {

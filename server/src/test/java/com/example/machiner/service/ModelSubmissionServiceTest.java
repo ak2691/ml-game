@@ -3,6 +3,7 @@ package com.example.machiner.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -54,7 +55,7 @@ class ModelSubmissionServiceTest {
             jsonMapper);
 
     @Test
-    void persistsAcceptedSubmissionWithServerComputedHash() throws Exception {
+    void persistsAcceptedSubmissionWithFullBrainPayload() throws Exception {
         UUID submissionId = UUID.randomUUID();
         AppUser user = prototypeUser();
         Authentication authentication = authenticatedUser(user);
@@ -73,15 +74,9 @@ class ModelSubmissionServiceTest {
         verify(modelSubmissionRepository).save(submissionCaptor.capture());
         ModelSubmission savedSubmission = submissionCaptor.getValue();
         assertThat(savedSubmission.getUser()).isSameAs(user);
-        assertThat(savedSubmission.getArchitectureVersion()).isEqualTo("deterministic-logic-v1");
-        assertThat(savedSubmission.getFeatureSchemaVersion()).isEqualTo("duel-logic-features-v1");
-        assertThat(savedSubmission.getActionSchemaVersion()).isEqualTo("melee-logic-actions-v1");
+        assertThat(savedSubmission.getBrainSchemaVersion()).isEqualTo("melee-logic-tree-v1");
         assertThat(savedSubmission.getTrainingSessionId()).isEqualTo(trainingSessionId.toString());
-        assertThat(savedSubmission.getTrainingDurationMs()).isGreaterThanOrEqualTo(0);
-        assertThat(savedSubmission.getTrainingSteps()).isEqualTo(0);
-        assertThat(savedSubmission.getTrainingMetrics()).contains("\"deterministic-logic-check-v1\"");
-        assertThat(savedSubmission.getModelArtifacts()).contains("\"move_inward\"");
-        assertThat(savedSubmission.getModelHash()).isEqualTo(response.getComputedModelHash());
+        assertThat(savedSubmission.getBrainPayload()).contains("\"move_inward\"");
         assertThat(savedSubmission.getStatus()).isEqualTo(ModelSubmissionStatus.VALIDATED);
 
         ArgumentCaptor<ValidationResult> resultCaptor = ArgumentCaptor.forClass(ValidationResult.class);
@@ -90,7 +85,7 @@ class ModelSubmissionServiceTest {
         assertThat(savedResult.getModelSubmission()).isSameAs(savedSubmission);
         assertThat(savedResult.getStatus()).isEqualTo(ValidationStatus.ACCEPTED);
         assertThat(savedResult.getValidatorVersion()).isEqualTo("bot-brain-submission-v1");
-        assertThat(savedResult.getDetails()).contains("\"computedModelHash\"");
+        assertThat(savedResult.getDetails()).doesNotContain("ModelHash");
     }
 
     @Test
@@ -101,7 +96,7 @@ class ModelSubmissionServiceTest {
         stubSavedSubmissionId(submissionId);
 
         UUID trainingSessionId = UUID.randomUUID();
-        when(trainingSessionRepository.findByIdAndUserId(trainingSessionId, user.getId()))
+        when(trainingSessionRepository.findByIdAndUserIdForSubmission(trainingSessionId, user.getId()))
                 .thenReturn(Optional.empty());
 
         var response = service.submit(validPayload(trainingSessionId), authentication);
@@ -137,9 +132,7 @@ class ModelSubmissionServiceTest {
         ArgumentCaptor<ModelSubmission> submissionCaptor = ArgumentCaptor.forClass(ModelSubmission.class);
         verify(modelSubmissionRepository).save(submissionCaptor.capture());
         ModelSubmission savedSubmission = submissionCaptor.getValue();
-        assertThat(savedSubmission.getArchitectureVersion()).isEqualTo("missing-architecture");
-        assertThat(savedSubmission.getFeatureSchemaVersion()).isEqualTo("missing-features");
-        assertThat(savedSubmission.getActionSchemaVersion()).isEqualTo("melee-logic-actions-v1");
+        assertThat(savedSubmission.getBrainSchemaVersion()).isEqualTo("missing-brain-schema");
         assertThat(savedSubmission.getTrainingSessionId()).hasSize(100);
         assertThat(savedSubmission.getStatus()).isEqualTo(ModelSubmissionStatus.REJECTED);
 
@@ -196,21 +189,65 @@ class ModelSubmissionServiceTest {
         stubSavedSubmissionId(submissionId);
         UUID trainingSessionId = UUID.randomUUID();
         stubOwnedTrainingSession(trainingSessionId, user);
-        when(modelSubmissionRepository.existsByModelHashAndStatus(
-                org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.eq(ModelSubmissionStatus.VALIDATED)))
-                .thenReturn(true);
-
         var response = service.submit(validPayload(trainingSessionId), authentication);
 
         assertThat(response.isAccepted()).isTrue();
-        verify(modelSubmissionRepository, never()).existsByModelHashAndStatus(
-                org.mockito.ArgumentMatchers.anyString(),
-                org.mockito.ArgumentMatchers.eq(ModelSubmissionStatus.VALIDATED));
 
         ArgumentCaptor<ModelSubmission> submissionCaptor = ArgumentCaptor.forClass(ModelSubmission.class);
         verify(modelSubmissionRepository).save(submissionCaptor.capture());
         assertThat(submissionCaptor.getValue().getStatus()).isEqualTo(ModelSubmissionStatus.VALIDATED);
+    }
+
+    @Test
+    void exactSubmissionRetryReturnsOriginalSubmissionWithoutAnotherWrite() throws Exception {
+        UUID submissionId = UUID.randomUUID();
+        AppUser user = prototypeUser();
+        Authentication authentication = authenticatedUser(user);
+        stubSavedSubmissionId(submissionId);
+        UUID trainingSessionId = UUID.randomUUID();
+        stubOwnedTrainingSession(trainingSessionId, user);
+        ModelSubmissionPayloadDTO payload = validPayload(trainingSessionId);
+
+        var firstResponse = service.submit(payload, authentication);
+        ArgumentCaptor<ModelSubmission> submissionCaptor = ArgumentCaptor.forClass(ModelSubmission.class);
+        verify(modelSubmissionRepository).save(submissionCaptor.capture());
+        when(modelSubmissionRepository.findByUserIdAndTrainingSessionIdAndRequestFingerprintIsNotNull(
+                user.getId(), trainingSessionId.toString()))
+                .thenReturn(Optional.of(submissionCaptor.getValue()));
+
+        var retryResponse = service.submit(payload, authentication);
+
+        assertThat(retryResponse.getModelSubmissionId()).isEqualTo(firstResponse.getModelSubmissionId());
+        assertThat(retryResponse.isAccepted()).isTrue();
+        verify(modelSubmissionRepository, times(1)).save(any(ModelSubmission.class));
+        verify(validationResultRepository, times(1)).save(any(ValidationResult.class));
+        verify(rateLimiter, times(1)).requireAllowed(user.getId());
+    }
+
+    @Test
+    void reusedTrainingSessionWithDifferentPayloadIsRejectedAsConflict() throws Exception {
+        UUID submissionId = UUID.randomUUID();
+        AppUser user = prototypeUser();
+        Authentication authentication = authenticatedUser(user);
+        stubSavedSubmissionId(submissionId);
+        UUID trainingSessionId = UUID.randomUUID();
+        stubOwnedTrainingSession(trainingSessionId, user);
+        ModelSubmissionPayloadDTO originalPayload = validPayload(trainingSessionId);
+
+        service.submit(originalPayload, authentication);
+        ArgumentCaptor<ModelSubmission> submissionCaptor = ArgumentCaptor.forClass(ModelSubmission.class);
+        verify(modelSubmissionRepository).save(submissionCaptor.capture());
+        when(modelSubmissionRepository.findByUserIdAndTrainingSessionIdAndRequestFingerprintIsNotNull(
+                user.getId(), trainingSessionId.toString()))
+                .thenReturn(Optional.of(submissionCaptor.getValue()));
+        ModelSubmissionPayloadDTO conflictingPayload = validPayload(trainingSessionId);
+        conflictingPayload.setTrainingSteps(1);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> service.submit(conflictingPayload, authentication))
+                .isInstanceOf(SubmissionConflictException.class)
+                .hasMessage("This training session already has a different model submission");
+        verify(modelSubmissionRepository, times(1)).save(any(ModelSubmission.class));
     }
 
     @Test
@@ -285,7 +322,7 @@ class ModelSubmissionServiceTest {
 
         JsonNode brain = jsonMapper.readTree("""
                 {
-                  "version": "melee-strategy-v1",
+                  "version": "melee-logic-tree-v1",
                   "blocks": [
                     {"id":"block-1","action":"move_inward","conditions":[]}
                   ]
@@ -330,6 +367,8 @@ class ModelSubmissionServiceTest {
         session.setMatchId(matchId);
         session.setStartedAt(Instant.now().minusSeconds(2));
         when(trainingSessionRepository.findByIdAndUserId(trainingSessionId, user.getId()))
+                .thenReturn(Optional.of(session));
+        when(trainingSessionRepository.findByIdAndUserIdForSubmission(trainingSessionId, user.getId()))
                 .thenReturn(Optional.of(session));
     }
 

@@ -90,11 +90,14 @@ class AbilityEntitySystemTest {
 
         RecordingCombat droneCombat = new RecordingCombat(false);
         ArenaEntity drone = new ArenaEntity("drone", "hunterDrone", 1, 100, 100, 28, 1, 0, 0, 900, true, 50);
-        AbilityEntitySystem.tick(List.of(drone), List.of(target), new ArenaBounds(1000, 800), 100, droneCombat);
+        List<ArenaEntity> droneEntities = AbilityEntitySystem.tick(
+                List.of(drone), List.of(target), new ArenaBounds(1000, 800), 100, droneCombat);
         assertThat(droneCombat.blocks).singleElement().satisfies(request -> {
             assertThat(request.abilityId()).isEqualTo("hunter_drone");
         });
         assertThat(droneCombat.damage).isZero();
+        assertThat(droneEntities).singleElement().satisfies(updatedDrone ->
+                assertThat(updatedDrone.shotVisualMs()).isEqualTo(300));
 
         RecordingCombat orbitalCombat = new RecordingCombat(false);
         ArenaEntity orbital = new ArenaEntity("orbital", "orbitalMarker", 1, 150, 100, 260, 0, 0, 0, 100, true);

@@ -86,6 +86,7 @@ public class DuelSimulationService {
     private static final int MAX_ARENA_OBJECTS = CENTER_OBJECT_COUNT + MAX_PLAYER_OBJECT_SLOTS;
     private static final int MAX_LOGIC_BLOCKS = 100;
     private static final int MAX_TOTAL_CONDITIONS = 300;
+    private static final int CUSTOM_INTEGER_LIMIT = 99_999;
     private static final int MAX_CLUSTERS = 100;
     private static final int MAX_CONDITIONS_PER_BLOCK = MAX_TOTAL_CONDITIONS;
     private static final int MIN_PRIORITY = 1;
@@ -137,9 +138,13 @@ public class DuelSimulationService {
         List<ArenaEntity> prototypePlacements = new ArrayList<>();
 
         for (int elapsedMs = 0, tick = 0; elapsedMs <= arena.durationMs(); elapsedMs += STEP_MS, tick += 1) {
+            for (Fighter fighter : fighters) {
+                fighter.tickStartHp = fighter.hp;
+                fighter.damageTakenThisTick = 0;
+            }
             List<Obstacle> targetingObstacles = new ArrayList<>(obstacles);
             prototypePlacements.stream()
-                    .map(placement -> new Obstacle("prototype:" + placement.ownerSlot() + ":" + placement.id(), placement.type(), placement.x(), placement.y(), placement.size(), 0, placement.timerMs()))
+                    .map(placement -> new Obstacle("prototype:" + placement.ownerSlot() + ":" + placement.id(), placement.type(), placement.x(), placement.y(), placement.size(), 0, placement.timerMs(), placement.velocityX(), placement.velocityY()))
                     .forEach(targetingObstacles::add);
             Action firstPredicted = predictAction(fighters.get(0), fighters.get(1), targetingObstacles, grenades, fireballs, arena);
             Action secondPredicted = predictAction(fighters.get(1), fighters.get(0), targetingObstacles, grenades, fireballs, arena);
@@ -218,6 +223,8 @@ public class DuelSimulationService {
                     fighter.hp = Math.min(fighter.maxHp, fighter.hp + fighter.pendingHealing);
                     fighter.pendingHealing = 0;
                 }
+                fighter.damageTakenLastTick = fighter.damageTakenThisTick;
+                fighter.hpNetChangeLastTick = fighter.hp - fighter.tickStartHp;
             });
 
             List<MatchPlaybackDTO.ObstaclePlacementDTO> frameObstacles = new ArrayList<>();
@@ -256,6 +263,7 @@ public class DuelSimulationService {
         fighter.rotation = request.rotation() != null ? request.rotation() : request.slot() == 1 ? 0.0 : 180.0;
         fighter.size = request.size();
         fighter.brain = request.brain();
+        initializeCustomVariables(fighter);
         boolean hasLoadout = request.brain() != null && request.brain().path("loadout").isObject();
         fighter.combatClass = hasLoadout ? "custom" : hasText(request.selectedClass()) ? request.selectedClass() : "melee";
         fighter.abilities = readAbilities(request.brain(), fighter.combatClass);
@@ -274,6 +282,25 @@ public class DuelSimulationService {
         fighter.fireballCharges = hasAbility(fighter, "shoot_fireball") ? classSpec(fighter).fireballChargesMax() : 0;
         fighter.fireballReloadMs = 0;
         return fighter;
+    }
+
+    private static void initializeCustomVariables(Fighter fighter) {
+        JsonNode variables = fighter.brain != null ? fighter.brain.get("customVariables") : null;
+        if (variables == null || !variables.isArray()) return;
+        int slots = 0;
+        for (JsonNode variable : variables) {
+            JsonNode conditions = variable.get("conditions");
+            slots += 1 + (conditions != null && conditions.isArray() ? conditions.size() : 0);
+            if (slots > 100) break;
+            String id = textValue(field(variable, "id"), "");
+            String type = textValue(field(variable, "valueType"), "number");
+            if (!id.startsWith("custom.") || fighter.customVariableTypes.containsKey(id)) continue;
+            fighter.customVariableTypes.put(id, type);
+            fighter.customVariables.put(id, "boolean".equals(type)
+                    ? field(variable, "initialValue") != null && field(variable, "initialValue").asBoolean(false)
+                    : (long) clamp(numberValue(field(variable, "initialValue"), 0), -CUSTOM_INTEGER_LIMIT, CUSTOM_INTEGER_LIMIT));
+            if ("boolean".equals(type) && conditions != null && conditions.isArray()) fighter.customVariableConditions.put(id, conditions);
+        }
     }
 
     private static Set<String> readAbilities(JsonNode brain, String legacyClass) {
@@ -443,11 +470,15 @@ public class DuelSimulationService {
         ActionPlan plan = new ActionPlan();
         plan.primary = selected.stream()
                 .map(PriorityEntry::block)
-                .filter(block -> !"no_dash".equals(block.action))
+                .filter(block -> !"no_dash".equals(block.action) && !"variable".equals(block.action))
                 .findFirst()
                 .orElse(null);
         for (PriorityEntry entry : selected) {
             StrategyBlock block = entry.block();
+            if ("variable".equals(block.action)) {
+                applyCustomVariableAction(player, opponent, obstacles, grenades, fireballs, arena, block);
+                continue;
+            }
             String head = actionHead(block.action);
             if ("no_dash".equals(block.action)) {
                 plan.dash = block;
@@ -570,17 +601,17 @@ public class DuelSimulationService {
                     .limit(Math.max(1, remainingActions[0]))
                     .toList();
             if (blocks.isEmpty()) {
-                blocks = List.of(new StrategyBlock(index, "none", "opponent", 0, 0, "target", 500, 400, null, null, null, 1, normalizeConditions(field(branch, "conditions"))));
+                blocks = List.of(new StrategyBlock(index, "none", "opponent", 0, 0, "target", 500, 400, null, null, null, null, 1, normalizeConditions(field(branch, "conditions"))));
             }
             remainingActions[0] -= (int) blocks.stream().filter(block -> !"none".equals(block.action())).count();
             String branchType = index == 0 ? "if" : "else".equals(textValue(field(branch, "branchType"), "else_if")) ? "else" : "else_if";
             if ("else".equals(branchType)) {
-                blocks = blocks.stream().map(block -> new StrategyBlock(block.index(), block.action(), block.actionTarget(), block.targetOffsetX(), block.targetOffsetY(), block.targetMode(), block.targetX(), block.targetY(), block.movementMode(), block.movementDirection(), block.phaseFacingMode(), block.priority(), List.of())).toList();
+                blocks = blocks.stream().map(block -> new StrategyBlock(block.index(), block.action(), block.actionTarget(), block.targetOffsetX(), block.targetOffsetY(), block.targetMode(), block.targetX(), block.targetY(), block.movementMode(), block.movementDirection(), block.phaseFacingMode(), block.variableTerms(), block.priority(), List.of())).toList();
             } else {
                 int conditionLimit = Math.min(remainingConditions[0], blocks.isEmpty() ? 0 : blocks.get(0).conditions().size());
                 List<Condition> limitedConditions = blocks.isEmpty() ? List.of() : blocks.get(0).conditions().subList(0, conditionLimit);
                 remainingConditions[0] -= conditionLimit;
-                blocks = blocks.stream().map(block -> new StrategyBlock(block.index(), block.action(), block.actionTarget(), block.targetOffsetX(), block.targetOffsetY(), block.targetMode(), block.targetX(), block.targetY(), block.movementMode(), block.movementDirection(), block.phaseFacingMode(), block.priority(), limitedConditions)).toList();
+                blocks = blocks.stream().map(block -> new StrategyBlock(block.index(), block.action(), block.actionTarget(), block.targetOffsetX(), block.targetOffsetY(), block.targetMode(), block.targetX(), block.targetY(), block.movementMode(), block.movementDirection(), block.phaseFacingMode(), block.variableTerms(), block.priority(), limitedConditions)).toList();
             }
             normalized.add(new TreeBranch(
                     branchType,
@@ -599,17 +630,21 @@ public class DuelSimulationService {
             for (JsonNode actionNode : actions) {
                 String action = textValue(field(actionNode, "action"), "none");
                 String head = actionHead(action);
-                if (!heads.add(head)) continue;
+                String headKey = "variable".equals(head) ? head + ":" + textValue(field(actionNode, "variableId"), String.valueOf(blocks.size())) : head;
+                if (!heads.add(headKey)) continue;
                 blocks.add(new StrategyBlock(index, action,
                         normalizeTarget(textValue(field(actionNode, "actionTarget"), "opponent"), "opponent"),
-                        clamp(numberValue(field(actionNode, "targetOffsetX"), 0), -ARENA_WIDTH_UNITS, ARENA_WIDTH_UNITS),
+                        "variable".equals(action)
+                                ? clamp(numberValue(field(actionNode, "value"), 0), -CUSTOM_INTEGER_LIMIT, CUSTOM_INTEGER_LIMIT)
+                                : clamp(numberValue(field(actionNode, "targetOffsetX"), 0), -ARENA_WIDTH_UNITS, ARENA_WIDTH_UNITS),
                         clamp(numberValue(field(actionNode, "targetOffsetY"), 0), -ARENA_HEIGHT_UNITS, ARENA_HEIGHT_UNITS),
                         textValue(field(actionNode, "targetMode"), field(actionNode, "targetX") != null || field(actionNode, "targetY") != null ? "coordinates" : "target"),
                         clamp(numberValue(field(actionNode, "targetX"), 500), 0, ARENA_WIDTH_UNITS),
                         clamp(numberValue(field(actionNode, "targetY"), 400), 0, ARENA_HEIGHT_UNITS),
                         textValue(field(actionNode, "movementMode"), null),
-                        textValue(field(actionNode, "movementDirection"), null),
-                        textValue(field(actionNode, "phaseFacingMode"), null),
+                        "variable".equals(action) ? textValue(field(actionNode, "operation"), "set") : textValue(field(actionNode, "movementDirection"), null),
+                        "variable".equals(action) ? textValue(field(actionNode, "variableId"), "") : textValue(field(actionNode, "phaseFacingMode"), null),
+                        "variable".equals(action) ? field(actionNode, "terms") : null,
                         normalizePriority(numberValue(field(branch, "priority"), 1.0)),
                         normalizeConditions(field(branch, "conditions"))));
             }
@@ -654,6 +689,7 @@ public class DuelSimulationService {
             List<Obstacle> obstacles, List<Grenade> grenades, List<Fireball> fireballs) {
         if (!strategyBlockHasExecutableTarget(block, player, opponent, obstacles, grenades, fireballs)) return false;
         String action = block.action();
+        if ("variable".equals(action)) return true;
         if ("none".equals(action)) return false;
         String head = actionHead(action);
         if ("movement".equals(head) || "rotation".equals(head) || "no_dash".equals(action)) return true;
@@ -734,6 +770,7 @@ public class DuelSimulationService {
                 textValue(field(block, "movementMode"), null),
                 textValue(field(block, "movementDirection"), null),
                 textValue(field(block, "phaseFacingMode"), null),
+                field(block, "terms"),
                 normalizePriority(numberValue(field(block, "priority"), 1.0)),
                 normalizeConditions(field(block, "conditions")));
     }
@@ -748,6 +785,8 @@ public class DuelSimulationService {
                     textValue(field(condition, "type"), ""),
                     numberValue(field(condition, "value"), 0.0),
                     normalizeTarget(textValue(field(condition, "target"), "opponent"), "opponent"),
+                    normalizeTarget(textValue(field(condition, "leftTarget"), textValue(field(condition, "target"), "opponent")), "opponent"),
+                    normalizeTarget(textValue(field(condition, "rightTarget"), textValue(field(condition, "target"), "opponent")), "opponent"),
                     textValue(field(condition, "left"), ""),
                     textValue(field(condition, "ability"), ""),
                     textValue(field(condition, "comparator"), "lt"),
@@ -862,20 +901,33 @@ public class DuelSimulationService {
     }
 
     private boolean evaluateExpressionCondition(Condition condition, Fighter player, Fighter opponent, List<Obstacle> obstacles, List<Grenade> grenades, List<Fireball> fireballs, Arena arena) {
-        StateValue left = resolveStateVariable(condition.left(), condition, player, opponent, obstacles, grenades, fireballs, arena);
+        StateValue left = resolveStateVariable(condition.left(), condition.leftTarget(), condition, player, opponent, obstacles, grenades, fireballs, arena);
         if (left == null) return false;
         if ("target.bearingFromMe".equals(condition.left())) {
             return directionFallsInRange(left.numberValue(), condition.rangeMin(), condition.rangeMax());
         }
         StateValue right = "variable".equals(condition.right().type())
-                ? resolveStateVariable(condition.right().valueText(), condition, player, opponent, obstacles, grenades, fireballs, arena)
+                ? resolveStateVariable(condition.right().valueText(), condition.rightTarget(), condition, player, opponent, obstacles, grenades, fireballs, arena)
                 : condition.right().toStateValue(left.type());
         if (right == null || left.type() != right.type()) return false;
         return compareValues(left, condition.comparator(), right);
     }
 
-    private StateValue resolveStateVariable(String variable, Condition condition, Fighter player, Fighter opponent, List<Obstacle> obstacles, List<Grenade> grenades, List<Fireball> fireballs, Arena arena) {
-        Entity target = targetEntity(condition.target(), player, opponent, obstacles, grenades, fireballs);
+    private StateValue resolveStateVariable(String variable, String targetId, Condition condition, Fighter player, Fighter opponent, List<Obstacle> obstacles, List<Grenade> grenades, List<Fireball> fireballs, Arena arena) {
+        if (variable != null && variable.startsWith("custom.")) {
+            String type = player.customVariableTypes.get(variable);
+            if (type == null) return null;
+            JsonNode derived = player.customVariableConditions.get(variable);
+            if (derived != null) {
+                if (!player.resolvingCustomVariables.add(variable)) return StateValue.bool(false);
+                boolean value = evaluateConditions(normalizeConditions(derived), player, opponent, obstacles, grenades, fireballs, arena);
+                player.resolvingCustomVariables.remove(variable);
+                return StateValue.bool(value);
+            }
+            Object value = player.customVariables.get(variable);
+            return "boolean".equals(type) ? StateValue.bool(Boolean.TRUE.equals(value)) : StateValue.number(value instanceof Number number ? number.doubleValue() : 0);
+        }
+        Entity target = targetEntity(targetId, player, opponent, obstacles, grenades, fireballs);
         if (variable.matches("^(my|opponent)\\.selectedAbility(Ready|CooldownMs|Ammo|Preparing|PreparationMs)$")) {
             Fighter observed = variable.startsWith("my.") ? player : opponent;
             String ability = condition.ability();
@@ -892,10 +944,15 @@ public class DuelSimulationService {
             return preparing.timer() ? StateValue.number(active ? millisecondsToSeconds(observed.preparingMs) : 0) : StateValue.bool(active);
         }
         return switch (variable) {
+            case "match.elapsedSeconds" -> StateValue.number(millisecondsToSeconds((int) player.matchElapsedMs));
             case "my.hp" -> StateValue.number(player.hp);
+            case "my.damageTakenLastTick" -> StateValue.number(player.damageTakenLastTick);
+            case "my.hpNetChangeLastTick" -> StateValue.number(player.hpNetChangeLastTick);
             case "my.x" -> StateValue.number(player.x);
             case "my.y" -> StateValue.number(player.y);
             case "opponent.hp" -> StateValue.number(opponent.hp);
+            case "opponent.damageTakenLastTick" -> StateValue.number(opponent.damageTakenLastTick);
+            case "opponent.hpNetChangeLastTick" -> StateValue.number(opponent.hpNetChangeLastTick);
             case "opponent.x" -> StateValue.number(opponent.x);
             case "opponent.y" -> StateValue.number(opponent.y);
             case "my.slowedMs" -> StateValue.number(millisecondsToSeconds(player.slowedMs));
@@ -911,15 +968,25 @@ public class DuelSimulationService {
                 double bearing = target != null ? compassBearing(player, target) : 0.0;
                 yield StateValue.number(bearing > 180 ? bearing - 360 : bearing);
             }
+            case "target.movementDirection" -> {
+                Velocity velocity = entityVelocity(target);
+                if (velocity == null || Math.hypot(velocity.x(), velocity.y()) <= 0.001) yield StateValue.number(Double.NaN);
+                double bearing = normalizeDegrees(Math.toDegrees(Math.atan2(velocity.x(), -velocity.y())));
+                yield StateValue.number(bearing > 180 ? bearing - 360 : bearing);
+            }
+            case "target.velocity" -> {
+                Velocity velocity = entityVelocity(target);
+                yield StateValue.number(velocity == null ? 0 : Math.hypot(velocity.x(), velocity.y()));
+            }
             case "my.bearingFromTarget" -> StateValue.number(target != null ? compassBearing(target, player) : 0.0);
             case "target.relativeBearing" -> StateValue.number(target != null
-                    ? angleDelta(player.rotation, worldRotation(compassBearing(player, target))) : 0.0);
+                    ? Math.abs(angleDelta(player.rotation, worldRotation(compassBearing(player, target)))) : 0.0);
             case "target.relativeBearingClockwise" -> StateValue.number(target != null
                     ? clockwiseAngleDelta(player.rotation, worldRotation(compassBearing(player, target))) : 0.0);
             case "target.relativeBearingCounterclockwise" -> StateValue.number(target != null
                     ? clockwiseAngleDelta(worldRotation(compassBearing(player, target)), player.rotation) : 0.0);
             case "target.facing" -> StateValue.number(target instanceof Fighter fighter ? compassRotation(fighter.rotation) : 0.0);
-            case "target.count" -> StateValue.number(matchingTargets(condition.target(), player, opponent, obstacles, grenades, fireballs).size());
+            case "target.count" -> StateValue.number(matchingTargets(targetId, player, opponent, obstacles, grenades, fireballs).size());
             case "target.age" -> StateValue.number(target instanceof Obstacle obstacle && obstacle.id.startsWith("prototype:") ? millisecondsToSeconds(obstacle.usesRemaining) : 0.0);
             case "opponent.objectDistance" -> StateValue.number(target instanceof Obstacle
                     ? Math.hypot(target.x() - opponent.x, target.y() - opponent.y)
@@ -1041,7 +1108,7 @@ public class DuelSimulationService {
             int ordinal = Math.max(1, Math.min(100, Integer.parseInt(selector[2])));
             return candidates.size() >= ordinal ? candidates.get(ordinal - 1) : null;
         }
-        if ("opponent".equals(target)) return opponent.hp > 0 ? opponent : null;
+        if ("opponent".equals(target)) return opponent;
         String resolvedTarget = "my_core".equals(target) ? "core_" + player.slot
                 : "opponent_core".equals(target) ? "core_" + opponent.slot
                 : "defender_core".equals(target) ? "core_1" : target;
@@ -1092,7 +1159,7 @@ public class DuelSimulationService {
         String base = target == null ? "" : target.split(":", -1)[0];
         List<Entity> matches = new ArrayList<>();
         if ("opponent".equals(base)) {
-            if (opponent.hp > 0) matches.add(opponent);
+            matches.add(opponent);
             return matches;
         }
         if ("opponent_grenade".equals(base)) grenades.stream().filter(entity -> opponent.userId.equals(entity.ownerUserId())).forEach(matches::add);
@@ -1119,6 +1186,13 @@ public class DuelSimulationService {
     private static double compassRotation(double worldRotation) { return normalizeDegrees(worldRotation + 90.0); }
     private static double worldRotation(double compassRotation) { return normalizeDegrees(compassRotation - 90.0); }
     private static double clockwiseAngleDelta(double from, double to) { return normalizeDegrees(to - from); }
+    private static Velocity entityVelocity(Entity entity) {
+        if (entity instanceof Fighter fighter) return new Velocity(fighter.velocityX, fighter.velocityY);
+        if (entity instanceof Grenade grenade) return new Velocity(grenade.velocityX(), grenade.velocityY());
+        if (entity instanceof Fireball fireball) return new Velocity(fireball.velocityX(), fireball.velocityY());
+        if (entity instanceof Obstacle obstacle) return new Velocity(obstacle.velocityX(), obstacle.velocityY());
+        return null;
+    }
     private static String entityId(Entity entity) {
         if (entity instanceof Grenade grenade) return grenade.id();
         if (entity instanceof Fireball fireball) return fireball.id();
@@ -1179,6 +1253,10 @@ public class DuelSimulationService {
         }
         if (target == null) return new Vector(0, 0);
         Vector inward = new Vector(target.x() - player.x, target.y() - player.y);
+        if (Math.hypot(inward.dx(), inward.dy()) <= 0.001) {
+            double facingRadians = Math.toRadians(player.rotation);
+            inward = new Vector(Math.cos(facingRadians), Math.sin(facingRadians));
+        }
         Vector outward = new Vector(-inward.dx(), -inward.dy());
         Vector tangentLeft = new Vector(inward.dy(), -inward.dx());
         Vector tangentRight = new Vector(-inward.dy(), inward.dx());
@@ -1197,6 +1275,29 @@ public class DuelSimulationService {
 
     private boolean applyAction(Fighter fighter, Action action, Arena arena) {
         CombatRules spec = classSpec(fighter);
+        fighter.matchElapsedMs = Math.min(99_999_000L, fighter.matchElapsedMs + STEP_MS);
+        if (fighter.hp <= 0) {
+            fighter.attackActiveMs = Math.max(0, fighter.attackActiveMs - STEP_MS);
+            fighter.gunActiveMs = Math.max(0, fighter.gunActiveMs - STEP_MS);
+            fighter.fireballActiveMs = Math.max(0, fighter.fireballActiveMs - STEP_MS);
+            fighter.stunActiveMs = Math.max(0, fighter.stunActiveMs - STEP_MS);
+            fighter.blockActive = false;
+            fighter.gunShotActive = false;
+            fighter.stunCastActive = false;
+            fighter.thrownGrenade = null;
+            fighter.thrownFireball = null;
+            fighter.prototypeTriggered = null;
+            fighter.prototypeSpawn = null;
+            fighter.dashActiveMs = 0;
+            fighter.microDashActiveMs = 0;
+            fighter.microDashRemaining = 0;
+            fighter.movementVelocityX = 0;
+            fighter.movementVelocityY = 0;
+            fighter.velocityX = 0;
+            fighter.velocityY = 0;
+            fighter.entityHitIds.clear();
+            return false;
+        }
         boolean rewoundThisTick = false;
         fighter.slowedMs = Math.max(0, fighter.slowedMs - STEP_MS);
         fighter.movementLockMs = Math.max(0, fighter.movementLockMs - STEP_MS);
@@ -1520,7 +1621,7 @@ public class DuelSimulationService {
                 : AbilityEntitySystem.ShieldResult.none();
         if (effectiveDirect && damage > 0) {
             if (!shield.prevents(EffectType.DAMAGE)) applyDamageFrom(attacker, defender, (int) Math.round(damage * attacker.attackDamageMultiplier));
-            if ("heavy_slash".equals(ability) && !shield.prevents(EffectType.DEBUFF)) {
+            if ("heavy_slash".equals(ability) && defender.hp > 0 && !shield.prevents(EffectType.DEBUFF)) {
                 boolean alreadyBleeding = defender.bleedRemainingMs > 0;
                 defender.bleedRemainingMs = 5000;
                 if (!alreadyBleeding) defender.bleedTickMs = 1000;
@@ -1530,9 +1631,9 @@ public class DuelSimulationService {
                 attacker.quickJabComboMs = 1000;
             }
         }
-        if ("rail_shot".equals(ability) && effectiveDirect && !shield.prevents(EffectType.DEBUFF)) { defender.shockRemainingMs = 3000; defender.shockTickElapsedMs = 0; }
+        if ("rail_shot".equals(ability) && effectiveDirect && defender.hp > 0 && !shield.prevents(EffectType.DEBUFF)) { defender.shockRemainingMs = 3000; defender.shockTickElapsedMs = 0; }
         if ("repair_pulse".equals(ability)) attacker.pendingHealing += (int) Math.round(contractEffectAmount(ability, EffectType.HEALING));
-        if ("concussive_shot".equals(ability) && effectiveDirect && !shield.prevents(EffectType.DEBUFF)) defender.slowedMs = Math.max(defender.slowedMs, 2000);
+        if ("concussive_shot".equals(ability) && effectiveDirect && defender.hp > 0 && !shield.prevents(EffectType.DEBUFF)) defender.slowedMs = Math.max(defender.slowedMs, 2000);
         if ("repulsor_burst".equals(ability) && effectiveDirect && distance > 0) moveFighter(defender, dx / distance, dy / distance, contractEffectAmount(ability, EffectType.KNOCKBACK), arena);
         if ("thrust".equals(ability) && effectiveDirect && distance > 0) moveFighter(defender, dx / distance, dy / distance, contractEffectAmount(ability, EffectType.KNOCKBACK), arena);
         if ("temporal_rewind".equals(ability)) {
@@ -1833,6 +1934,7 @@ public class DuelSimulationService {
         if (defender.ignoresHostileEffects()) return;
         CombatRules spec = classSpec(attacker);
         applyDamage(defender, (int) Math.round(spec.stunDamage() * fighterDamageMultiplier(attacker)));
+        if (defender.hp <= 0) return;
         defender.stunnedMs = Math.max(defender.stunnedMs, spec.stunDurationMs());
         defender.dashActiveMs = 0;
         defender.movementVelocityX = 0.0;
@@ -1854,6 +1956,7 @@ public class DuelSimulationService {
         if (remaining > 0) {
             target.hp = Math.max(0, target.hp - remaining);
         }
+        target.damageTakenThisTick += Math.max(0, previousHp - target.hp);
         if (previousHp > 0 && target.hp <= 0) {
             clearFighterEffects(target);
         }
@@ -1868,12 +1971,33 @@ public class DuelSimulationService {
     private static void clearFighterEffects(Fighter fighter) {
         fighter.shieldHp = 0;
         fighter.slowedMs = 0;
+        fighter.silencedMs = 0;
+        fighter.nullZoneSilenced = false;
         fighter.burnRemainingMs = 0;
         fighter.burnTickMs = 0;
+        fighter.burnDamageMultiplier = 1.0;
+        fighter.bleedRemainingMs = 0;
+        fighter.bleedTickMs = 0;
         fighter.stunnedMs = 0;
+        fighter.shockRemainingMs = 0;
+        fighter.shockTickElapsedMs = 0;
+        fighter.movementLockMs = 0;
         fighter.blockActive = false;
         fighter.blockActiveMs = 0;
         fighter.dashActiveMs = 0;
+        fighter.microDashActiveMs = 0;
+        fighter.microDashRemaining = 0;
+        fighter.abilityActiveMs.clear();
+        fighter.quickJabComboCount = 0;
+        fighter.quickJabComboMs = 0;
+        fighter.temporalRewindMs = 0;
+        fighter.temporalRewindPulseMs = 0;
+        fighter.pendingHealing = 0;
+        fighter.damageZoneIds.clear();
+        fighter.inDamageZone = false;
+        fighter.defenseZoneEffectMs = 0;
+        fighter.vanguardMs = 0;
+        fighter.utilityHealAccumulatorMs = 0;
     }
 
     private static List<Obstacle> createDefenseObjective(Arena arena) {
@@ -2188,7 +2312,7 @@ public class DuelSimulationService {
             }
             Grenade collisionGrenade = next;
             boolean touchedOpponent = fighters.stream()
-                    .anyMatch(fighter -> (collisionGrenade.reflected()
+                    .anyMatch(fighter -> fighter.projectileHittable() && (collisionGrenade.reflected()
                             || !fighter.userId.equals(collisionGrenade.ownerUserId()))
                             && overlapsShape(fighter, collisionGrenade, 0));
             boolean touchedDamageableObject = nextObstacles.stream()
@@ -2306,7 +2430,7 @@ public class DuelSimulationService {
                 continue;
             }
             Fighter hit = fighters.stream()
-                    .filter(fighter -> (collisionFireball.reflected()
+                    .filter(fighter -> fighter.projectileHittable() && (collisionFireball.reflected()
                             || !fighter.userId.equals(collisionFireball.ownerUserId()))
                             && overlapsShape(fighter, collisionFireball, 0))
                     .findFirst()
@@ -2563,6 +2687,7 @@ public class DuelSimulationService {
                 var shield = resolveShield(fighter, hit.sourceX(), hit.sourceY(), "shoot_fireball");
                 if (shield.prevents(EffectType.DAMAGE)) continue;
                 applyDamage(fighter, (int) Math.round(ownerSpec.fireballDamage() * hit.damageMultiplier()));
+                if (fighter.hp <= 0) continue;
                 boolean alreadyBurning = fighter.burnRemainingMs > 0;
                 fighter.burnRemainingMs = ownerSpec.fireballBurnDurationMs();
                 if (!alreadyBurning) fighter.burnTickMs = ownerSpec.fireballBurnTickMs();
@@ -2808,7 +2933,9 @@ public class DuelSimulationService {
                 "grenade",
                 round(grenade.x()),
                 round(grenade.y()),
-                grenade.size());
+                grenade.size(),
+                0.0, 0, 0, 0, null, null,
+                grenade.velocityX(), grenade.velocityY(), null);
     }
 
     private static MatchPlaybackDTO.ObstaclePlacementDTO toObstaclePlacement(GrenadeExplosion explosion) {
@@ -2823,7 +2950,7 @@ public class DuelSimulationService {
     private static MatchPlaybackDTO.ObstaclePlacementDTO toObstaclePlacement(ArenaEntity placement) {
         double rotation = "hunterDrone".equals(placement.type()) || "silenceWave".equals(placement.type())
                 ? Math.toDegrees(Math.atan2(placement.velocityY(), placement.velocityX())) : 0;
-        return new MatchPlaybackDTO.ObstaclePlacementDTO(placement.id(), placement.type(), round(placement.x()), round(placement.y()), placement.size(), rotation, placement.hp(), 0, 0, placement.armed(), placement.timerMs());
+        return new MatchPlaybackDTO.ObstaclePlacementDTO(placement.id(), placement.type(), round(placement.x()), round(placement.y()), placement.size(), rotation, placement.hp(), 0, 0, placement.armed(), placement.timerMs(), placement.velocityX(), placement.velocityY(), placement.shotVisualMs());
     }
 
     private static MatchPlaybackDTO.ObstaclePlacementDTO toObstaclePlacement(Fireball fireball) {
@@ -2832,7 +2959,9 @@ public class DuelSimulationService {
                 "fireball",
                 round(fireball.x()),
                 round(fireball.y()),
-                fireball.size());
+                fireball.size(),
+                0.0, 0, 0, 0, null, null,
+                fireball.velocityX(), fireball.velocityY(), null);
     }
 
     private static boolean overlapsObstacle(Fighter fighter, Obstacle obstacle) {
@@ -2864,6 +2993,7 @@ public class DuelSimulationService {
     }
 
     private static String actionHead(String action) {
+        if ("variable".equals(action)) return "variable";
         if ("rotate_toward_enemy".equals(action)) return "rotation";
         if ("no_dash".equals(action) || action.startsWith("dash")) return "dash";
         return abilityKind(action).isEmpty() ? "movement" : "ability";
@@ -3122,13 +3252,44 @@ public class DuelSimulationService {
         }
     }
 
-    private record Condition(String type, double value, String target, String left, String ability, String comparator, Operand right, double rangeMin, double rangeMax, String join) {
+    private record Condition(String type, double value, String target, String leftTarget, String rightTarget, String left, String ability, String comparator, Operand right, double rangeMin, double rangeMax, String join) {
     }
 
-    private record StrategyBlock(int index, String action, String actionTarget, double targetOffsetX, double targetOffsetY, String targetMode, double targetX, double targetY, String movementMode, String movementDirection, String phaseFacingMode, int priority, List<Condition> conditions) {
+    private record StrategyBlock(int index, String action, String actionTarget, double targetOffsetX, double targetOffsetY, String targetMode, double targetX, double targetY, String movementMode, String movementDirection, String phaseFacingMode, JsonNode variableTerms, int priority, List<Condition> conditions) {
     }
 
     private record TargetPoint(double x, double y, int size) implements Entity {
+    }
+
+    private void applyCustomVariableAction(Fighter fighter, Fighter opponent, List<Obstacle> obstacles, List<Grenade> grenades, List<Fireball> fireballs, Arena arena, StrategyBlock block) {
+        String id = block.phaseFacingMode();
+        String type = fighter.customVariableTypes.get(id);
+        if (type == null || fighter.customVariableConditions.containsKey(id)) return;
+        if ("boolean".equals(type)) {
+            fighter.customVariables.put(id, block.targetOffsetX() != 0);
+            return;
+        }
+        long current = ((Number) fighter.customVariables.getOrDefault(id, 0L)).longValue();
+        JsonNode terms = block.variableTerms();
+        if (terms == null || !terms.isArray() || terms.isEmpty()) {
+            long amount = Math.round(block.targetOffsetX());
+            long next = switch (block.movementDirection()) { case "add" -> current + amount; case "subtract" -> current - amount; default -> amount; };
+            fighter.customVariables.put(id, Math.max(-CUSTOM_INTEGER_LIMIT, Math.min(CUSTOM_INTEGER_LIMIT, next)));
+            return;
+        }
+        double next = "set".equals(textValue(field(terms.get(0), "operator"), "add")) ? 0 : current;
+        Condition context = new Condition("expression", 0, "opponent", null, null, "", "", "eq", Operand.number(0), 0, 0, "and");
+        for (JsonNode term : terms) {
+            JsonNode operand = field(term, "operand");
+            double amount = "variable".equals(textValue(field(operand, "type"), "number"))
+                    ? java.util.Optional.ofNullable(resolveStateVariable(textValue(field(operand, "value"), ""), textValue(field(operand, "target"), "opponent"), context, fighter, opponent, obstacles, grenades, fireballs, arena)).map(StateValue::numberValue).orElse(0.0)
+                    : numberValue(field(operand, "value"), 0);
+            next += "subtract".equals(textValue(field(term, "operator"), "add")) ? -amount : amount;
+        }
+        fighter.customVariables.put(id, (long) Math.max(-CUSTOM_INTEGER_LIMIT, Math.min(CUSTOM_INTEGER_LIMIT, next)));
+    }
+
+    private record Velocity(double x, double y) {
     }
 
     private record TreeColumn(int index, double createdOrder, List<TreeBranch> branches) {
@@ -3165,6 +3326,7 @@ public class DuelSimulationService {
         private JsonNode brain;
         private Set<String> abilities = Set.of();
         private int hp;
+        private long matchElapsedMs;
         private int maxHp;
         private double moveSpeed;
         private double attackDamageMultiplier = 1.0;
@@ -3233,6 +3395,10 @@ public class DuelSimulationService {
         private int utilityHealAccumulatorMs;
         private Map<String, Integer> abilityCooldowns = new HashMap<>();
         private Map<String, Integer> abilityActiveMs = new HashMap<>();
+        private Map<String, Object> customVariables = new HashMap<>();
+        private Map<String, String> customVariableTypes = new HashMap<>();
+        private Map<String, JsonNode> customVariableConditions = new HashMap<>();
+        private Set<String> resolvingCustomVariables = new HashSet<>();
         private String preparingAbility;
         private int preparingMs;
         private double preparingTargetX = Double.NaN;
@@ -3249,6 +3415,10 @@ public class DuelSimulationService {
         private int bleedRemainingMs;
         private int bleedTickMs;
         private int pendingHealing;
+        private int tickStartHp;
+        private int damageTakenThisTick;
+        private int damageTakenLastTick;
+        private int hpNetChangeLastTick;
         private int temporalRewindMs;
         private double temporalRewindX;
         private double temporalRewindY;
@@ -3275,7 +3445,9 @@ public class DuelSimulationService {
         @Override public double entityY() { return y; }
         @Override public int entitySize() { return size; }
         @Override public int entityHp() { return hp; }
-        @Override public boolean ignoresHostileEffects() { return abilityActiveMs.getOrDefault("absolute_guard", 0) > 0; }
+        private boolean alive() { return hp > 0; }
+        private boolean projectileHittable() { return alive(); }
+        @Override public boolean ignoresHostileEffects() { return !alive() || abilityActiveMs.getOrDefault("absolute_guard", 0) > 0; }
         @Override public void setEntityPosition(double x, double y) { if (!ignoresHostileEffects()) { this.x = x; this.y = y; } }
         @Override public void applySilence(int durationMs) { if (!ignoresHostileEffects()) silencedMs = Math.max(silencedMs, durationMs); }
         @Override public void setZoneSilenced(boolean silenced) { if (!silenced || !ignoresHostileEffects()) nullZoneSilenced = silenced; }
@@ -3293,25 +3465,31 @@ public class DuelSimulationService {
             int usesRemaining,
             int hp,
             int slotOneCaptureMs,
-            int slotTwoCaptureMs) implements Entity {
+            int slotTwoCaptureMs,
+            double velocityX,
+            double velocityY) implements Entity {
         private Obstacle(String id, String type, double x, double y, int size, double rotation, int usesRemaining) {
-            this(id, type, x, y, size, rotation, usesRemaining, 0, 0, 0);
+            this(id, type, x, y, size, rotation, usesRemaining, 0, 0, 0, 0, 0);
         }
 
         private Obstacle(String id, String type, double x, double y, int size, double rotation, int usesRemaining, int hp) {
-            this(id, type, x, y, size, rotation, usesRemaining, hp, 0, 0);
+            this(id, type, x, y, size, rotation, usesRemaining, hp, 0, 0, 0, 0);
+        }
+
+        private Obstacle(String id, String type, double x, double y, int size, double rotation, int usesRemaining, double velocityX, double velocityY) {
+            this(id, type, x, y, size, rotation, usesRemaining, 0, 0, 0, velocityX, velocityY);
         }
 
         private Obstacle withCapture(int slotOneCaptureMs, int slotTwoCaptureMs) {
-            return new Obstacle(id, type, x, y, size, rotation, usesRemaining, hp, slotOneCaptureMs, slotTwoCaptureMs);
+            return new Obstacle(id, type, x, y, size, rotation, usesRemaining, hp, slotOneCaptureMs, slotTwoCaptureMs, velocityX, velocityY);
         }
 
         private Obstacle withHp(int hp) {
-            return new Obstacle(id, type, x, y, size, rotation, usesRemaining, hp, slotOneCaptureMs, slotTwoCaptureMs);
+            return new Obstacle(id, type, x, y, size, rotation, usesRemaining, hp, slotOneCaptureMs, slotTwoCaptureMs, velocityX, velocityY);
         }
 
         private Obstacle withState(int usesRemaining, int hp) {
-            return new Obstacle(id, type, x, y, size, rotation, usesRemaining, hp, slotOneCaptureMs, slotTwoCaptureMs);
+            return new Obstacle(id, type, x, y, size, rotation, usesRemaining, hp, slotOneCaptureMs, slotTwoCaptureMs, velocityX, velocityY);
         }
     }
 

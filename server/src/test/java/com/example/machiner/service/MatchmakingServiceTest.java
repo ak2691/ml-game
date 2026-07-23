@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.example.machiner.DTO.MatchPlaybackDTO;
@@ -96,8 +98,6 @@ class MatchmakingServiceTest {
         when(simulationService.buildDuelPlayback(any(MatchSession.class), any())).thenAnswer(invocation -> {
             MatchSession session = invocation.getArgument(0);
             simulatedSessions.add(session);
-            assertThat(session.obstacles()).extracting(MatchPlaybackDTO.ObstaclePlacementDTO::id)
-                    .contains("object_center", "object_buff_1", "object_buff_2");
             MatchmakingService.MatchPlayer winner = session.players().stream()
                     .filter(player -> player.slot() == 2)
                     .findFirst()
@@ -270,6 +270,72 @@ class MatchmakingServiceTest {
             assertThat(outbound.event().obstacles()).isEmpty();
             assertThat(outbound.event().players()).extracting("selectedClass")
                     .containsExactlyInAnyOrder("custom:" + firstPicks + ":2,2,0,0", "custom:" + secondPicks + ":0,0,1,3");
+        });
+    }
+
+    @Test
+    void reconnectDuringReplayRestoresReplayInsteadOfExposingNextRoundSelection() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        UUID firstSubmissionId = UUID.randomUUID();
+        UUID secondSubmissionId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
+        stubSubmission(firstUserId, firstSubmissionId);
+        stubSubmission(secondUserId, secondSubmissionId);
+        service.markFinished(firstUserId, firstSubmissionId);
+        service.markFinished(secondUserId, secondSubmissionId);
+
+        List<MatchmakingService.OutboundMatchmakingEvent> reconnectEvents =
+                service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+
+        assertThat(reconnectEvents).singleElement().satisfies(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_PLAYBACK_READY");
+            assertThat(outbound.event().status()).isEqualTo("READY_FOR_PLAYBACK");
+            assertThat(outbound.event().playback()).isNotNull();
+            assertThat(outbound.event().roundNumber()).isEqualTo(1);
+            assertThat(outbound.event().playbackStartsAt()).isEqualTo(Instant.parse("2026-06-03T12:00:03Z"));
+        });
+
+        clock.advance(Duration.ofMillis(3_300));
+        List<MatchmakingService.OutboundMatchmakingEvent> duringResultHold =
+                service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        assertThat(duringResultHold).extracting(outbound -> outbound.event().type())
+                .containsExactly("MATCH_PLAYBACK_READY", "MATCH_RESULT_READY", "MATCH_ROUND_READY");
+        assertThat(duringResultHold.getLast().delayMillis()).isZero();
+    }
+
+    @Test
+    void laterRoundTimeoutAutomaticallyFillsMissingAbilityPicksAndStartsCountdown() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        UUID firstSubmissionId = UUID.randomUUID();
+        UUID secondSubmissionId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        List<MatchmakingService.OutboundMatchmakingEvent> found =
+                service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        UUID matchId = found.getFirst().event().matchId();
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
+        stubSubmission(firstUserId, firstSubmissionId);
+        stubSubmission(secondUserId, secondSubmissionId);
+        service.markFinished(firstUserId, firstSubmissionId);
+        service.markFinished(secondUserId, secondSubmissionId);
+
+        clock.advance(Duration.ofSeconds(67));
+        List<MatchmakingService.OutboundMatchmakingEvent> timeoutEvents =
+                service.resolveClassSelectionTimeout(matchId);
+
+        assertThat(timeoutEvents).hasSize(2).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_COUNTDOWN_READY");
+            assertThat(outbound.event().status()).isEqualTo("COUNTDOWN");
+            assertThat(outbound.event().roundNumber()).isEqualTo(2);
+            assertThat(outbound.event().players()).allSatisfy(player -> {
+                assertThat(player.classSelected()).isTrue();
+                assertThat(player.selectedClass().split(":", -1)[1]).hasSize(2);
+            });
         });
     }
 
@@ -546,6 +612,54 @@ class MatchmakingServiceTest {
     }
 
     @Test
+    void disconnectedPlayerForfeitsAfterThirtySecondGracePeriod() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        String firstPrincipal = "pilot-one@example.com";
+        service.joinQueue(firstUserId, "pilot-one", firstPrincipal);
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+
+        List<MatchmakingService.OutboundMatchmakingEvent> notices = service.markDisconnected(firstPrincipal);
+        Instant deadline = notices.get(0).event().disconnectEndsAt();
+        assertThat(notices).hasSize(2);
+        assertThat(deadline).isEqualTo(clock.instant().plusSeconds(30));
+        assertThat(service.resolveDisconnectTimeout(firstPrincipal, deadline)).isEmpty();
+
+        clock.advance(Duration.ofSeconds(30));
+        List<MatchmakingService.OutboundMatchmakingEvent> results =
+                service.resolveDisconnectTimeout(firstPrincipal, deadline);
+
+        assertThat(results).hasSize(2);
+        assertThat(savedMatch.getStatus()).isEqualTo(MatchStatus.COMPLETED);
+        assertThat(savedMatch.getCompletionReason()).isEqualTo("DISCONNECTION");
+        assertThat(savedMatch.getWinnerUser().getId()).isEqualTo(secondUserId);
+        assertThat(results).allSatisfy(outbound -> {
+            assertThat(outbound.event().type()).isEqualTo("MATCH_RESULT_READY");
+            assertThat(outbound.event().playback().result()).isEqualTo("DISCONNECTION_WIN");
+        });
+    }
+
+    @Test
+    void reconnectCancelsPendingDisconnectForfeit() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        String firstPrincipal = "pilot-one@example.com";
+        service.joinQueue(firstUserId, "pilot-one", firstPrincipal);
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        Instant deadline = service.markDisconnected(firstPrincipal).get(0).event().disconnectEndsAt();
+
+        List<MatchmakingService.OutboundMatchmakingEvent> reconnectEvents =
+                service.joinQueue(firstUserId, "pilot-one", firstPrincipal);
+        clock.advance(Duration.ofSeconds(31));
+
+        assertThat(reconnectEvents)
+                .extracting(outbound -> outbound.event().type())
+                .contains("MATCH_FOUND", "PLAYER_RECONNECTED");
+        assertThat(service.resolveDisconnectTimeout(firstPrincipal, deadline)).isEmpty();
+        assertThat(savedMatch.getStatus()).isEqualTo(MatchStatus.RUNNING);
+    }
+
+    @Test
     void surrenderCompletesMatchAsResignationWinForOpponent() {
         UUID firstUserId = UUID.randomUUID();
         UUID secondUserId = UUID.randomUUID();
@@ -577,16 +691,47 @@ class MatchmakingServiceTest {
         });
     }
 
+    @Test
+    void repeatedSurrenderDoesNotCompleteOrScoreMatchTwice() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+
+        service.surrender(firstUserId);
+        List<MatchmakingService.OutboundMatchmakingEvent> retryEvents = service.surrender(firstUserId);
+
+        assertThat(retryEvents).isEmpty();
+        verify(matchRepository, times(2)).save(any(Match.class));
+        verify(profileRepository, times(2)).save(any());
+    }
+
+    @Test
+    void repeatedFinishWithSameSubmissionDoesNotAttachTwice() {
+        UUID firstUserId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        UUID submissionId = UUID.randomUUID();
+        service.joinQueue(firstUserId, "pilot-one", "pilot-one@example.com");
+        service.joinQueue(secondUserId, "pilot-two", "pilot-two@example.com");
+        service.selectClass(firstUserId, "melee");
+        service.selectClass(secondUserId, "melee");
+        stubSubmission(firstUserId, submissionId);
+
+        service.markFinished(firstUserId, submissionId);
+        List<MatchmakingService.OutboundMatchmakingEvent> retryEvents =
+                service.markFinished(firstUserId, submissionId);
+
+        assertThat(retryEvents).isEmpty();
+        verify(modelSubmissionRepository, times(1)).findByIdAndUserId(submissionId, firstUserId);
+    }
+
     private void stubSubmission(UUID userId, UUID submissionId) {
         ModelSubmission submission = new ModelSubmission();
         submission.setId(submissionId);
         submission.setUser(user(userId));
-        submission.setArchitectureVersion("dense-movement-v1");
+        submission.setBrainSchemaVersion("melee-logic-tree-v1");
         submission.setMatchId(savedMatch.getId());
-        submission.setFeatureSchemaVersion("arena-features-v1");
-        submission.setActionSchemaVersion("movement-v1");
-        submission.setTrainingMetrics("{}");
-        submission.setModelArtifacts("{}");
+        submission.setBrainPayload("{}");
         submission.setSelectedClass("melee");
         submission.setStatus(ModelSubmissionStatus.VALIDATED);
         when(modelSubmissionRepository.findByIdAndUserId(eq(submissionId), eq(userId)))

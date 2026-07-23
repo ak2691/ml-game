@@ -11,7 +11,33 @@ import { PROTOTYPE_ABILITY_STATS } from "../loadout/BotLoadout.js";
 /** Advances cooldown, resource, timed-effect, and delayed-state components. */
 export function tickFighterStatus(shape, elapsedMs, applyDamage) {
     if ((shape.hp ?? 0) <= 0) {
-        return { ...shape, hp: 0, hitFlashMs: Math.max(0, Number(shape.hitFlashMs ?? 0) - elapsedMs) };
+        return {
+            ...shape,
+            hp: 0,
+            matchElapsedMs: Math.min(99_999_000, Math.max(0, Number(shape.matchElapsedMs ?? 0) + elapsedMs)),
+            hitFlashMs: timer(shape.hitFlashMs, elapsedMs),
+            swingActiveMs: timer(shape.swingActiveMs, elapsedMs),
+            swingTriggered: false,
+            blockActiveMs: 0,
+            gunActiveMs: timer(shape.gunActiveMs, elapsedMs),
+            gunShotActive: false,
+            thrownGrenade: null,
+            fireballActiveMs: timer(shape.fireballActiveMs, elapsedMs),
+            thrownFireball: null,
+            stunActiveMs: timer(shape.stunActiveMs, elapsedMs),
+            stunCastActive: false,
+            prototypeVisual: shape.prototypeVisual ? { ...shape.prototypeVisual, ms: timer(shape.prototypeVisual.ms, elapsedMs) } : null,
+            prototypeTriggered: null,
+            prototypeSpawn: null,
+            dashActiveMs: 0,
+            microDashActiveMs: 0,
+            microDashRemaining: 0,
+            movementVelocityX: 0,
+            movementVelocityY: 0,
+            velocityX: 0,
+            velocityY: 0,
+            entityHitIds: [],
+        };
     }
     const blockRecharge = rechargeBlockCharges(shape, elapsedMs);
     const abilityCooldowns = mapTimers(shape.abilityCooldowns, elapsedMs);
@@ -32,6 +58,7 @@ export function tickFighterStatus(shape, elapsedMs, applyDamage) {
         : bleedTick.hp;
     return {
         ...shape,
+        matchElapsedMs: Math.min(99_999_000, Math.max(0, Number(shape.matchElapsedMs ?? 0) + elapsedMs)),
         hitFlashMs: timer(shape.hitFlashMs, elapsedMs),
         slowedMs: timer(shape.slowedMs, elapsedMs),
         silencedMs: timer(shape.silencedMs, elapsedMs),
@@ -108,14 +135,16 @@ function tickBurn(shape, elapsedMs, applyDamage) {
     const remainingMs = timer(previousRemainingMs, elapsedMs);
     let nextTickDueMs = Math.max(0, Number(shape.burnTickMs ?? 0));
     let hp = shape.hp;
+    let damageTakenThisTick = Number(shape.damageTakenThisTick ?? 0);
     const activeElapsedMs = Math.min(elapsedMs, previousRemainingMs);
     while (previousRemainingMs > 0 && nextTickDueMs <= activeElapsedMs) {
-        const damaged = applyDamage({ ...shape, hp }, FIREBALL_BURN_DAMAGE * (shape.burnDamageMultiplier ?? 1));
+        const damaged = applyDamage({ ...shape, hp, damageTakenThisTick }, FIREBALL_BURN_DAMAGE * (shape.burnDamageMultiplier ?? 1));
         hp = damaged.hp;
+        damageTakenThisTick = Number(damaged.damageTakenThisTick ?? damageTakenThisTick);
         nextTickDueMs += FIREBALL_BURN_TICK_MS;
     }
     const tickMs = remainingMs > 0 ? Math.max(0, nextTickDueMs - elapsedMs) : 0;
-    return { hp, burnRemainingMs: remainingMs, burnTickMs: tickMs, burnDamageMultiplier: remainingMs > 0 ? shape.burnDamageMultiplier ?? 1 : 1 };
+    return { hp, damageTakenThisTick, burnRemainingMs: remainingMs, burnTickMs: tickMs, burnDamageMultiplier: remainingMs > 0 ? shape.burnDamageMultiplier ?? 1 : 1 };
 }
 
 function tickBleed(shape, elapsedMs, applyDamage) {
@@ -123,14 +152,16 @@ function tickBleed(shape, elapsedMs, applyDamage) {
     const remainingMs = timer(previousRemainingMs, elapsedMs);
     let nextTickDueMs = Math.max(0, Number(shape.bleedTickMs ?? 0));
     let hp = shape.hp;
+    let damageTakenThisTick = Number(shape.damageTakenThisTick ?? 0);
     const activeElapsedMs = Math.min(elapsedMs, previousRemainingMs);
     while (previousRemainingMs > 0 && nextTickDueMs <= activeElapsedMs) {
-        const damaged = applyDamage({ ...shape, hp }, Number(shape.bleedDamage ?? 2));
+        const damaged = applyDamage({ ...shape, hp, damageTakenThisTick }, Number(shape.bleedDamage ?? 2));
         hp = damaged.hp;
+        damageTakenThisTick = Number(damaged.damageTakenThisTick ?? damageTakenThisTick);
         nextTickDueMs += 1000;
     }
     const tickMs = remainingMs > 0 ? Math.max(0, nextTickDueMs - elapsedMs) : 0;
-    return { hp, bleedRemainingMs: remainingMs, bleedTickMs: tickMs, bleedDamage: remainingMs > 0 ? Number(shape.bleedDamage ?? 2) : 0 };
+    return { hp, damageTakenThisTick, bleedRemainingMs: remainingMs, bleedTickMs: tickMs, bleedDamage: remainingMs > 0 ? Number(shape.bleedDamage ?? 2) : 0 };
 }
 
 function rechargeBlockCharges(shape, elapsedMs) {

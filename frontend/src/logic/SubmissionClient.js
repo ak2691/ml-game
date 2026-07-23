@@ -1,23 +1,17 @@
 import {
-    ACTION_SCHEMA_VERSION,
     CLIENT_BUILD_VERSION,
-    FEATURE_SCHEMA_VERSION,
-    MODEL_ARCHITECTURE_VERSION,
-    MODEL_FORMAT,
     MODEL_SUBMISSION_ENDPOINT,
     TRAINING_SESSION_ENDPOINT,
 } from "./SubmissionContract.js";
 import { ensureCsrfHeaders } from "../security/csrf";
+import { API_BASE_URL } from "../config/api.js";
 import { normalizeMeleeStrategyConfiguration } from "./BotBrain.js";
-
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8080";
 
 export async function buildModelSubmissionPayload({
     brain,
     matchId = null,
     trainingSessionId,
-    trainingSteps = 0,
-    trainingMetrics = null,
+    selectedClass = "custom",
     loadout = null,
 }) {
     const normalizedBrain = {
@@ -26,23 +20,9 @@ export async function buildModelSubmissionPayload({
     };
 
     return {
-        architectureVersion: MODEL_ARCHITECTURE_VERSION,
-        featureSchemaVersion: FEATURE_SCHEMA_VERSION,
-        actionSchemaVersion: ACTION_SCHEMA_VERSION,
-        modelFormat: MODEL_FORMAT,
         matchId,
         trainingSessionId,
-        trainingDurationMs: null,
-        trainingSteps,
-        selectedClass: "custom",
-        baseModelArtifactId: null,
-        trainingMetrics: trainingMetrics ?? {
-            version: "deterministic-logic-submission-v1",
-            configuration: normalizedBrain,
-            trainingSamples: 0,
-            validationSamples: 0,
-            epochsCompleted: 0,
-        },
+        selectedClass,
         clientBuildVersion: CLIENT_BUILD_VERSION,
         brain: normalizedBrain,
     };

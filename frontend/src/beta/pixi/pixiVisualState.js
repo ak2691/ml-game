@@ -3,6 +3,11 @@ import { AUTO_STEP_MS } from "../modelPayloads/arenaConstants.js";
 
 const ZONE_TYPES = new Set(["gravityField", "gravityExplosion", "nullZone", "orbitalMarker", "orbitalExplosion", "silenceWave", "temporalRewindZone"]);
 const PROJECTILE_TYPES = new Set(["grenade", "fireball"]);
+const PROJECTILE_TRAILS = Object.freeze({
+    grenade: { color: 0xbef264, length: 30, width: 6 },
+    fireball: { color: 0xfb923c, length: 48, width: 10 },
+    gravityField: { color: 0xc4b5fd, length: 38, width: 7 },
+});
 
 export function isFighterShape(shape) {
     return shape?.id === "main" || shape?.type === "opponentModel";
@@ -20,7 +25,28 @@ export function shapeInterpolationMs(shape) {
     return Math.max(0, Number(shape?.interpolationMs ?? AUTO_STEP_MS));
 }
 
+export function projectileTrailStyle(shape) {
+    const style = PROJECTILE_TRAILS[shape?.type];
+    const speed = Math.hypot(Number(shape?.velocityX ?? 0), Number(shape?.velocityY ?? 0));
+    return style && speed > 0.01 ? style : null;
+}
+
+export function replayProjectileVelocity(shape, previousShape) {
+    const derived = {
+        velocityX: Number(shape?.x ?? 0) - Number(previousShape?.x ?? shape?.x ?? 0),
+        velocityY: Number(shape?.y ?? 0) - Number(previousShape?.y ?? shape?.y ?? 0),
+    };
+    const hasProvidedVelocity = shape?.velocityX != null && shape?.velocityY != null
+        && Number.isFinite(Number(shape.velocityX)) && Number.isFinite(Number(shape.velocityY));
+    if (!hasProvidedVelocity) return derived;
+    const provided = { velocityX: Number(shape.velocityX), velocityY: Number(shape.velocityY) };
+    return Math.hypot(provided.velocityX, provided.velocityY) > 0.01
+        || Math.hypot(derived.velocityX, derived.velocityY) <= 0.01
+        ? provided : derived;
+}
+
 export function fighterStatusLabels(shape) {
+    if (shape?.hp != null && Number(shape.hp) <= 0) return [];
     const labels = [];
     if (Number(shape?.abilityActiveMs?.reactive_armor ?? 0) > 0) labels.push("RA");
     if (Number(shape?.abilityActiveMs?.absolute_guard ?? 0) > 0) labels.push("AG");
@@ -34,6 +60,7 @@ export function fighterStatusLabels(shape) {
 }
 
 export function activeFighterVisual(shape) {
+    if (shape?.hp != null && Number(shape.hp) <= 0) return null;
     const active = ["heavy_slash", "quick_jab", "thrust", "pistol_shot", "concussive_shot", "rail_shot", "repulsor_burst", "repair_pulse", "phase_strike", "micro_dash"]
         .find((id) => Number(shape?.abilityActiveMs?.[id] ?? 0) > 0);
     return Number(shape?.prototypeVisual?.ms ?? 0) > 0 ? shape.prototypeVisual.ability : active ?? null;

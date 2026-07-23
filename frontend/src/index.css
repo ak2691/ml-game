@@ -1,4 +1,28 @@
+@import url("https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600&family=Cousine:wght@400;700&family=DM+Sans:wght@500;600&display=swap");
 @import "tailwindcss";
+
+@layer utilities {
+  .font-interface {
+    font-family: "DM Sans", system-ui, sans-serif;
+    font-weight: 500;
+  }
+
+  .font-interface-semibold {
+    font-family: "DM Sans", system-ui, sans-serif;
+    font-weight: 600;
+  }
+
+  .font-interface-numeric {
+    font-family: "DM Sans", system-ui, sans-serif;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+
+  .font-display-action {
+    font-family: "Barlow Condensed", "Arial Narrow", sans-serif;
+    font-weight: 600;
+  }
+}
 
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
@@ -29,6 +53,76 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+}
+
+.home-grid {
+  position: relative;
+  background-image:
+    linear-gradient(rgba(28, 73, 101, 0.105) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(28, 73, 101, 0.105) 1px, transparent 1px),
+    radial-gradient(circle at 50% 38%, rgba(17, 92, 142, 0.16), transparent 46%);
+  background-size: 32px 32px, 32px 32px, auto;
+}
+
+.home-dashboard {
+  background-image:
+    linear-gradient(rgba(2, 8, 14, 0.62), rgba(2, 8, 14, 0.78)),
+    url("/assets/bot-fight-home-arena-v2.png");
+  background-position: center, center 48px;
+  background-repeat: no-repeat;
+  background-size: cover, cover;
+}
+
+.home-grid::after {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 18%, rgba(2, 8, 14, 0.66) 100%);
+  content: "";
+  pointer-events: none;
+}
+
+.home-title {
+  font-size: 4.75rem;
+  line-height: .82;
+  text-shadow: 0 4px 24px rgba(0, 0, 0, .65);
+}
+
+@media (min-width: 640px) {
+  .home-title {
+    font-size: 6rem;
+  }
+}
+
+.home-action {
+  background: rgba(7, 17, 27, 0.9);
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.home-action:hover { background: rgba(12, 27, 40, 0.94); }
+.home-action-blue { border-color: rgba(34, 211, 238, .58); color: #67e8f9; }
+.home-action-teal { border-color: rgba(45, 212, 191, .42); color: #5eead4; }
+.home-action-violet { border-color: rgba(129, 140, 248, .35); color: #a5b4fc; }
+.home-action-cyan { border-color: rgba(103, 232, 249, .28); color: #67e8f9; }
+
+/* Keep the training controls and their editor modals on the same terminal-style
+   typeface as the arena's bot stat readouts. */
+.training-mono,
+.training-mono * {
+  font-family: "Cousine", "Courier New", Courier, monospace !important;
+}
+
+/* The brain editor is intentionally compact: dense labels should read as words,
+   not widely tracked display copy. */
+.brain-workspace .font-mono,
+.brain-workspace .font-display-action {
+  letter-spacing: 0.015em !important;
+}
+
+.brain-workspace button,
+.brain-workspace input,
+.brain-workspace select,
+.brain-workspace textarea {
+  border-radius: 2px;
 }
 
 h1 {
@@ -69,5 +163,336 @@ button:focus-visible {
 
   button {
     background-color: #f9f9f9;
+  }
+}
+
+/* Workspace toolbar controls intentionally live after the global button rules.
+   Their idle surfaces must remain visibly distinct from the toolbar itself. */
+.brain-toolbar {
+  position: relative;
+}
+
+.brain-toolbar-title {
+  width: clamp(12rem, 16vw, 16rem);
+}
+
+.brain-toolbar-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: clamp(12px, 1.35vw, 24px);
+}
+
+.brain-toolbar-tools,
+.brain-toolbar-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: clamp(8px, 0.8vw, 14px);
+}
+
+.brain-toolbar-tools {
+  flex: 1 1 auto;
+}
+
+.brain-toolbar-actions {
+  flex: none;
+  margin-left: auto;
+}
+
+.brain-workspace .brain-toolbar-button {
+  display: inline-flex;
+  height: 48px;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 3px;
+  padding: 0 clamp(12px, 1.15vw, 20px);
+  background: linear-gradient(180deg, rgba(37, 42, 48, 0.82), rgba(25, 29, 34, 0.94));
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.025), 0 5px 16px rgba(0, 0, 0, 0.18);
+  color: #d7dce1;
+  font-size: clamp(8px, 0.72vw, 11px);
+  letter-spacing: 0.045em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brain-workspace .brain-toolbar-button:hover {
+  border-color: rgba(148, 163, 184, 0.44);
+  background: linear-gradient(180deg, rgba(47, 53, 60, 0.94), rgba(31, 36, 41, 0.98));
+  color: #f6f8fa;
+}
+
+.brain-workspace .brain-toolbar-button-primary {
+  flex: 1 1 230px;
+  max-width: 270px;
+  border-color: rgba(45, 212, 191, 0.34);
+  background: linear-gradient(135deg, rgba(11, 104, 103, 0.92), rgba(9, 78, 80, 0.96));
+  color: #dcffff;
+}
+
+.brain-workspace .brain-toolbar-button-primary:hover {
+  border-color: rgba(94, 234, 212, 0.6);
+  background: linear-gradient(135deg, rgba(13, 124, 121, 0.96), rgba(10, 91, 93, 0.98));
+}
+
+.brain-workspace .brain-toolbar-button:disabled {
+  opacity: 0.38;
+}
+
+.brain-toolbar-icon {
+  flex: none;
+  color: #a8b4bf;
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.brain-toolbar-button-primary .brain-toolbar-icon {
+  color: #d5ffff;
+  font-size: 19px;
+}
+
+.brain-tab-group {
+  display: flex;
+  flex: 0 1 320px;
+  height: 48px;
+  min-width: 220px;
+  max-width: 340px;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 3px;
+  background: rgba(18, 22, 26, 0.86);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.02), 0 5px 16px rgba(0, 0, 0, 0.16);
+}
+
+.brain-workspace .brain-tab {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  border-right: 1px solid rgba(148, 163, 184, 0.15);
+  border-radius: 0;
+  padding: 0 10px;
+  background: rgba(29, 34, 39, 0.48);
+  color: #a8adb3;
+  font-size: clamp(8px, 0.72vw, 11px);
+  font-weight: 600;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brain-workspace .brain-tab:hover {
+  border-color: rgba(148, 163, 184, 0.15);
+  background: rgba(43, 49, 55, 0.68);
+  color: #e4e8eb;
+}
+
+.brain-workspace .brain-tab.is-active,
+.brain-workspace .brain-tab.is-active:hover {
+  border-color: rgba(148, 163, 184, 0.15);
+  background: rgba(22, 28, 33, 0.95);
+  color: #8be5e6;
+}
+
+.brain-workspace .brain-tab.is-active::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  background: #67dfe1;
+  content: "";
+}
+
+.brain-toolbar-zoom {
+  display: grid;
+  grid-template-columns: 32px minmax(42px, 1fr) 32px;
+  align-items: center;
+  height: 48px;
+  min-width: 0;
+  gap: 3px;
+  padding: 5px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 3px;
+  background: rgba(24, 29, 34, 0.92);
+  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.16);
+}
+
+.brain-workspace .brain-toolbar-zoom-button {
+  width: 32px;
+  height: 36px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 2px;
+  padding: 0;
+  background: rgba(17, 21, 25, 0.92);
+  color: #dce2e7;
+  font-size: 17px;
+  font-weight: 400;
+}
+
+.brain-workspace .brain-toolbar-zoom-button:hover {
+  border-color: rgba(148, 163, 184, 0.42);
+  background: rgba(47, 54, 61, 0.96);
+}
+
+.brain-toolbar-zoom-value {
+  min-width: 0;
+  overflow: hidden;
+  color: #d5d9dd;
+  font-size: clamp(8px, 0.7vw, 11px);
+  text-align: center;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.brain-workspace .brain-toolbar-close:hover {
+  border-color: #d48c91;
+}
+
+.brain-workspace .brain-toolbar-close {
+  width: auto;
+  flex: none;
+  padding: 0 15px;
+  font-size: 11px;
+}
+
+.brain-workspace .brain-toolbar-close > :first-child {
+  font-size: 19px;
+  font-weight: 300;
+}
+
+.brain-board {
+  background-color: #15191d;
+  background-image: radial-gradient(circle, rgba(100, 116, 139, 0.2) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.brain-workspace .brain-history-button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 0;
+  background: transparent;
+  color: #9ba4ad;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.brain-workspace .brain-history-button:hover:not(:disabled) {
+  border-color: rgba(103, 223, 225, 0.26);
+  background: rgba(8, 89, 91, 0.26);
+  color: #8be5e6;
+}
+
+.brain-workspace .brain-history-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.25;
+}
+
+@media (max-width: 1280px) {
+  .brain-toolbar {
+    gap: 6px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .brain-toolbar-title {
+    width: clamp(9rem, 14vw, 11rem);
+  }
+
+  .brain-toolbar-title > :first-child {
+    font-size: 9px;
+    letter-spacing: 0.06em;
+  }
+
+  .brain-toolbar-title > :last-child {
+    font-size: 6.5px;
+  }
+
+  .brain-toolbar-controls {
+    gap: 8px;
+  }
+
+  .brain-toolbar-tools,
+  .brain-toolbar-actions {
+    gap: 3px;
+  }
+
+  .brain-tab-group {
+    flex-basis: 220px;
+    min-width: 170px;
+  }
+
+  .brain-workspace .brain-toolbar-button,
+  .brain-workspace .brain-tab {
+    font-size: 7.5px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .brain-workspace .brain-toolbar-close {
+    width: 44px;
+    padding: 0;
+  }
+
+  .brain-toolbar-close-label {
+    display: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .brain-toolbar {
+    min-height: 112px;
+    flex-wrap: wrap;
+    align-content: center;
+  }
+
+  .brain-toolbar-title {
+    width: 155px;
+  }
+
+  .brain-toolbar-controls {
+    display: contents;
+  }
+
+  .brain-tab-group {
+    flex: 1 1 calc(100% - 175px);
+    max-width: none;
+  }
+
+  .brain-toolbar-tools {
+    order: 3;
+    width: calc(100% - 142px);
+    margin-left: 171px;
+  }
+
+  .brain-toolbar-actions {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+  }
+
+  .brain-workspace .brain-toolbar-button {
+    height: 36px;
+  }
+
+  .brain-workspace .brain-toolbar-button-primary {
+    max-width: none;
+  }
+
+  .brain-toolbar-icon {
+    font-size: 13px;
   }
 }

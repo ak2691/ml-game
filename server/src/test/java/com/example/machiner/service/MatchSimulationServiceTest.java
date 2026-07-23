@@ -42,7 +42,7 @@ class MatchSimulationServiceTest {
                         new MatchPlaybackDTO.ObstaclePlacementDTO("object_1", "healthPack", 300.0, 120.0, 42, 0.0)),
                 Map.of());
         ModelSubmission firstSubmission = new ModelSubmission();
-        firstSubmission.setModelArtifacts("""
+        firstSubmission.setBrainPayload("""
                 {"version":"melee-logic-blocks-v2","blocks":[{"action":"move_inward","conditions":[]}],"clusters":[]}
                 """);
 

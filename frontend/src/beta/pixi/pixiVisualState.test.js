@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { activeFighterVisual, entityCaption, fighterStatusLabels, isFighterShape, pixiLayerForShape, shapeInterpolationMs } from "./pixiVisualState.js";
+import { activeFighterVisual, entityCaption, fighterStatusLabels, isFighterShape, pixiLayerForShape, projectileTrailStyle, replayProjectileVelocity, shapeInterpolationMs } from "./pixiVisualState.js";
 
 test("Pixi renderer classifies every combat snapshot family without changing game state", () => {
     assert.equal(isFighterShape({ id: "main" }), true);
@@ -12,6 +12,18 @@ test("Pixi renderer classifies every combat snapshot family without changing gam
 test("Pixi movement interpolation follows canonical ability metadata", () => {
     assert.equal(shapeInterpolationMs({ abilityId: "rail_shot", interpolationMs: 100 }), 0);
     assert.equal(shapeInterpolationMs({ abilityId: "shoot_fireball", interpolationMs: 125 }), 125);
+});
+
+test("moving projectile snapshots opt into animated trail presentation", () => {
+    assert.deepEqual(projectileTrailStyle({ type: "fireball", velocityX: 10, velocityY: 0 }), { color: 0xfb923c, length: 48, width: 10 });
+    assert.equal(projectileTrailStyle({ type: "grenade", velocityX: 0, velocityY: 0 }), null);
+    assert.equal(projectileTrailStyle({ type: "proximityMine", velocityX: 10, velocityY: 0 }), null);
+});
+
+test("replay projectiles recover motion from adjacent frames when velocity is absent", () => {
+    assert.deepEqual(replayProjectileVelocity({ x: 130, y: 95 }, { x: 120, y: 100 }), { velocityX: 10, velocityY: -5 });
+    assert.deepEqual(replayProjectileVelocity({ x: 130, y: 95, velocityX: 0, velocityY: 0 }, { x: 120, y: 100 }), { velocityX: 10, velocityY: -5 });
+    assert.deepEqual(replayProjectileVelocity({ x: 130, y: 95, velocityX: 7, velocityY: 2 }, { x: 120, y: 100 }), { velocityX: 7, velocityY: 2 });
 });
 
 test("fighter and entity labels derive from calculated snapshot fields", () => {

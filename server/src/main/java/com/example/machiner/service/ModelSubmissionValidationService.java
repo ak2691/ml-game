@@ -21,21 +21,17 @@ import tools.jackson.databind.json.JsonMapper;
 public class ModelSubmissionValidationService {
 
     private static final String VALIDATOR_VERSION = "bot-brain-submission-v1";
-    private static final String ARCHITECTURE_VERSION = "deterministic-logic-v1";
-    private static final String FEATURE_SCHEMA_VERSION = "duel-logic-features-v1";
-    private static final String ACTION_SCHEMA_VERSION = "melee-logic-actions-v1";
-    private static final String MODEL_FORMAT = "logic-blocks-v1";
+    private static final String BRAIN_SCHEMA_VERSION = "melee-logic-tree-v1";
     private static final int MAX_VERSION_LENGTH = 50;
     private static final int MAX_TRAINING_SESSION_ID_LENGTH = 100;
     private static final int MAX_CLIENT_BUILD_VERSION_LENGTH = 100;
-    private static final int MAX_MODEL_HASH_LENGTH = 128;
     private static final int MAX_SELECTED_CLASS_LENGTH = 40;
-    private static final int MAX_BASE_MODEL_ARTIFACT_ID_LENGTH = 100;
     private static final int MAX_LOGIC_BLOCKS = 100;
     private static final int MAX_TOTAL_CONDITIONS = 300;
+    private static final int MAX_CUSTOM_VARIABLE_SLOTS = 100;
+    private static final int CUSTOM_INTEGER_LIMIT = 99_999;
     private static final int MAX_CLUSTERS = 100;
     private static final int MAX_CONDITIONS_PER_BLOCK = MAX_TOTAL_CONDITIONS;
-    private static final int MAX_ROUND_TRAINING_STEPS = 0;
     private static final Set<String> MOVEMENT_ACTIONS = Set.of(
             "none",
             "move_walk",
@@ -91,15 +87,22 @@ public class ModelSubmissionValidationService {
     private static final Set<String> FIREBALL_CONDITIONS = Set.of("my_fireball_ready", "my_fireball_cooldown");
     private static final Set<String> STUN_CONDITIONS = Set.of("my_stun_ready", "my_stun_cooldown");
     private static final Set<String> NUMBER_VARIABLES = Set.of(
+            "match.elapsedSeconds",
             "my.hp",
+            "my.damageTakenLastTick",
+            "my.hpNetChangeLastTick",
             "my.x",
             "my.y",
             "opponent.hp",
+            "opponent.damageTakenLastTick",
+            "opponent.hpNetChangeLastTick",
             "opponent.x",
             "opponent.y",
             "target.distance",
             "target.hp",
             "target.bearingFromMe",
+            "target.movementDirection",
+            "target.velocity",
             "my.bearingFromTarget",
             "target.relativeBearing",
             "target.relativeBearingClockwise",
@@ -204,55 +207,21 @@ public class ModelSubmissionValidationService {
             return response(false, errors, warnings, null, null, false);
         }
 
-        requireExact(errors, payload.getArchitectureVersion(), "architectureVersion", ARCHITECTURE_VERSION);
-        requireExact(errors, payload.getFeatureSchemaVersion(), "featureSchemaVersion", FEATURE_SCHEMA_VERSION);
-        requireExact(errors, payload.getActionSchemaVersion(), "actionSchemaVersion", ACTION_SCHEMA_VERSION);
-        requireExact(errors, payload.getModelFormat(), "modelFormat", MODEL_FORMAT);
-
-        rejectTooLong(errors, payload.getArchitectureVersion(), "architectureVersion", MAX_VERSION_LENGTH);
-        rejectTooLong(errors, payload.getFeatureSchemaVersion(), "featureSchemaVersion", MAX_VERSION_LENGTH);
-        rejectTooLong(errors, payload.getActionSchemaVersion(), "actionSchemaVersion", MAX_VERSION_LENGTH);
-        rejectTooLong(errors, payload.getModelFormat(), "modelFormat", MAX_VERSION_LENGTH);
         rejectTooLong(errors, payload.getTrainingSessionId(), "trainingSessionId", MAX_TRAINING_SESSION_ID_LENGTH);
         rejectTooLong(errors, payload.getSelectedClass(), "selectedClass", MAX_SELECTED_CLASS_LENGTH);
-        rejectTooLong(errors, payload.getBaseModelArtifactId(),
-                "baseModelArtifactId", MAX_BASE_MODEL_ARTIFACT_ID_LENGTH);
-        rejectTooLong(errors, payload.getModelHash(), "modelHash", MAX_MODEL_HASH_LENGTH);
         rejectTooLong(errors, payload.getClientBuildVersion(), "clientBuildVersion", MAX_CLIENT_BUILD_VERSION_LENGTH);
 
         requireText(errors, payload.getTrainingSessionId(), "trainingSessionId");
         requireUuid(errors, payload.getTrainingSessionId(), "trainingSessionId");
-        rejectNegative(errors, payload.getTrainingDurationMs(), "trainingDurationMs");
-        rejectNegative(errors, payload.getTrainingSteps(), "trainingSteps");
-        requireNonNegative(errors, payload.getTrainingSteps(), "trainingSteps");
-        if (payload.getTrainingSteps() != null && payload.getTrainingSteps() != MAX_ROUND_TRAINING_STEPS) {
-            errors.add("trainingSteps must be 0 for deterministic bot brains");
-        }
-        if (requireObject(errors, payload.getTrainingMetrics(), "trainingMetrics")) {
-            validateRoundTrainingLimits(errors, payload.getTrainingMetrics());
-        }
         CombatRules classSpec = combatClasses.duelV1();
-        validateBrain(errors, submittedBrain(payload), classSpec);
-
-        String computedHash = null;
         JsonNode brain = submittedBrain(payload);
-        if (brain != null && brain.isObject()) {
-            computedHash = computeModelHash(brain, errors);
-        }
-
-        if (hasText(payload.getModelHash())) {
-            if (computedHash != null && !payload.getModelHash().equals(computedHash)) {
-                warnings.add("submitted modelHash does not match server-computed hash; server hash is authoritative");
-            }
-        } else {
-            warnings.add("modelHash was not provided; server computed one from submitted brain");
-        }
+        validateBrain(errors, brain, classSpec);
 
         if (payload.getTrainingDurationMs() == null) {
             warnings.add("trainingDurationMs will be computed from the server-owned training session");
         }
 
-        return response(errors.isEmpty(), errors, warnings, payload.getModelHash(), computedHash,
+        return response(errors.isEmpty(), errors, warnings, null, null,
                 payload.getTrainingDurationMs() != null);
     }
 
@@ -285,8 +254,12 @@ public class ModelSubmissionValidationService {
 
         if (!brain.hasNonNull("version") || !brain.get("version").isTextual()) {
             errors.add("brain.version must be a string");
+        } else if (!BRAIN_SCHEMA_VERSION.equals(brain.get("version").asText())) {
+            errors.add("brain.version must be " + BRAIN_SCHEMA_VERSION);
         }
         validateLoadout(errors, brain.get("loadout"));
+        validateCustomVariables(errors, brain);
+        if (countConditionSlots(brain) > MAX_TOTAL_CONDITIONS) errors.add("brain exceeds the total condition limit including derived custom variables");
         validateActionsAgainstLoadout(errors, brain);
 
         JsonNode columns = brain.get("columns");
@@ -387,6 +360,128 @@ public class ModelSubmissionValidationService {
             }
         }
         if (total > 12) errors.add("brain.loadout.statPoints exceeds the match budget of 12");
+    }
+
+    private void validateCustomVariables(List<String> errors, JsonNode brain) {
+        JsonNode variables = brain.get("customVariables");
+        if (variables == null) return;
+        if (!variables.isArray()) {
+            errors.add("brain.customVariables must be an array");
+            return;
+        }
+        Set<String> ids = new HashSet<>();
+        Set<String> names = new HashSet<>();
+        java.util.Map<String, String> types = new java.util.HashMap<>();
+        for (int index = 0; index < variables.size(); index++) {
+            JsonNode variable = variables.get(index);
+            String path = "brain.customVariables[" + index + "]";
+            if (variable == null || !variable.isObject()) { errors.add(path + " must be an object"); continue; }
+            String id = variable.path("id").asText("");
+            String name = variable.path("name").asText("").trim();
+            String type = variable.path("valueType").asText("");
+            if (!id.matches("custom\\.[A-Za-z0-9_.-]{1,52}") || !ids.add(id)) errors.add(path + ".id must be a unique custom variable id");
+            if (!name.matches("[A-Za-z][A-Za-z0-9 _-]{0,39}") || !names.add(name.toLowerCase(java.util.Locale.ROOT))) errors.add(path + ".name must be valid and unique");
+            if (!Set.of("number", "boolean").contains(type)) errors.add(path + ".valueType must be number or boolean");
+            types.put(id, type);
+            JsonNode initial = variable.get("initialValue");
+            if ("number".equals(type) && (initial == null || !initial.isIntegralNumber() || initial.asLong() < -CUSTOM_INTEGER_LIMIT || initial.asLong() > CUSTOM_INTEGER_LIMIT)) errors.add(path + ".initialValue must be an integer from -99999 to 99999");
+            if ("boolean".equals(type) && (initial == null || !initial.isBoolean())) errors.add(path + ".initialValue must be boolean");
+            JsonNode conditions = variable.get("conditions");
+            if (conditions != null && !conditions.isArray()) errors.add(path + ".conditions must be an array");
+            if (conditions != null && conditions.isArray() && !"boolean".equals(type)) errors.add(path + ".conditions are only allowed for boolean variables");
+        }
+        if (countVariableSlots(brain) > MAX_CUSTOM_VARIABLE_SLOTS) errors.add("brain.customVariables exceeds the 100 variable-slot limit");
+        validateCustomReferences(errors, brain, "brain", types);
+    }
+
+    private int countVariableSlots(JsonNode brain) {
+        JsonNode variables = brain != null ? brain.get("customVariables") : null;
+        if (variables == null || !variables.isArray()) return 0;
+        int total = 0;
+        for (JsonNode variable : variables) {
+            total += 1;
+            JsonNode conditions = variable.get("conditions");
+            if ("boolean".equals(variable.path("valueType").asText("")) && conditions != null && conditions.isArray()) total += conditions.size();
+        }
+        return total;
+    }
+
+    private int countConditionSlots(JsonNode brain) {
+        java.util.Map<String, Integer> costs = new java.util.HashMap<>();
+        JsonNode variables = brain.get("customVariables");
+        int total = 0;
+        if (variables != null && variables.isArray()) for (JsonNode variable : variables) {
+            JsonNode conditions = variable.get("conditions");
+            int derived = "boolean".equals(variable.path("valueType").asText("")) && conditions != null && conditions.isArray() ? conditions.size() : 0;
+            costs.put(variable.path("id").asText(""), 1 + derived);
+            total += derived;
+        }
+        for (String root : java.util.List.of("columns", "blocks", "clusters")) total += countBrainConditionSlots(brain.get(root), costs);
+        return total;
+    }
+
+    private int countBrainConditionSlots(JsonNode node, java.util.Map<String, Integer> costs) {
+        if (node == null) return 0;
+        if (node.isArray()) { int total = 0; for (JsonNode child : node) total += countBrainConditionSlots(child, costs); return total; }
+        if (!node.isObject()) return 0;
+        if ("expression".equals(node.path("type").asText(""))) {
+            Set<String> referenced = new HashSet<>();
+            String left = node.path("left").asText("");
+            if (costs.containsKey(left)) referenced.add(left);
+            JsonNode right = node.get("right");
+            if (right != null && "variable".equals(right.path("type").asText(""))) {
+                String rightId = right.path("value").asText("");
+                if (costs.containsKey(rightId)) referenced.add(rightId);
+            }
+            return referenced.isEmpty() ? 1 : referenced.stream().mapToInt(costs::get).sum();
+        }
+        if (node.hasNonNull("type") && !Set.of("number", "boolean", "variable", "range").contains(node.path("type").asText(""))) return 1;
+        int total = 0;
+        for (var entry : node.properties()) total += countBrainConditionSlots(entry.getValue(), costs);
+        return total;
+    }
+
+    private void validateCustomReferences(List<String> errors, JsonNode node, String path, java.util.Map<String, String> types) {
+        if (node == null) return;
+        if (node.isArray()) { for (int i = 0; i < node.size(); i++) validateCustomReferences(errors, node.get(i), path + "[" + i + "]", types); return; }
+        if (!node.isObject()) return;
+        if ("expression".equals(node.hasNonNull("type") ? node.get("type").asText() : "")) {
+            String left = node.hasNonNull("left") ? node.get("left").asText() : "";
+            if (left.startsWith("custom.") && !types.containsKey(left)) errors.add(path + ".left references an unknown custom variable");
+            if (types.containsKey(left)) {
+                JsonNode rightNode = node.get("right");
+                boolean booleanOperand = rightNode != null && "boolean".equals(rightNode.hasNonNull("type") ? rightNode.get("type").asText() : "");
+                if (booleanOperand != "boolean".equals(types.get(left))) errors.add(path + ".left uses the wrong custom variable type");
+            }
+            JsonNode rightNode = node.get("right");
+            String right = rightNode != null && rightNode.hasNonNull("value") ? rightNode.get("value").asText() : "";
+            if (right.startsWith("custom.") && !"number".equals(types.get(right))) errors.add(path + ".right.value must reference an existing integer custom variable");
+        }
+        if ("variable".equals(node.hasNonNull("action") ? node.get("action").asText() : "")) {
+            String id = node.hasNonNull("variableId") ? node.get("variableId").asText() : "";
+            String type = types.get(id);
+            if (type == null) errors.add(path + ".variableId references an unknown custom variable");
+            JsonNode value = node.get("value");
+            String operation = node.hasNonNull("operation") ? node.get("operation").asText() : "set";
+            if ("boolean".equals(type) && (value == null || !value.isBoolean() || !"set".equals(operation))) errors.add(path + " boolean variable actions must set true or false");
+            JsonNode terms = node.get("terms");
+            if ("number".equals(type) && terms != null) {
+                if (!terms.isArray() || terms.isEmpty() || terms.size() > 20) errors.add(path + ".terms must contain 1 to 20 operands");
+                else for (int index = 0; index < terms.size(); index++) {
+                    JsonNode term = terms.get(index);
+                    String termOperation = term.path("operator").asText("");
+                    if (!Set.of("set", "add", "subtract").contains(termOperation) || (index > 0 && "set".equals(termOperation))) errors.add(path + ".terms[" + index + "].operator is invalid");
+                    JsonNode operand = term.path("operand");
+                    String operandType = operand.path("type").asText("");
+                    if ("number".equals(operandType) && (!operand.path("value").isIntegralNumber() || Math.abs(operand.path("value").asLong()) > CUSTOM_INTEGER_LIMIT)) errors.add(path + ".terms[" + index + "].operand is invalid");
+                    else if ("variable".equals(operandType)) {
+                        String operandId = operand.path("value").asText("");
+                        if (!(NUMBER_VARIABLES.contains(operandId) || "number".equals(types.get(operandId)))) errors.add(path + ".terms[" + index + "].operand must reference a numeric variable");
+                    } else if (!"number".equals(operandType)) errors.add(path + ".terms[" + index + "].operand.type is invalid");
+                }
+            } else if ("number".equals(type) && (value == null || !value.isIntegralNumber() || Math.abs(value.asLong()) > CUSTOM_INTEGER_LIMIT || !Set.of("set", "add", "subtract").contains(operation))) errors.add(path + " integer variable action is invalid");
+        }
+        node.properties().forEach(entry -> validateCustomReferences(errors, entry.getValue(), path + "." + entry.getKey(), types));
     }
 
     private void validateActionsAgainstLoadout(List<String> errors, JsonNode brain) {
@@ -526,7 +621,8 @@ public class ModelSubmissionValidationService {
                     }
                 }
                 String head = validationActionHead(action);
-                if (!heads.add(head)) errors.add(path + " has multiple " + head + " actions");
+                String headKey = "variable".equals(head) ? head + ":" + entry.path("variableId").asText(index + "") : head;
+                if (!heads.add(headKey)) errors.add(path + " has multiple " + head + " actions");
             }
             if (heads.contains("none") && heads.size() > 1) errors.add(path + " cannot combine N/A with executable actions");
         } else if (!block.hasNonNull("action") || !block.get("action").isTextual()) {
@@ -561,6 +657,7 @@ public class ModelSubmissionValidationService {
 
     private String validationActionHead(String action) {
         if ("none".equals(action)) return "none";
+        if ("variable".equals(action)) return "variable";
         if ("rotate_toward_enemy".equals(action)) return "rotation";
         if (MOVEMENT_ACTIONS.contains(action)) return "movement";
         return "ability";
@@ -568,6 +665,7 @@ public class ModelSubmissionValidationService {
 
     private void validateActionAllowed(List<String> errors, String action, String path, CombatRules classSpec) {
         Set<String> allowed = new HashSet<>(MOVEMENT_ACTIONS);
+        allowed.add("variable");
         if (classSpec.canSwing()) allowed.add("swing");
         if (classSpec.canBlock()) allowed.add("block");
         if (classSpec.canDash()) allowed.addAll(DASH_ACTIONS);
@@ -595,6 +693,8 @@ public class ModelSubmissionValidationService {
         }
         String type = typeNode.asText();
         validateTarget(errors, condition.get("target"), path + ".target");
+        validateTarget(errors, condition.get("leftTarget"), path + ".leftTarget");
+        validateTarget(errors, condition.get("rightTarget"), path + ".rightTarget");
         if ("expression".equals(type)) {
             validateExpressionCondition(errors, condition, path, classSpec);
             return;
@@ -651,7 +751,9 @@ public class ModelSubmissionValidationService {
             return;
         }
         String left = leftNode.asText();
-        String valueType = variableValueType(left);
+        String valueType = left.startsWith("custom.")
+                ? ("boolean".equals(condition.path("right").path("type").asText()) ? "boolean" : "number")
+                : variableValueType(left);
         if (valueType == null) {
             errors.add(path + ".left is not an allowed variable");
             return;
@@ -668,12 +770,12 @@ public class ModelSubmissionValidationService {
 
         JsonNode comparatorNode = condition.get("comparator");
         String comparator = comparatorNode != null && comparatorNode.isTextual() ? comparatorNode.asText() : "";
-        boolean directionRange = "target.bearingFromMe".equals(left);
+        boolean directionRange = Set.of("target.bearingFromMe", "target.movementDirection").contains(left);
         if ("number".equals(valueType) && !directionRange && !NUMERIC_COMPARATORS.contains(comparator)) {
             errors.add(path + ".comparator is not allowed for number variables");
         }
         if (directionRange && !"range".equals(comparator)) {
-            errors.add(path + ".comparator must be range for target.bearingFromMe");
+            errors.add(path + ".comparator must be range for directional variables");
         }
         if ("boolean".equals(valueType) && !BOOLEAN_COMPARATORS.contains(comparator)) {
             errors.add(path + ".comparator is not allowed for boolean variables");
@@ -705,8 +807,14 @@ public class ModelSubmissionValidationService {
             } else if ("number".equals(rightType)) {
                 if (rightValue == null || !rightValue.isNumber()) {
                     errors.add(path + ".right.value must be a number");
+                } else if (!Double.isFinite(rightValue.asDouble()) || rightValue.asDouble() < -CUSTOM_INTEGER_LIMIT || rightValue.asDouble() > CUSTOM_INTEGER_LIMIT) {
+                    errors.add(path + ".right.value must be between -99999 and 99999");
+                } else if (Set.of("match.elapsedSeconds", "target.age").contains(left) && rightValue.asDouble() < 0) {
+                    errors.add(path + ".right.value cannot be negative for time variables");
                 } else if ("target.age".equals(left) && Math.abs(rightValue.asDouble() * 10.0 - Math.rint(rightValue.asDouble() * 10.0)) > 1e-9) {
                     errors.add(path + ".right.value for target.age must use 0.1 second increments");
+                } else if ("match.elapsedSeconds".equals(left) && Math.abs(rightValue.asDouble() * 10.0 - Math.rint(rightValue.asDouble() * 10.0)) > 1e-9) {
+                    errors.add(path + ".right.value for elapsed time must use 0.1 second increments");
                 }
             } else if ("variable".equals(rightType)) {
                 if (rightValue == null || !rightValue.isTextual() || !"number".equals(variableValueType(rightValue.asText()))) {

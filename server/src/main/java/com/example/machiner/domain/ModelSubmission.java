@@ -17,7 +17,7 @@ import org.hibernate.annotations.JdbcTypeCode;
 import org.hibernate.type.SqlTypes;
 
 @Entity
-@Table(name = "model_submissions")
+@Table(name = "bot_brain_submissions")
 public class ModelSubmission {
 
     @Id
@@ -31,43 +31,24 @@ public class ModelSubmission {
     @Column(name = "match_id")
     private UUID matchId;
 
-    @Column(name = "architecture_version", nullable = false, length = 50)
-    private String architectureVersion;
-
-    @Column(name = "feature_schema_version", nullable = false, length = 50)
-    private String featureSchemaVersion;
-
-    @Column(name = "action_schema_version", nullable = false, length = 50)
-    private String actionSchemaVersion = "movement-v1";
+    @Column(name = "brain_schema_version", nullable = false, length = 50)
+    private String brainSchemaVersion;
 
     @Column(name = "training_session_id", length = 100)
     private String trainingSessionId;
 
-    @Column(name = "training_duration_ms")
-    private Integer trainingDurationMs;
-
-    @Column(name = "training_steps")
-    private Integer trainingSteps;
+    @Column(name = "submission_fingerprint", length = 64)
+    private String requestFingerprint;
 
     @Column(name = "selected_class", length = 40)
     private String selectedClass;
-
-    @Column(name = "base_model_artifact_id", length = 100)
-    private String baseModelArtifactId;
-
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "training_metrics", nullable = false)
-    private String trainingMetrics = "{}";
-
-    @Column(name = "model_hash", length = 128)
-    private String modelHash;
 
     @Column(name = "client_build_version", length = 100)
     private String clientBuildVersion;
 
     @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "model_artifacts", nullable = false)
-    private String modelArtifacts = "{}";
+    @Column(name = "brain_payload", nullable = false)
+    private String brainPayload = "{}";
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 30)
@@ -103,28 +84,12 @@ public class ModelSubmission {
         this.matchId = matchId;
     }
 
-    public String getArchitectureVersion() {
-        return architectureVersion;
+    public String getBrainSchemaVersion() {
+        return brainSchemaVersion;
     }
 
-    public void setArchitectureVersion(String architectureVersion) {
-        this.architectureVersion = architectureVersion;
-    }
-
-    public String getFeatureSchemaVersion() {
-        return featureSchemaVersion;
-    }
-
-    public void setFeatureSchemaVersion(String featureSchemaVersion) {
-        this.featureSchemaVersion = featureSchemaVersion;
-    }
-
-    public String getActionSchemaVersion() {
-        return actionSchemaVersion;
-    }
-
-    public void setActionSchemaVersion(String actionSchemaVersion) {
-        this.actionSchemaVersion = actionSchemaVersion;
+    public void setBrainSchemaVersion(String brainSchemaVersion) {
+        this.brainSchemaVersion = brainSchemaVersion;
     }
 
     public String getTrainingSessionId() {
@@ -135,20 +100,12 @@ public class ModelSubmission {
         this.trainingSessionId = trainingSessionId;
     }
 
-    public Integer getTrainingDurationMs() {
-        return trainingDurationMs;
+    public String getRequestFingerprint() {
+        return requestFingerprint;
     }
 
-    public void setTrainingDurationMs(Integer trainingDurationMs) {
-        this.trainingDurationMs = trainingDurationMs;
-    }
-
-    public Integer getTrainingSteps() {
-        return trainingSteps;
-    }
-
-    public void setTrainingSteps(Integer trainingSteps) {
-        this.trainingSteps = trainingSteps;
+    public void setRequestFingerprint(String requestFingerprint) {
+        this.requestFingerprint = requestFingerprint;
     }
 
     public String getSelectedClass() {
@@ -159,30 +116,6 @@ public class ModelSubmission {
         this.selectedClass = selectedClass;
     }
 
-    public String getBaseModelArtifactId() {
-        return baseModelArtifactId;
-    }
-
-    public void setBaseModelArtifactId(String baseModelArtifactId) {
-        this.baseModelArtifactId = baseModelArtifactId;
-    }
-
-    public String getTrainingMetrics() {
-        return trainingMetrics;
-    }
-
-    public void setTrainingMetrics(String trainingMetrics) {
-        this.trainingMetrics = trainingMetrics;
-    }
-
-    public String getModelHash() {
-        return modelHash;
-    }
-
-    public void setModelHash(String modelHash) {
-        this.modelHash = modelHash;
-    }
-
     public String getClientBuildVersion() {
         return clientBuildVersion;
     }
@@ -191,12 +124,12 @@ public class ModelSubmission {
         this.clientBuildVersion = clientBuildVersion;
     }
 
-    public String getModelArtifacts() {
-        return modelArtifacts;
+    public String getBrainPayload() {
+        return brainPayload;
     }
 
-    public void setModelArtifacts(String modelArtifacts) {
-        this.modelArtifacts = modelArtifacts;
+    public void setBrainPayload(String brainPayload) {
+        this.brainPayload = brainPayload;
     }
 
     public ModelSubmissionStatus getStatus() {

@@ -1,3 +1,5 @@
+import { API_BASE_URL, apiUrl } from "../config/api";
+
 const CSRF_COOKIE_NAME = "XSRF-TOKEN";
 const CSRF_HEADER_NAME = "X-XSRF-TOKEN";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "TRACE"]);
@@ -20,12 +22,13 @@ export function csrfHeaders(method = "GET") {
     return token ? { [CSRF_HEADER_NAME]: token } : {};
 }
 
-export async function ensureCsrfHeaders(method = "GET", apiBaseUrl = "http://localhost:8080") {
+export async function ensureCsrfHeaders(method = "GET", apiBaseUrl = API_BASE_URL) {
     if (SAFE_METHODS.has(method.toUpperCase())) {
         return {};
     }
 
-    const response = await fetch(`${apiBaseUrl}/api/auth/csrf`, {
+    const csrfUrl = apiBaseUrl ? `${apiBaseUrl.replace(/\/+$/, "")}/api/auth/csrf` : apiUrl("/api/auth/csrf");
+    const response = await fetch(csrfUrl, {
         cache: "no-store",
         credentials: "include",
     });

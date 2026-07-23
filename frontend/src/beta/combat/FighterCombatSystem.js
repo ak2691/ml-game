@@ -5,7 +5,7 @@ import { angleDelta, clamp, normalizeAngle, rayIntersectsCircle } from "./geomet
 import { ARENA_HEIGHT_UNITS, ARENA_WIDTH_UNITS } from "../modelPayloads/arenaConstants.js";
 import { abilityContract, EFFECT_TYPES } from "./AbilityContracts.js";
 import { resolveShieldInteraction } from "./ShieldSystem.js";
-import { ignoresHostileEffects } from "./DefensiveState.js";
+import { ignoresHostileEffects, isAliveFighter, withoutFighterStatuses } from "./DefensiveState.js";
 
 export function resolveBasicCombat(first, second) {
     let nextFirst = { ...first, gunBounceRay: null, gunRayLength: GUN_RANGE };
@@ -33,7 +33,7 @@ export function applyStunHits(fighters) {
         if (!attacker) continue;
         const currentDefender = nextFighters.find((fighter) => fighter.id === defender.id) ?? defender;
         let nextDefender = applyDamageToShape(currentDefender, STUN_DAMAGE * attackerDamageMultiplier(attacker));
-        nextDefender = {
+        if (isAliveFighter(nextDefender)) nextDefender = {
             ...nextDefender,
             stunnedMs: Math.max(currentDefender.stunnedMs ?? 0, STUN_DURATION_MS),
             dashActiveMs: 0,
@@ -56,18 +56,14 @@ export function applyDamageToShape(shape, damage) {
     let remaining = Math.max(0, Number(damage) || 0);
     if (Number(shape.abilityActiveMs?.reactive_armor ?? 0) > 0) remaining *= 0.5;
     const hp = remaining > 0 ? Math.max(0, Number(shape.hp ?? shape.maxHp ?? 100) - remaining) : shape.hp;
-    return {
+    const appliedDamage = Math.max(0, Number(shape.hp ?? shape.maxHp ?? 100) - Number(hp));
+    const damaged = {
         ...shape,
         hp,
+        damageTakenThisTick: Number(shape.damageTakenThisTick ?? 0) + appliedDamage,
         hitFlashMs: 200,
-        ...(hp <= 0 ? {
-            slowedMs: 0,
-            burnRemainingMs: 0,
-            bleedRemainingMs: 0,
-            stunnedMs: 0,
-            silencedMs: 0,
-        } : {}),
     };
+    return hp <= 0 ? withoutFighterStatuses(damaged) : damaged;
 }
 
 export function settlePendingHealing(shape) {
@@ -162,7 +158,7 @@ function applyPrototypeTrigger(attacker, defender) {
         directHitShield = shield;
         nextDefender = shield.fighter;
         if (!shield.preventedEffects.has(EFFECT_TYPES.DAMAGE)) [nextAttacker, nextDefender] = applyDamageFromShapes(nextAttacker, nextDefender, baseDamage * attackerDamageMultiplier(attacker));
-        if (ability === "heavy_slash" && !shield.preventedEffects.has(EFFECT_TYPES.DEBUFF)) nextDefender = {
+        if (ability === "heavy_slash" && isAliveFighter(nextDefender) && !shield.preventedEffects.has(EFFECT_TYPES.DEBUFF)) nextDefender = {
             ...nextDefender,
             bleedRemainingMs: Number(stats.bleedDurationMs ?? 5000),
             // A second slash refreshes duration but does not postpone the
@@ -173,12 +169,12 @@ function applyPrototypeTrigger(attacker, defender) {
             bleedDamage: Math.max(Number(nextDefender.bleedDamage ?? 0), Number(stats.bleedDamage ?? 2)),
         };
         if (ability === "quick_jab") nextAttacker = { ...nextAttacker, quickJabComboCount: Math.min(7, Number(attacker.quickJabComboCount ?? 0) + 1), quickJabComboMs: Number(stats.comboWindowMs ?? 1000) };
-        if (ability === "rail_shot" && !shield.preventedEffects.has(EFFECT_TYPES.DEBUFF)) nextDefender = { ...nextDefender, shockRemainingMs: Number(stats.shockDurationMs ?? 3000), shockTickElapsedMs: 0 };
+        if (ability === "rail_shot" && isAliveFighter(nextDefender) && !shield.preventedEffects.has(EFFECT_TYPES.DEBUFF)) nextDefender = { ...nextDefender, shockRemainingMs: Number(stats.shockDurationMs ?? 3000), shockTickElapsedMs: 0 };
     }
     if (ability === "concussive_shot" && effectiveDirectHit) {
         // Damage and slow share the one shield resolution performed above.
         const shield = directHitShield ?? resolveAbilityShield(defender, attacker, ability);
-        if (!shield.preventedEffects.has(EFFECT_TYPES.DEBUFF)) nextDefender = { ...nextDefender, slowedMs: Math.max(nextDefender.slowedMs ?? 0, 2000) };
+        if (isAliveFighter(nextDefender) && !shield.preventedEffects.has(EFFECT_TYPES.DEBUFF)) nextDefender = { ...nextDefender, slowedMs: Math.max(nextDefender.slowedMs ?? 0, 2000) };
     }
     if (ability === "repulsor_burst" && inRange && acceptsHostileEffects) {
         const shield = resolveAbilityShield(nextDefender, attacker, ability);

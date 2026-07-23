@@ -31,7 +31,7 @@ public class MatchParticipant {
     private AppUser user;
 
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "model_submission_id")
+    @JoinColumn(name = "bot_brain_submission_id")
     private ModelSubmission modelSubmission;
 
     @Column(nullable = false)

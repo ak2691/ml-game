@@ -4,8 +4,13 @@ import { BOT_ABILITIES, PROTOTYPE_ABILITY_STATS, PROTOTYPE_ACTION_TO_ABILITY, en
 
 export const MELEE_STRATEGY_VERSION = "melee-logic-tree-v1";
 export const MAX_LOGIC_BLOCKS = 100;
+export const MAX_BRAIN_NODES = 100;
 export const MAX_TOTAL_CONDITIONS = 300;
-export const MAX_CLUSTERS = 100;
+export const MAX_CUSTOM_VARIABLE_SLOTS = 100;
+export const MAX_VARIABLE_ACTION_TERMS = 20;
+export const CUSTOM_INTEGER_MIN = -99_999;
+export const CUSTOM_INTEGER_MAX = 99_999;
+export const MAX_CLUSTERS = MAX_BRAIN_NODES;
 export const MAX_CONDITIONS_PER_BLOCK = MAX_TOTAL_CONDITIONS;
 export const MIN_PRIORITY = 1;
 export const MAX_PRIORITY = 10;
@@ -111,6 +116,7 @@ export const CONDITION_DEFINITIONS = Object.freeze([...LEGACY_ABILITY_FLAG_CONDI
 
 export const ACTION_TYPES = Object.freeze([
     { id: "none", label: "N/A (Nested Conditions Only)", head: "none" },
+    { id: "variable", label: "Variable: Modify Custom Variable", head: "variable", variableAction: true },
     { id: "move_walk", label: "Movement: Walk", head: "movement", movementConfig: true, coordinateTarget: true },
     /* Legacy directional IDs remain normalization-only and are not exposed by the picker. */
     { id: "move_inward", label: "Move: Radially Inward (Engage)", head: "movement", legacy: true },
@@ -235,18 +241,25 @@ const GENERIC_ABILITY_STATE_VARIABLES = [
 ];
 
 const ALL_STATE_VARIABLES = [
+    variableDefinition("match.elapsedSeconds", "Time Since Start", "number", { group: "General", min: 0, max: 99_999, defaultValue: 0, suffix: "s", step: 0.1 }),
     variableDefinition("my.hp", "My HP", "number", { group: "My Bot", min: 0, max: 100 }),
+    variableDefinition("my.damageTakenLastTick", "My Damage Taken Last Tick", "number", { group: "My Bot", min: 0, max: 300, suffix: "damage" }),
+    variableDefinition("my.hpNetChangeLastTick", "My Net HP Change Last Tick", "number", { group: "My Bot", min: -300, max: 300, suffix: "HP" }),
     variableDefinition("my.x", "My X Position", "number", { group: "My Bot", min: 0, max: ARENA_WIDTH_UNITS, suffix: "units" }),
     variableDefinition("my.y", "My Y Position", "number", { group: "My Bot", min: 0, max: ARENA_HEIGHT_UNITS, suffix: "units" }),
     variableDefinition("opponent.hp", "Opponent HP", "number", { group: "Opponent", min: 0, max: 100 }),
+    variableDefinition("opponent.damageTakenLastTick", "Opponent Damage Taken Last Tick", "number", { group: "Opponent", min: 0, max: 300, suffix: "damage" }),
+    variableDefinition("opponent.hpNetChangeLastTick", "Opponent Net HP Change Last Tick", "number", { group: "Opponent", min: -300, max: 300, suffix: "HP" }),
     variableDefinition("opponent.x", "Opponent X Position", "number", { group: "Opponent", min: 0, max: ARENA_WIDTH_UNITS, suffix: "units" }),
     variableDefinition("opponent.y", "Opponent Y Position", "number", { group: "Opponent", min: 0, max: ARENA_HEIGHT_UNITS, suffix: "units" }),
     variableDefinition("target.distance", "Target Distance", "number", { group: "Target", min: 0, max: 700, supportsTarget: true }),
     variableDefinition("target.hp", "Target HP", "number", { group: "Target", min: 0, max: 300, supportsTarget: true }),
     variableDefinition("target.alive", "Target Alive", "boolean", { group: "Target", supportsTarget: true }),
     variableDefinition("target.bearingFromMe", "Target Direction From Me", "number", { group: "Rotation", min: -360, max: 360, suffix: "deg", supportsTarget: true, rangeOnly: true, maxRange: 360, defaultMin: -30, defaultMax: 30 }),
+    variableDefinition("target.movementDirection", "Target Movement Direction", "number", { group: "Movement", min: -360, max: 360, suffix: "deg", supportsTarget: true, rangeOnly: true, maxRange: 360, defaultMin: -30, defaultMax: 30 }),
+    variableDefinition("target.velocity", "Target Velocity", "number", { group: "Movement", min: 0, max: 100, suffix: "units/tick", supportsTarget: true }),
     variableDefinition("my.bearingFromTarget", "My Direction From Target", "number", { group: "Rotation", min: 0, max: 360, suffix: "deg", supportsTarget: true }),
-    variableDefinition("target.relativeBearing", "Target Relative Bearing", "number", { group: "Rotation", min: -180, max: 180, suffix: "deg", supportsTarget: true }),
+    variableDefinition("target.relativeBearing", "Target Bearing Difference (Shortest)", "number", { group: "Rotation", min: 0, max: 180, suffix: "deg", supportsTarget: true }),
     variableDefinition("target.relativeBearingClockwise", "Target Bearing Difference (Clockwise)", "number", { group: "Rotation", min: 0, max: 360, suffix: "deg", supportsTarget: true }),
     variableDefinition("target.relativeBearingCounterclockwise", "Target Bearing Difference (Counterclockwise)", "number", { group: "Rotation", min: 0, max: 360, suffix: "deg", supportsTarget: true }),
     variableDefinition("target.facing", "Target Facing", "number", { group: "Rotation", min: 0, max: 360, suffix: "deg", supportsTarget: true, fighterTargetOnly: true }),
@@ -306,6 +319,7 @@ export function createDefaultMeleeStrategyConfiguration() {
         columns: [],
         blocks: [],
         clusters: [],
+        customVariables: [],
     };
 }
 
@@ -334,7 +348,8 @@ export function createLogicBlock(conditionType = "enemy_distance_lt", action = "
 }
 
 export function createExpressionCondition(left = "target.distance") {
-    const variable = STATE_VARIABLE_BY_ID.get(left) ?? STATE_VARIABLES[0];
+    const suppliedDefinition = left && typeof left === "object" ? left : null;
+    const variable = suppliedDefinition ?? STATE_VARIABLE_BY_ID.get(left) ?? STATE_VARIABLES[0];
     return normalizeExpressionCondition({
         type: "expression",
         left: variable.id,
@@ -345,7 +360,7 @@ export function createExpressionCondition(left = "target.distance") {
             ? { type: "boolean", value: true }
             : { type: "number", value: variable.defaultValue },
         ...(variable.supportsAbility ? { ability: defaultAbilityForVariable(variable) } : {}),
-        ...(variable.supportsTarget ? { target: variable.defaultTarget ?? "opponent" } : {}),
+        ...(variable.supportsTarget ? { leftTarget: variable.defaultTarget ?? "opponent" } : {}),
     });
 }
 
@@ -365,12 +380,14 @@ export function createLogicCluster(conditionType = "my_hp_lt") {
 }
 
 export function normalizeMeleeStrategyConfiguration(configuration) {
+    const customVariables = normalizeCustomVariables(customVariablesWithReferencedActions(configuration));
     if (Array.isArray(configuration?.columns)) {
-        const remaining = { actions: MAX_LOGIC_BLOCKS, conditions: MAX_TOTAL_CONDITIONS };
+        const derivedConditionCount = customVariables.reduce((total, variable) => total + (variable.conditions?.length ?? 0), 0);
+        const remaining = { actions: MAX_LOGIC_BLOCKS, conditions: Math.max(0, MAX_TOTAL_CONDITIONS - derivedConditionCount) };
         const columns = configuration.columns.slice(0, MAX_CLUSTERS).map((column, columnIndex) => {
             return normalizeColumn(column, columnIndex, remaining);
         });
-        return { version: MELEE_STRATEGY_VERSION, columns, blocks: [], clusters: [], legacyMode: false };
+        return { version: MELEE_STRATEGY_VERSION, columns, blocks: [], clusters: [], customVariables, legacyMode: false };
     }
     const sourceBlocks = Array.isArray(configuration?.blocks)
         ? configuration.blocks
@@ -402,6 +419,7 @@ export function normalizeMeleeStrategyConfiguration(configuration) {
         columns,
         blocks,
         clusters,
+        customVariables,
         legacyMode: true,
     };
 }
@@ -475,8 +493,7 @@ function normalizeBranches(branches, remaining) {
         const children = normalizeBranches(branch?.children, remaining);
         normalized.push({
             ...normalizedBlock,
-            action: actions[0].action,
-            actionTarget: actions[0].actionTarget,
+            ...actions[0],
             actions,
             branchType: index === 0 ? "if" : branch?.branchType === "else" ? "else" : "else_if",
             createdOrder: finiteOrder(branch?.createdOrder, index),
@@ -495,6 +512,27 @@ export function validateMeleeStrategyConfiguration(configuration) {
     const normalized = normalizeMeleeStrategyConfiguration(configuration);
     const errors = [];
     const warnings = [];
+    const rawVariables = Array.isArray(configuration?.customVariables) ? configuration.customVariables : [];
+    const variableSlots = countVariableSlots(configuration);
+    if (variableSlots > MAX_CUSTOM_VARIABLE_SLOTS) errors.push(`Custom variables use ${variableSlots}/${MAX_CUSTOM_VARIABLE_SLOTS} variable slots.`);
+    const conditionSlots = countConditionSlots(configuration);
+    if (conditionSlots > MAX_TOTAL_CONDITIONS) errors.push(`Conditions use ${conditionSlots}/${MAX_TOTAL_CONDITIONS} condition slots.`);
+    const names = new Set();
+    rawVariables.forEach((variable, index) => {
+        const name = String(variable?.name ?? "").trim();
+        if (!/^[A-Za-z][A-Za-z0-9 _-]{0,39}$/.test(name)) errors.push(`Custom variable ${index + 1} has an invalid name.`);
+        const key = name.toLocaleLowerCase();
+        if (names.has(key)) errors.push(`Custom variable name "${name}" is duplicated.`);
+        names.add(key);
+        if (variable?.valueType === "boolean" && Array.isArray(variable.conditions)) {
+            variable.conditions.forEach((condition) => {
+                if (condition?.type === "expression" && String(condition.left ?? "").startsWith("custom.")) {
+                    const referenced = rawVariables.find((candidate) => candidate.id === condition.left);
+                    if (!referenced) errors.push(`Custom variable "${name}" references a missing variable.`);
+                }
+            });
+        }
+    });
     const entries = normalizedBlockEntries(normalized);
     if (!entries.some((entry) => isTrainableBlock(entry.block))) {
         errors.push("Add at least one bot brain action before submitting.");
@@ -580,14 +618,19 @@ export function selectMeleeStrategyIntent(configuration, payload) {
 export function selectMeleeStrategyActionPlan(configuration, payload) {
     const normalized = normalizeMeleeStrategyConfiguration(configuration);
     const state = stateFromPayload(payload);
+    prepareCustomVariables(state, normalized.customVariables);
     const selected = selectPriorityCandidates(normalized, state);
     const primary = selected
         .flatMap(({ block }) => normalizedBlockActions(block).map((entry) => ({ ...block, ...entry })))
-        .find((block) => isTrainableBlock(block) && actionExecutableNow(block, state)) ?? null;
+        .find((block) => block.action !== "variable" && isTrainableBlock(block) && actionExecutableNow(block, state)) ?? null;
     const plan = { primary };
     for (const { block: selectedBlock } of selected) {
         for (const block of normalizedBlockActions(selectedBlock).map((entry) => ({ ...selectedBlock, ...entry }))) {
         if (!actionExecutableNow(block, state)) continue;
+        if (block.action === "variable") {
+            applyVariableAction(block, state, normalized.customVariables);
+            continue;
+        }
         const action = ACTION_BY_ID.get(block.action) ?? ACTION_TYPES[0];
         if (actionSupportsTarget(action)
             && !(action.coordinateTarget && block.targetMode === "coordinates")
@@ -771,6 +814,94 @@ function selectPriorityCandidates(normalized, state) {
     return matching;
 }
 
+function customVariablesWithReferencedActions(configuration) {
+    const variables = Array.isArray(configuration?.customVariables)
+        ? [...configuration.customVariables]
+        : [];
+    const knownIds = new Set(variables.map((variable) => String(variable?.id ?? "")));
+    const knownNames = new Set(variables.map((variable) => String(variable?.name ?? "").trim().toLocaleLowerCase()));
+
+    const addVariable = (id, valueType) => {
+        if (!/^custom\.[A-Za-z0-9_.-]{1,52}$/.test(id) || knownIds.has(id)) return;
+        knownIds.add(id);
+        let nameIndex = variables.length + 1;
+        while (knownNames.has(`variable ${nameIndex}`)) nameIndex += 1;
+        const name = `Variable ${nameIndex}`;
+        knownNames.add(name.toLocaleLowerCase());
+        variables.push({
+            id,
+            name,
+            valueType,
+            initialValue: valueType === "boolean" ? false : 0,
+        });
+    };
+
+    const visit = (node) => {
+        if (Array.isArray(node)) {
+            node.forEach(visit);
+            return;
+        }
+        if (!node || typeof node !== "object") return;
+        if (node.action === "variable") {
+            const id = String(node.variableId ?? "");
+            addVariable(id, typeof node.value === "boolean" ? "boolean" : "number");
+        }
+        if (node.type === "expression" || node.left) {
+            addVariable(String(node.left ?? ""), node?.right?.type === "boolean" ? "boolean" : "number");
+            if (node?.right?.type === "variable") addVariable(String(node.right.value ?? ""), "number");
+        }
+        if (node?.operand?.type === "variable") {
+            addVariable(String(node.operand.value ?? ""), "number");
+        }
+        Object.values(node).forEach(visit);
+    };
+
+    visit(configuration?.columns);
+    visit(configuration?.blocks);
+    visit(configuration?.clusters);
+    (configuration?.customVariables ?? []).forEach((variable) => visit(variable?.conditions));
+    return variables;
+}
+
+export function customVariableDefinitions(configuration) {
+    return normalizeCustomVariables(configuration?.customVariables).map((variable) => variableDefinition(
+        variable.id,
+        variable.name,
+        variable.valueType,
+        { group: "Custom Variables", min: CUSTOM_INTEGER_MIN, max: CUSTOM_INTEGER_MAX, defaultValue: variable.initialValue },
+    ));
+}
+
+function normalizeCustomVariables(source) {
+    if (!Array.isArray(source)) return [];
+    const used = new Set();
+    let slots = 0;
+    const result = [];
+    for (let index = 0; index < source.length && slots < MAX_CUSTOM_VARIABLE_SLOTS; index += 1) {
+        const candidate = source[index] ?? {};
+        const valueType = candidate.valueType === "boolean" ? "boolean" : "number";
+        const name = String(candidate.name ?? `Variable ${index + 1}`).trim().slice(0, 40) || `Variable ${index + 1}`;
+        let id = String(candidate.id ?? `custom.${name.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "_")}`).slice(0, 60);
+        if (!id.startsWith("custom.") || used.has(id)) id = `custom.variable_${index + 1}`;
+        used.add(id);
+        const availableConditions = Math.max(0, MAX_CUSTOM_VARIABLE_SLOTS - slots - 1);
+        const conditions = valueType === "boolean" && Array.isArray(candidate.conditions)
+            ? normalizeConditions(candidate.conditions).slice(0, availableConditions)
+            : [];
+        slots += 1 + conditions.length;
+        result.push({
+            id,
+            name,
+            valueType,
+            initialValue: valueType === "boolean"
+                ? normalizeBoolean(candidate.initialValue, false)
+                : clamp(Math.trunc(Number(candidate.initialValue) || 0), CUSTOM_INTEGER_MIN, CUSTOM_INTEGER_MAX),
+            ...(conditions.length ? { conditions } : {}),
+        });
+    }
+    return result;
+}
+
 export function moveLogicColumnPriority(columns, columnIndex, delta) {
     if (!Array.isArray(columns)) return [];
     const targetIndex = columnIndex + delta;
@@ -928,7 +1059,10 @@ function withConditionJoin(normalized, source, index) {
 }
 
 function normalizeExpressionCondition(condition) {
-    const leftDefinition = STATE_VARIABLE_BY_ID.get(condition?.left) ?? STATE_VARIABLES[0];
+    const customLeft = String(condition?.left ?? "").startsWith("custom.")
+        ? variableDefinition(String(condition.left), String(condition.left), condition?.right?.type === "boolean" ? "boolean" : "number", { min: CUSTOM_INTEGER_MIN, max: CUSTOM_INTEGER_MAX })
+        : null;
+    const leftDefinition = STATE_VARIABLE_BY_ID.get(condition?.left) ?? customLeft ?? STATE_VARIABLES[0];
     const comparator = leftDefinition.rangeOnly ? "range" : normalizeComparator(condition?.comparator, leftDefinition.valueType);
     const right = normalizeRightOperand(condition?.right, leftDefinition, condition?.comparator);
     return {
@@ -937,11 +1071,18 @@ function normalizeExpressionCondition(condition) {
         comparator,
         right,
         ...(leftDefinition.supportsAbility ? { ability: normalizeAbilityId(condition?.ability, leftDefinition) } : {}),
-        ...(expressionSupportsTarget(leftDefinition, right) ? {
-            target: normalizeTarget(
-                condition?.target,
-                expressionDefaultTarget(leftDefinition, right),
-                expressionTargetGroup(leftDefinition, right),
+        ...(leftDefinition.supportsTarget ? {
+            leftTarget: normalizeTarget(
+                condition?.leftTarget ?? condition?.target,
+                leftDefinition.defaultTarget ?? "opponent",
+                leftDefinition.targetGroup ?? null,
+            ),
+        } : {}),
+        ...(right?.type === "variable" && STATE_VARIABLE_BY_ID.get(right.value)?.supportsTarget ? {
+            rightTarget: normalizeTarget(
+                condition?.rightTarget ?? condition?.target,
+                STATE_VARIABLE_BY_ID.get(right.value).defaultTarget ?? "opponent",
+                STATE_VARIABLE_BY_ID.get(right.value).targetGroup ?? null,
             ),
         } : {}),
     };
@@ -971,8 +1112,8 @@ function normalizeRightOperand(right, leftDefinition, legacyComparator) {
     }
     if (right?.type === "variable") {
         const rightDefinition = STATE_VARIABLE_BY_ID.get(right.value);
-        if (rightDefinition?.valueType === "number") {
-            return { type: "variable", value: rightDefinition.id };
+        if (rightDefinition?.valueType === "number" || String(right.value ?? "").startsWith("custom.")) {
+            return { type: "variable", value: rightDefinition?.id ?? String(right.value) };
         }
     }
     const value = clamp(Number(right?.value ?? leftDefinition.defaultValue), leftDefinition.min, leftDefinition.max);
@@ -981,23 +1122,6 @@ function normalizeRightOperand(right, leftDefinition, legacyComparator) {
         type: "number",
         value: step > 0 ? Number((Math.round(value / step) * step).toFixed(10)) : value,
     };
-}
-
-function expressionSupportsTarget(leftDefinition, right) {
-    if (leftDefinition.supportsTarget) return true;
-    return right?.type === "variable" && Boolean(STATE_VARIABLE_BY_ID.get(right.value)?.supportsTarget);
-}
-
-function expressionTargetGroup(leftDefinition, right) {
-    return leftDefinition.targetGroup
-        ?? (right?.type === "variable" ? STATE_VARIABLE_BY_ID.get(right.value)?.targetGroup : null)
-        ?? null;
-}
-
-function expressionDefaultTarget(leftDefinition, right) {
-    return leftDefinition.defaultTarget
-        ?? (right?.type === "variable" ? STATE_VARIABLE_BY_ID.get(right.value)?.defaultTarget : null)
-        ?? "opponent";
 }
 
 function normalizeConditionType(type) {
@@ -1029,8 +1153,9 @@ function normalizedBlockActions(block) {
         const migratedEntry = migrateActionEntry(entry);
         const action = ACTION_BY_ID.get(migratedEntry.action) ?? ACTION_TYPES[0];
         const head = actionExecutionHead(action);
-        if (seenHeads.has(head)) continue;
-        seenHeads.add(head);
+        const headKey = head === "variable" ? `${head}:${String(migratedEntry.variableId ?? normalized.length)}` : head;
+        if (seenHeads.has(headKey)) continue;
+        seenHeads.add(headKey);
         normalized.push({
             action: action.id,
             actionTarget: normalizeActionTarget(migratedEntry.actionTarget, action.id),
@@ -1050,6 +1175,16 @@ function normalizedBlockActions(block) {
                     : "target",
                 targetX: clamp(Number(migratedEntry?.targetX ?? ARENA_WIDTH_UNITS / 2), 0, ARENA_WIDTH_UNITS),
                 targetY: clamp(Number(migratedEntry?.targetY ?? ARENA_HEIGHT_UNITS / 2), 0, ARENA_HEIGHT_UNITS),
+            } : {}),
+            ...(action.variableAction ? {
+                variableId: String(migratedEntry.variableId ?? ""),
+                operation: ["set", "add", "subtract"].includes(migratedEntry.operation) ? migratedEntry.operation : "set",
+                value: migratedEntry.value === true || migratedEntry.value === false
+                    ? migratedEntry.value
+                    : clamp(Math.trunc(Number(migratedEntry.value) || 0), CUSTOM_INTEGER_MIN, CUSTOM_INTEGER_MAX),
+                ...(!(migratedEntry.value === true || migratedEntry.value === false) ? {
+                    terms: normalizeVariableActionTerms(migratedEntry),
+                } : {}),
             } : {}),
         });
     }
@@ -1072,6 +1207,7 @@ function migrateActionEntry(entry = {}) {
 }
 
 export function actionExecutionHead(action) {
+    if (action?.head === "variable") return "variable";
     if (action?.head === "movement") return "movement";
     if (action?.head === "rotation") return "rotation";
     if (action?.head === "dash") return "dash";
@@ -1101,9 +1237,65 @@ function blockHasExecutableAction(block, state) {
     return normalizedBlockActions(block).some((entry) => actionExecutableNow({ ...block, ...entry }, state));
 }
 
+function normalizeVariableActionTerms(entry) {
+    const legacy = [{
+        operator: entry.operation ?? "set",
+        operand: { type: "number", value: entry.value ?? 0 },
+    }];
+    const source = Array.isArray(entry.terms) && entry.terms.length ? entry.terms : legacy;
+    return source.slice(0, MAX_VARIABLE_ACTION_TERMS).map((term, index) => {
+        const operand = term?.operand ?? term ?? {};
+        const variable = operand.type === "variable" && STATE_VARIABLE_BY_ID.get(String(operand.value))?.valueType === "number"
+            ? String(operand.value)
+            : operand.type === "variable" && String(operand.value).startsWith("custom.")
+                ? String(operand.value)
+                : null;
+        return {
+            operator: index === 0 && term?.operator === "set"
+                ? "set"
+                : term?.operator === "subtract" ? "subtract" : "add",
+            operand: variable
+                ? { type: "variable", value: variable, ...(operand.target ? { target: String(operand.target) } : {}) }
+                : { type: "number", value: clamp(Math.trunc(Number(operand.value) || 0), CUSTOM_INTEGER_MIN, CUSTOM_INTEGER_MAX) },
+        };
+    });
+}
+
+export function countVariableSlots(configuration) {
+    return (configuration?.customVariables ?? []).reduce((slots, variable) => (
+        slots + 1 + (variable?.valueType === "boolean" && Array.isArray(variable.conditions) ? variable.conditions.length : 0)
+    ), 0);
+}
+
+export function countConditionSlots(configuration) {
+    const variableCosts = new Map((configuration?.customVariables ?? []).map((variable) => [
+        variable.id,
+        1 + (variable?.valueType === "boolean" && Array.isArray(variable.conditions) ? variable.conditions.length : 0),
+    ]));
+    const conditionCost = (condition) => {
+        const referenced = new Set([condition?.left, condition?.right?.type === "variable" ? condition.right.value : null]
+            .filter((id) => variableCosts.has(id)));
+        return referenced.size ? [...referenced].reduce((total, id) => total + variableCosts.get(id), 0) : 1;
+    };
+    const countBranches = (branches = []) => branches.reduce((total, branch) => (
+        total + (branch.conditions ?? []).reduce((sum, condition) => sum + conditionCost(condition), 0)
+            + countBranches(branch.children)
+    ), 0);
+    const derivedConditions = (configuration?.customVariables ?? []).reduce((total, variable) => (
+        total + (variable?.valueType === "boolean" ? variable.conditions?.length ?? 0 : 0)
+    ), 0);
+    return derivedConditions
+        + (configuration?.columns ?? []).reduce((total, column) => total + countBranches(column.branches), 0)
+        + (configuration?.blocks ?? []).reduce((total, block) => total + (block.conditions ?? []).reduce((sum, condition) => sum + conditionCost(condition), 0), 0)
+        + (configuration?.clusters ?? []).reduce((total, cluster) => total
+            + (cluster.conditions ?? []).reduce((sum, condition) => sum + conditionCost(condition), 0)
+            + (cluster.blocks ?? []).reduce((sum, block) => sum + (block.conditions ?? []).reduce((conditionTotal, condition) => conditionTotal + conditionCost(condition), 0), 0), 0);
+}
+
 function actionExecutableNow(block, state) {
     const action = ACTION_BY_ID.get(block?.action) ?? ACTION_TYPES[0];
     if (action.id === "none") return false;
+    if (action.id === "variable") return true;
     if (actionSupportsTarget(action)
         && !(action.movementConfig && block.movementMode !== "target")
         && !(action.coordinateTarget && block.targetMode === "coordinates")
@@ -1141,21 +1333,24 @@ function validateThresholdRange(errors, conditions, blockLabel, lowerType, upper
 }
 
 function evaluateExpressionCondition(condition, state) {
-    const leftDefinition = STATE_VARIABLE_BY_ID.get(condition.left);
+    const customDefinition = state.customVariableDefinitions?.find((candidate) => candidate.id === condition.left);
+    const leftDefinition = STATE_VARIABLE_BY_ID.get(condition.left) ?? (customDefinition ? variableDefinition(customDefinition.id, customDefinition.name, customDefinition.valueType, { min: CUSTOM_INTEGER_MIN, max: CUSTOM_INTEGER_MAX }) : null);
     if (!leftDefinition) return false;
-    const left = resolveStateVariable(state, condition, leftDefinition.id);
+    const left = resolveStateVariable(state, condition, leftDefinition.id, condition.leftTarget ?? condition.target);
     if (leftDefinition.rangeOnly) {
         return condition.right?.type === "range"
             && directionFallsInRange(left, Number(condition.right.min), Number(condition.right.max));
     }
     const right = condition.right?.type === "variable"
-        ? resolveStateVariable(state, condition, condition.right.value)
+        ? resolveStateVariable(state, condition, condition.right.value, condition.rightTarget ?? condition.target)
         : condition.right?.value;
     return compareValues(left, condition.comparator, right, leftDefinition.valueType);
 }
 
-function resolveStateVariable(state, condition, variableId) {
-    const target = resolveMeleeStrategyTarget(state, condition.target ?? "opponent");
+function resolveStateVariable(state, condition, variableId, targetId = condition.target) {
+    if (String(variableId).startsWith("custom.")) return resolveCustomVariable(state, variableId);
+    const normalizedTargetId = targetId ?? "opponent";
+    const target = resolveMeleeStrategyTarget(state, normalizedTargetId);
     const selectedAbility = String(condition.ability ?? "");
     const genericAbility = /^(my|opponent)\.selectedAbility(Ready|CooldownMs|Ammo|Preparing|PreparationMs)$/.exec(variableId);
     if (genericAbility) {
@@ -1176,10 +1371,15 @@ function resolveStateVariable(state, condition, variableId) {
         return state.objects.some((object) => object?.abilityId === dynamic[3] && object?.owner === dynamic[1]);
     }
     switch (variableId) {
+        case "match.elapsedSeconds": return millisecondsToSeconds(state.player.matchElapsedMs);
         case "my.hp": return state.player.hp;
+        case "my.damageTakenLastTick": return Number(state.player.damageTakenLastTick ?? 0);
+        case "my.hpNetChangeLastTick": return Number(state.player.hpNetChangeLastTick ?? 0);
         case "my.x": return state.player.x ?? 0;
         case "my.y": return state.player.y ?? 0;
         case "opponent.hp": return state.opponent?.hp ?? 0;
+        case "opponent.damageTakenLastTick": return Number(state.opponent?.damageTakenLastTick ?? 0);
+        case "opponent.hpNetChangeLastTick": return Number(state.opponent?.hpNetChangeLastTick ?? 0);
         case "opponent.x": return state.opponent?.x ?? 0;
         case "opponent.y": return state.opponent?.y ?? 0;
         case "my.slowedMs": return millisecondsToSeconds(state.player.slowedMs);
@@ -1191,12 +1391,20 @@ function resolveStateVariable(state, condition, variableId) {
             const bearing = target ? compassBearing(state.player, target) : 0;
             return bearing > 180 ? bearing - 360 : bearing;
         }
+        case "target.movementDirection": {
+            const velocityX = Number(target?.velocityX ?? 0);
+            const velocityY = Number(target?.velocityY ?? 0);
+            if (Math.hypot(velocityX, velocityY) <= 0.001) return Number.NaN;
+            const bearing = compassRotation(Math.atan2(velocityY, velocityX) * 180 / Math.PI);
+            return bearing > 180 ? bearing - 360 : bearing;
+        }
+        case "target.velocity": return target ? Math.hypot(Number(target.velocityX ?? 0), Number(target.velocityY ?? 0)) : 0;
         case "my.bearingFromTarget": return target ? compassBearing(target, state.player) : 0;
-        case "target.relativeBearing": return target ? signedAngleDelta(state.player?.rotation ?? 0, worldRotation(compassBearing(state.player, target))) : 0;
+        case "target.relativeBearing": return target ? Math.abs(signedAngleDelta(state.player?.rotation ?? 0, worldRotation(compassBearing(state.player, target)))) : 0;
         case "target.relativeBearingClockwise": return target ? clockwiseAngleDelta(state.player?.rotation ?? 0, worldRotation(compassBearing(state.player, target))) : 0;
         case "target.relativeBearingCounterclockwise": return target ? clockwiseAngleDelta(worldRotation(compassBearing(state.player, target)), state.player?.rotation ?? 0) : 0;
         case "target.facing": return target === state.opponent ? compassRotation(target.rotation) : 0;
-        case "target.count": return matchingStrategyTargets(state, condition.target).length;
+        case "target.count": return matchingStrategyTargets(state, normalizedTargetId).length;
         case "target.age": return millisecondsToSeconds(target?.ageMs ?? target?.timerMs ?? 0);
         case "my.edgeDistance": return edgeDistance(state.player);
         case "target.edgeDistance": return target ? edgeDistance(target) : 0;
@@ -1261,6 +1469,49 @@ function selectedAbilityCooldownMs(fighter, ability) {
         shoot_fireball: fighter?.fireballCooldownRemainingMs, stun: fighter?.stunCooldownRemainingMs,
     };
     return Number(ability in cooldowns ? cooldowns[ability] : fighter?.abilityCooldowns?.[ability]) || 0;
+}
+
+function prepareCustomVariables(state, definitions) {
+    if (!state.player.customVariables || typeof state.player.customVariables !== "object") state.player.customVariables = {};
+    state.customVariableDefinitions = definitions;
+    definitions.forEach((definition) => {
+        if (!(definition.id in state.player.customVariables)) state.player.customVariables[definition.id] = definition.initialValue;
+    });
+}
+
+function resolveCustomVariable(state, id, resolving = state.resolvingCustomVariables ?? new Set()) {
+    const definition = state.customVariableDefinitions?.find((candidate) => candidate.id === id);
+    if (!definition) return undefined;
+    if (definition.valueType === "boolean" && definition.conditions?.length) {
+        if (resolving.has(id)) return false;
+        resolving.add(id);
+        const result = evaluateConditionList(definition.conditions, { ...state, resolvingCustomVariables: resolving });
+        resolving.delete(id);
+        return result;
+    }
+    return state.player.customVariables?.[id] ?? definition.initialValue;
+}
+
+function applyVariableAction(block, state, definitions) {
+    // Older editor nodes could visually select the first variable without
+    // persisting its id. Keep those saved brains functional after the UI fix.
+    const definition = definitions.find((candidate) => candidate.id === block.variableId)
+        ?? (!block.variableId ? definitions[0] : null);
+    if (!definition || definition.conditions?.length) return;
+    if (definition.valueType === "boolean") {
+        state.player.customVariables[definition.id] = Boolean(block.value);
+        return;
+    }
+    const current = Number(state.player.customVariables[definition.id] ?? definition.initialValue);
+    const terms = Array.isArray(block.terms) && block.terms.length ? block.terms : normalizeVariableActionTerms(block);
+    let next = terms[0]?.operator === "set" ? 0 : current;
+    for (const term of terms) {
+        const amount = term.operand?.type === "variable"
+            ? Number(resolveStateVariable(state, { target: term.operand.target }, term.operand.value, term.operand.target)) || 0
+            : Number(term.operand?.value) || 0;
+        next += term.operator === "subtract" ? -amount : amount;
+    }
+    state.player.customVariables[definition.id] = clamp(Math.trunc(next), CUSTOM_INTEGER_MIN, CUSTOM_INTEGER_MAX);
 }
 
 function directionFallsInRange(value, start, end) {
@@ -1365,7 +1616,7 @@ export function resolveMeleeStrategyTarget(state, target) {
         candidates.sort(targetOrderComparator(order, state?.player));
         return candidates[ordinal - 1] ?? null;
     }
-    if (target === "opponent") return (state?.opponent?.hp ?? 0) > 0 ? state.opponent : null;
+    if (target === "opponent") return state?.opponent ?? null;
     if (target === "my_core") target = `core_${state?.player?.slot ?? 1}`;
     if (target === "opponent_core") target = `core_${state?.opponent?.slot ?? 2}`;
     if (target === "defender_core") target = "core_1";
@@ -1424,7 +1675,7 @@ export function resolveMeleeStrategyTarget(state, target) {
 
 function matchingStrategyTargets(state, target) {
     const base = String(target ?? "").split(":")[0];
-    if (base === "opponent") return (state?.opponent?.hp ?? 0) > 0 ? [state.opponent] : [];
+    if (base === "opponent") return state?.opponent ? [state.opponent] : [];
     const typeByTarget = {
         orbital_zone: "orbitalMarker", opponent_grenade: "grenade", opponent_fireball: "fireball",
         opponent_concussive_shot: "concussiveShot", opponent_proximity_mine: "proximityMine",

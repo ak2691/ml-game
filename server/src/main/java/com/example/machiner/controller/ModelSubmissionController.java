@@ -35,16 +35,11 @@ public class ModelSubmissionController {
         ModelSubmissionValidationResponseDTO validation = modelSubmissionService.submit(payload, authentication);
 
         log.info(
-                "Bot brain submission persisted. id={}, accepted={}, session={}, architecture={}, features={}, actions={}, steps={}, submittedHash={}, computedHash={}",
+                "Bot brain submission persisted. id={}, accepted={}, session={}, brainSchemaVersion={}",
                 validation.getModelSubmissionId(),
                 validation.isAccepted(),
                 payload == null ? null : payload.getTrainingSessionId(),
-                payload == null ? null : payload.getArchitectureVersion(),
-                payload == null ? null : payload.getFeatureSchemaVersion(),
-                payload == null ? null : payload.getActionSchemaVersion(),
-                payload == null ? null : payload.getTrainingSteps(),
-                payload == null ? null : payload.getModelHash(),
-                validation.getComputedModelHash());
+                payload == null || payload.getBrain() == null ? null : payload.getBrain().path("version").asText(null));
 
         return ResponseEntity
                 .status(validation.isAccepted() ? HttpStatus.ACCEPTED : HttpStatus.BAD_REQUEST)

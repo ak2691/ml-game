@@ -5,11 +5,13 @@ import ProtectedRoute from './auth/ProtectedRoute'
 import HomePage from './pages/HomePage'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
-import { loadBotRoom, loadMatchmaking } from './routeLoaders'
+import { loadBotRoom, loadMatchmaking, loadProfile } from './routeLoaders'
 import './App.css'
 
 const BetaModel = lazy(loadBotRoom)
 const MatchmakingPage = lazy(loadMatchmaking)
+const ProfilePage = lazy(loadProfile)
+const TutorialPage = lazy(() => import('./tutorial/TutorialPage'))
 
 function RouteLoadingFallback() {
   return (
@@ -49,10 +51,26 @@ function App() {
               )}
             />
             <Route
+              path="/tutorial"
+              element={(
+                <ProtectedRoute>
+                  <TutorialPage />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
               path="/matchmaking"
               element={(
                 <ProtectedRoute>
                   <MatchmakingPage />
+                </ProtectedRoute>
+              )}
+            />
+            <Route
+              path="/profile"
+              element={(
+                <ProtectedRoute>
+                  <ProfilePage />
                 </ProtectedRoute>
               )}
             />

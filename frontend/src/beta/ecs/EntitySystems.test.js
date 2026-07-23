@@ -6,12 +6,14 @@ import { tickFighterStatus } from "./FighterStatusSystem.js";
 import { applyFighterAction } from "./ActionExecutionSystem.js";
 import { tickProjectileWorld } from "./ProjectileSystem.js";
 import { combatVisualRemainingMs, gunRayOpacity, healthBarPercent, prototypeVisualOpacity, swordSweepAngle } from "../combat/visualState.js";
-import { applyDamageToShape, isSwingHitting, resolvePrototypeCombat, settlePendingHealing } from "../combat/FighterCombatSystem.js";
+import { applyDamageToShape, isSwingHitting, resolveBasicCombat, resolvePrototypeCombat, settlePendingHealing } from "../combat/FighterCombatSystem.js";
 import { buildDeterministicLogicAction } from "../../logic/ArenaActionPlanner.js";
 import { buildStatePayload } from "../modelPayloads/strategyStatePayload.js";
 import { abilityDefinition, shouldInterpolateAbilityVisual } from "../loadout/BotLoadout.js";
 import { ABILITY_CONTRACTS, DELIVERY_TYPES, EFFECT_TYPES, SHIELD_CHARGE_COSTS, SHIELD_MODES } from "../combat/AbilityContracts.js";
 import { resolveShieldInteraction } from "../combat/ShieldSystem.js";
+import { fighterStatusLabels } from "../pixi/pixiVisualState.js";
+import { resetFighterShape } from "../modelPayloads/arenaShapes.js";
 
 const noDamageCombat = {
     applyDamageToShape: (fighter, damage) => ({ ...fighter, hp: Math.max(0, fighter.hp - damage) }),
@@ -24,6 +26,28 @@ const noDamageCombat = {
     grenadeDamageToFighter: () => 0,
     overlapsShape: () => false,
 };
+
+test("resetting fighter stats clears every transient status effect", () => {
+    const reset = resetFighterShape({
+        id: "main",
+        combatClass: "custom",
+        x: 400,
+        y: 400,
+        bleedRemainingMs: 5000,
+        shockRemainingMs: 2000,
+        nullZoneSilenced: true,
+        movementLockMs: 1000,
+        temporalRewindMs: 3000,
+        pendingHealing: 25,
+    });
+
+    assert.equal(reset.bleedRemainingMs, 0);
+    assert.equal(reset.shockRemainingMs, 0);
+    assert.equal(reset.nullZoneSilenced, false);
+    assert.equal(reset.movementLockMs, 0);
+    assert.equal(reset.temporalRewindMs, 0);
+    assert.equal(reset.pendingHealing, 0);
+});
 
 test("ability metadata separates instantaneous effects from interpolated motion", () => {
     for (const id of ["swing", "fire_gun", "pistol_shot", "rail_shot", "concussive_shot"]) {
@@ -84,6 +108,17 @@ test("hunter drone pursues targets at 4.5 units per arena tick", () => {
     assert.equal(result.entities[0].y, 200);
 });
 
+test("hunter drone retains the replay-matched shot visual timer", () => {
+    const drone = { ...hunterDroneEntity({ id: "owner", slot: 1, x: 100, y: 200, rotation: 0 }), shotCooldownMs: 0 };
+    const target = { id: "target", slot: 2, x: 200, y: 200, size: 60, hp: 100 };
+    const result = tickAbilityEntityWorld({
+        entities: [drone], fighters: [target], grenades: [], fireballs: [],
+        stepMs: 50, width: 1000, height: 800,
+    }, noDamageCombat);
+
+    assert.equal(result.entities[0].shotVisualMs, 250);
+});
+
 test("entity-hit records trigger an armed mine through the entity system", () => {
     const mine = { ...proximityMineEntity({ id: "owner", slot: 1, x: 100, y: 100, rotation: 0 }), traveled: 176, armed: true };
     const fighter = { id: "attacker", slot: 2, x: 500, y: 500, size: 50, hp: 100, entityHitIds: [mine.id] };
@@ -118,6 +153,7 @@ test("DOT, direct damage, and healing on one tick resolve as one net hp change",
     const afterDirectHit = applyDamageToShape(afterDots, 8);
     const result = settlePendingHealing(afterDirectHit);
     assert.equal(result.hp, 53);
+    assert.equal(result.damageTakenThisTick, 12);
 });
 
 test("burn and bleed discard a pending tick when duration expires first", () => {
@@ -367,6 +403,75 @@ test("fire gun activation retains a fading ray for the active duration", () => {
     assert.equal(gunRayOpacity(faded), 0.5);
 });
 
+test("a dead fighter clears one-tick attacks while their visuals finish", () => {
+    const dead = {
+        id: "main", slot: 1, x: 100, y: 100, size: 60, rotation: 0,
+        hp: 0, maxHp: 100, abilities: ["fire_gun", "rail_shot"],
+        gunActiveMs: 900, gunShotActive: true,
+        swingActiveMs: 300, swingTriggered: true,
+        stunActiveMs: 250, stunCastActive: true,
+        prototypeTriggered: "rail_shot",
+        prototypeSpawn: { id: "already-spawned" },
+        preparingAbility: "concussive_shot",
+        preparingMs: 250,
+    };
+
+    const next = applyFighterAction(dead, { gun: 1 }, 50, noDamageCombat.applyDamageToShape);
+
+    assert.equal(next.gunShotActive, false);
+    assert.equal(next.swingTriggered, false);
+    assert.equal(next.stunCastActive, false);
+    assert.equal(next.prototypeTriggered, null);
+    assert.equal(next.prototypeSpawn, null);
+    assert.equal(next.preparingAbility, "concussive_shot");
+    assert.equal(next.preparingMs, 250);
+    assert.equal(next.gunActiveMs, 850);
+    assert.ok(gunRayOpacity(next) > 0);
+});
+
+test("a ray from a fighter killed after firing cannot damage again", () => {
+    const attacker = {
+        id: "main", slot: 1, x: 100, y: 100, size: 60, rotation: 0,
+        hp: 0, maxHp: 100, abilities: ["fire_gun"], gunShotActive: true,
+        gunActiveMs: 900, attackDamageMultiplier: 1,
+    };
+    const defender = { id: "opponent-model", slot: 2, x: 200, y: 100, size: 60, hp: 100, maxHp: 100 };
+
+    const cleared = applyFighterAction(attacker, {}, 50, noDamageCombat.applyDamageToShape);
+    const [, afterCombat] = resolveBasicCombat(cleared, defender);
+
+    assert.equal(afterCombat.hp, 100);
+});
+
+test("death removes every active fighter status while preserving preparation and cooldowns", () => {
+    const fighter = {
+        id: "target", hp: 5, maxHp: 100,
+        slowedMs: 1000, silencedMs: 1000, nullZoneSilenced: true, stunnedMs: 1000,
+        movementLockMs: 300, shockRemainingMs: 3000, shockTickElapsedMs: 250,
+        burnRemainingMs: 3000, burnTickMs: 500, bleedRemainingMs: 4000, bleedTickMs: 750,
+        blockActiveMs: 1, abilityActiveMs: { reactive_armor: 2000 },
+        quickJabComboCount: 4, quickJabComboMs: 800,
+        temporalRewindMs: 2000, temporalRewindPulseMs: 300,
+        pendingHealing: 20, preparingAbility: "rail_shot", preparingMs: 450,
+        abilityCooldowns: { rail_shot: 5000 },
+    };
+
+    const dead = applyDamageToShape(fighter, 10);
+
+    assert.equal(dead.hp, 0);
+    assert.deepEqual(fighterStatusLabels(dead), []);
+    assert.deepEqual(dead.abilityActiveMs, {});
+    assert.equal(dead.nullZoneSilenced, false);
+    assert.equal(dead.shockRemainingMs, 0);
+    assert.equal(dead.burnRemainingMs, 0);
+    assert.equal(dead.bleedRemainingMs, 0);
+    assert.equal(dead.temporalRewindMs, 0);
+    assert.equal(dead.pendingHealing, 0);
+    assert.equal(dead.preparingAbility, "rail_shot");
+    assert.equal(dead.preparingMs, 450);
+    assert.equal(dead.abilityCooldowns.rail_shot, 5000);
+});
+
 test("an ALWAYS brain action reaches the real fire-gun executor", () => {
     const configuration = {
         version: "melee-logic-tree-v1",
@@ -431,6 +536,32 @@ test("projectile system returns net fighter damage and removes a colliding fireb
     assert.equal(result.fireballs.length, 0);
     assert.equal(result.fighters[1].hp, 85);
     assert.equal(result.fighters[1].burnRemainingMs > 0, true);
+});
+
+test("projectiles pass through dead fighters without applying damage or status", () => {
+    let world = {
+        fighters: [
+            { id: "owner", x: 50, y: 100, size: 60, hp: 100 },
+            { id: "dead", x: 150, y: 100, size: 60, hp: 0 },
+            { id: "living", x: 260, y: 100, size: 60, hp: 100 },
+        ],
+        grenades: [],
+        fireballs: [{ id: "passing-fireball", type: "fireball", ownerId: "owner", x: 120, y: 100, size: 30, velocityX: 5, velocityY: 0, traveled: 0, damageMultiplier: 1 }],
+        stepMs: 50,
+        width: 1000,
+        height: 800,
+    };
+
+    world = { ...world, ...tickProjectileWorld(world, noDamageCombat) };
+    assert.equal(world.fireballs.length, 1);
+    assert.equal(world.fighters[1].burnRemainingMs ?? 0, 0);
+
+    for (let tick = 0; tick < 25 && world.fireballs.length > 0; tick += 1) {
+        world = { ...world, ...tickProjectileWorld(world, noDamageCombat) };
+    }
+    assert.equal(world.fighters[1].hp, 0);
+    assert.equal(world.fighters[1].burnRemainingMs ?? 0, 0);
+    assert.equal(world.fighters[2].hp, 85);
 });
 
 test("shield blocks fireball damage and burn together", () => {

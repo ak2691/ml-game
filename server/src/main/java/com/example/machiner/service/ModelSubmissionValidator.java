@@ -12,10 +12,7 @@ public class ModelSubmissionValidator {
     private static final int MAX_VERSION_LENGTH = 50;
     private static final int MAX_TRAINING_SESSION_ID_LENGTH = 100;
     private static final int MAX_CLIENT_BUILD_VERSION_LENGTH = 100;
-    private static final int MAX_MODEL_HASH_LENGTH = 128;
     private static final int MAX_SELECTED_CLASS_LENGTH = 40;
-    private static final int MAX_BASE_MODEL_ARTIFACT_ID_LENGTH = 100;
-    private static final String LOGIC_ACTION_SCHEMA_VERSION = "melee-logic-actions-v1";
 
     private final JsonMapper jsonMapper;
 
@@ -35,26 +32,13 @@ public class ModelSubmissionValidator {
             errors.add("user is required");
         }
 
-        requireText(errors, submission.getArchitectureVersion(), "architectureVersion", MAX_VERSION_LENGTH);
-        requireText(errors, submission.getFeatureSchemaVersion(), "featureSchemaVersion", MAX_VERSION_LENGTH);
-        requireText(errors, submission.getActionSchemaVersion(), "actionSchemaVersion", MAX_VERSION_LENGTH);
-
-        if (hasText(submission.getActionSchemaVersion())
-                && !LOGIC_ACTION_SCHEMA_VERSION.equals(submission.getActionSchemaVersion())) {
-            errors.add("actionSchemaVersion is not supported");
-        }
-
-        rejectNegative(errors, submission.getTrainingDurationMs(), "trainingDurationMs");
-        rejectNegative(errors, submission.getTrainingSteps(), "trainingSteps");
+        requireText(errors, submission.getBrainSchemaVersion(), "brainSchemaVersion", MAX_VERSION_LENGTH);
 
         rejectTooLong(errors, submission.getTrainingSessionId(), "trainingSessionId", MAX_TRAINING_SESSION_ID_LENGTH);
         rejectTooLong(errors, submission.getSelectedClass(), "selectedClass", MAX_SELECTED_CLASS_LENGTH);
-        rejectTooLong(errors, submission.getBaseModelArtifactId(),
-                "baseModelArtifactId", MAX_BASE_MODEL_ARTIFACT_ID_LENGTH);
-        rejectTooLong(errors, submission.getModelHash(), "modelHash", MAX_MODEL_HASH_LENGTH);
         rejectTooLong(errors, submission.getClientBuildVersion(), "clientBuildVersion", MAX_CLIENT_BUILD_VERSION_LENGTH);
 
-        validateJson(errors, submission.getTrainingMetrics(), "trainingMetrics");
+        validateJson(errors, submission.getBrainPayload(), "brainPayload");
 
         return new ModelSubmissionValidationResult(errors);
     }
